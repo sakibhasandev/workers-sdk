@@ -1,10 +1,12 @@
+import { configFormat } from "@cloudflare/workers-utils";
+import { detectAgenticEnvironment } from "am-i-vibing";
 import chalk from "chalk";
+import ci from "ci-info";
 import { fetch } from "undici";
-import { configFormat } from "../config";
+import { telemetryCurrentAgentSkillsInstalled } from "../agents-skills-install";
 import isInteractive from "../is-interactive";
 import { logger } from "../logger";
 import { sniffUserAgent } from "../package-manager";
-import { CI, isPagesCI, isWorkersCI } from "./../is-ci";
 import {
 	getNodeVersion,
 	getOS,
@@ -17,34 +19,76 @@ import {
 	readMetricsConfig,
 	writeMetricsConfig,
 } from "./metrics-config";
+import type { CommandDefinition } from "../core/types";
 import type { MetricsConfigOptions } from "./metrics-config";
-import type { CommonEventProperties, Events } from "./types";
+import type {
+	CommonCommandEventProperties,
+	CommonEventProperties,
+	Events,
+} from "./types";
 
 const SPARROW_URL = "https://sparrow.cloudflare.com";
+
+// Module-level Set to track all pending requests across all dispatchers.
+// Promises are automatically removed from this Set once they settle.
+const pendingRequests = new Set<Promise<void>>();
+
+/**
+ * Returns a promise that resolves when all pending metrics requests have completed.
+ *
+ * The returned promise should be awaited before the process exits to ensure we don't drop any metrics.
+ */
+export function allMetricsDispatchesCompleted(): Promise<void> {
+	return Promise.allSettled(pendingRequests).then(() => {});
+}
 
 export function getMetricsDispatcher(options: MetricsConfigOptions) {
 	// The SPARROW_SOURCE_KEY will be provided at build time through esbuild's `define` option
 	// No events will be sent if the env `SPARROW_SOURCE_KEY` is not provided and the value will be set to an empty string instead.
 	const SPARROW_SOURCE_KEY = process.env.SPARROW_SOURCE_KEY ?? "";
-	const requests: Array<Promise<void>> = [];
 	const wranglerVersion = getWranglerVersion();
+	const [wranglerMajorVersion, wranglerMinorVersion, wranglerPatchVersion] =
+		wranglerVersion.split(".").map((v) => parseInt(v, 10));
 	const amplitude_session_id = Date.now();
 	let amplitude_event_id = 0;
 
-	/** We redact strings in arg values, unless they are named here */
-	const allowList: Record<string, AllowedValues> & { "*": AllowedValues } = {
-		// applies to all commands
-		// use camelCase version
-		"*": { format: "*", logLevel: "*" },
-		"wrangler tail": { status: "*" },
-		"wrangler types": {
-			xIncludeRuntime: [".wrangler/types/runtime.d.ts"],
-			path: ["worker-configuration.d.ts"],
-		},
-	};
+	// Detect agent environment once when dispatcher is created
+	// Pass empty array for processAncestry to skip process tree checks entirely.
+	// Process tree traversal uses execSync('ps ...') which is slow and can cause
+	// timeouts, especially in CI environments. Environment variable detection
+	// is sufficient for identifying most agentic environments.
+	let agent: string | null = null;
+	try {
+		const agentDetection = detectAgenticEnvironment(process.env, []);
+		agent = agentDetection.id;
+	} catch {
+		// Silent failure - agent remains null
+	}
+
+	function getCommonEventProperties(): CommonEventProperties {
+		return {
+			amplitude_session_id,
+			amplitude_event_id: amplitude_event_id++,
+			wranglerVersion,
+			wranglerMajorVersion,
+			wranglerMinorVersion,
+			wranglerPatchVersion,
+			osPlatform: getPlatform(),
+			osVersion: getOSVersion(),
+			nodeVersion: getNodeVersion(),
+			packageManager: sniffUserAgent(),
+			isFirstUsage: readMetricsConfig().permission === undefined,
+			configFileType: configFormat(options.configPath),
+			isCI: ci.isCI,
+			isPagesCI: ci.CLOUDFLARE_PAGES,
+			isWorkersCI: ci.CLOUDFLARE_WORKERS,
+			isInteractive: isInteractive(),
+			hasAssets: options.hasAssets ?? false,
+			agent,
+		};
+	}
 
 	return {
-		// TODO: merge two sendEvent functions once all commands use defineCommand and get a global dispatcher
 		/**
 		 * This doesn't have a session id and is not tied to the command events.
 		 *
@@ -53,92 +97,97 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 		 *  - additional properties are camelCased
 		 */
 		sendAdhocEvent(name: string, properties: Properties = {}) {
-			dispatch({
-				name,
-				properties: {
-					category: "Workers",
-					wranglerVersion,
-					os: getOS(),
-					...properties,
-				},
-			});
+			trackDispatch(
+				telemetryCurrentAgentSkillsInstalled()
+					.catch(() => null)
+					.then((currentAgentSkillsInstalled) => {
+						const baseProperties = {
+							...getCommonEventProperties(),
+							category: "Workers",
+							wranglerVersion,
+							wranglerMajorVersion,
+							wranglerMinorVersion,
+							wranglerPatchVersion,
+							os: getOS(),
+							agent,
+							...properties,
+						};
+
+						return dispatch({
+							name,
+							properties: {
+								...baseProperties,
+								currentAgentSkillsInstalled,
+							},
+						});
+					})
+					.catch((err) => {
+						logger.debug("Error sending adhoc metrics event", err);
+					})
+			);
 		},
 
 		/**
-		 * Dispatches `wrangler command started / completed / errored` events
+		 * Posts events to telemetry when a command is started, has completed, or has errored.
 		 *
-		 * This happens on every command execution. When all commands use defineCommand,
-		 * we should use that to provide the dispatcher on all handlers, and change all
-		 * `sendEvent` calls to use this method.
+		 * @param name The name of the event to send
+		 * @param properties The properties specific to this event
+		 * @param cmdBehaviour The behavior of the command being executed. Might not been provided for unrecognized commands.
 		 */
 		sendCommandEvent<EventName extends Events["name"]>(
 			name: EventName,
 			properties: Omit<
 				Extract<Events, { name: EventName }>["properties"],
-				keyof CommonEventProperties
-			>,
-			argv?: string[]
-		) {
+				keyof CommonCommandEventProperties
+			> & { argsUsed: string[] },
+			cmdBehaviour?: CommandDefinition["behaviour"]
+		): void {
+			if (cmdBehaviour?.sendMetrics === false) {
+				return;
+			}
+
 			try {
-				if (properties.command?.startsWith("wrangler login")) {
-					properties.command = "wrangler login";
-				}
-				if (
-					properties.command === "wrangler telemetry disable" ||
-					properties.command === "wrangler metrics disable"
-				) {
-					return;
-				}
-				if (
-					properties.command === "wrangler deploy" ||
-					properties.command === "wrangler dev" ||
-					// for testing purposes
-					properties.command === "wrangler docs"
-				) {
+				if (cmdBehaviour?.printMetricsBanner === true) {
+					// printMetricsBanner can throw
 					printMetricsBanner();
 				}
 
-				const argsUsed = sanitiseUserInput(properties.args ?? {}, argv);
-				const argsCombination = argsUsed.sort().join(", ");
-				const commonEventProperties: CommonEventProperties = {
-					amplitude_session_id,
-					amplitude_event_id: amplitude_event_id++,
-					wranglerVersion,
-					osPlatform: getPlatform(),
-					osVersion: getOSVersion(),
-					nodeVersion: getNodeVersion(),
-					packageManager: sniffUserAgent(),
-					isFirstUsage: readMetricsConfig().permission === undefined,
-					configFileType: configFormat(options.configPath),
-					isCI: CI.isCI(),
-					isPagesCI: isPagesCI(),
-					isWorkersCI: isWorkersCI(),
-					isInteractive: isInteractive(),
-					hasAssets: options.hasAssets ?? false,
+				const argsUsed = properties.argsUsed;
+				const argsCombination = argsUsed.join(", ");
+
+				const commonCommandEventProperties: CommonCommandEventProperties = {
+					...getCommonEventProperties(),
 					argsUsed,
 					argsCombination,
 				};
-				// get the args where we don't want to redact their values
-				const allowedArgs = getAllowedArgs(allowList, properties.command ?? "");
-				properties.args = redactArgValues(properties.args ?? {}, allowedArgs);
-				dispatch({
-					name,
-					properties: {
-						...commonEventProperties,
-						...properties,
-					},
-				});
+
+				trackDispatch(
+					telemetryCurrentAgentSkillsInstalled()
+						.catch(() => null)
+						.then((currentAgentSkillsInstalled) => {
+							return dispatch({
+								name,
+								properties: {
+									...commonCommandEventProperties,
+									...properties,
+									currentAgentSkillsInstalled,
+								},
+							});
+						})
+						.catch((err) => {
+							logger.debug("Error sending command metrics event", err);
+						})
+				);
 			} catch (err) {
 				logger.debug("Error sending metrics event", err);
 			}
 		},
-
-		get requests() {
-			return requests;
-		},
 	};
 
-	function dispatch(event: { name: string; properties: Properties }) {
+	function dispatch(event: {
+		name: string;
+		properties: Properties;
+	}): Promise<void> | void {
 		const metricsConfig = getMetricsConfig(options);
 		const body = {
 			deviceId: metricsConfig.deviceId,
@@ -167,8 +216,10 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 		logger.debug(`Metrics dispatcher: Posting data ${JSON.stringify(body)}`);
 
 		// Don't await fetch but make sure requests are resolved (with a timeout)
-		// before exiting Wrangler
-		const request = fetch(`${SPARROW_URL}/api/v1/event`, {
+		// before exiting Wrangler. The exit handler in index.ts races
+		// allMetricsDispatchesCompleted() against a 1s timeout, which is the
+		// real protection against slow connections at shutdown.
+		return fetch(`${SPARROW_URL}/api/v1/event`, {
 			method: "POST",
 			headers: {
 				Accept: "*/*",
@@ -193,10 +244,27 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 					(e as Error).message
 				);
 			});
-
-		requests.push(request);
 	}
 
+	/**
+	 * Adds a dispatch promise (or promise chain) to `pendingRequests` so it
+	 * is awaited at process exit. Automatically removes itself once settled.
+	 *
+	 * @param maybePromise The dispatch promise to track, or `void` if no async work is needed.
+	 */
+	function trackDispatch(maybePromise: Promise<void> | void): void {
+		if (!maybePromise) {
+			return;
+		}
+		const tracked = maybePromise.finally(() => {
+			pendingRequests.delete(tracked);
+		});
+		pendingRequests.add(tracked);
+	}
+
+	/**
+	 * Note that this function can throw if writing to the config file fails.
+	 */
 	function printMetricsBanner() {
 		const metricsConfig = readMetricsConfig();
 		if (
@@ -215,95 +283,3 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 }
 
 export type Properties = Record<string, unknown>;
-
-const normalise = (arg: string) => {
-	const camelize = (str: string) =>
-		str.replace(/-./g, (x) => x[1].toUpperCase());
-	return camelize(arg.replace("experimental", "x"));
-};
-
-const exclude = new Set(["$0", "_"]);
-/**
- * just some pretty naive cleaning so we don't send duplicates of "experimental-versions", "experimentalVersions", "x-versions" and "xVersions" etc.
- * optionally, if an argv is provided remove all args that were not specified in argv (which means that default values will be filtered out)
- */
-const sanitiseUserInput = (
-	argsWithValues: Record<string, unknown>,
-	argv?: string[]
-) => {
-	const result: string[] = [];
-	const args = Object.keys(argsWithValues);
-	for (const arg of args) {
-		if (Array.isArray(argv) && !argv.some((a) => a.includes(arg))) {
-			continue;
-		}
-		if (exclude.has(arg)) {
-			continue;
-		}
-		if (
-			typeof argsWithValues[arg] === "boolean" &&
-			argsWithValues[arg] === false
-		) {
-			continue;
-		}
-
-		const normalisedArg = normalise(arg);
-		if (result.includes(normalisedArg)) {
-			continue;
-		}
-		result.push(normalisedArg);
-	}
-	return result;
-};
-
-type AllowedValues = Record<string, string[] | "*">;
-const getAllowedArgs = (
-	allowList: Record<string, AllowedValues> & { "*": AllowedValues },
-	key: string
-) => {
-	const commandSpecific = allowList[key] ?? [];
-	return { ...commandSpecific, ...allowList["*"] };
-};
-export const redactArgValues = (
-	args: Record<string, unknown>,
-	allowedValues: AllowedValues
-) => {
-	const result: Record<string, unknown> = {};
-
-	for (let [key, value] of Object.entries(args)) {
-		key = normalise(key);
-		if (key === "xIncludeRuntime" && value === "") {
-			value = ".wrangler/types/runtime.d.ts";
-		}
-		const allowedValuesForArg = allowedValues[key] ?? [];
-		if (exclude.has(key)) {
-			continue;
-		}
-		if (
-			typeof value === "number" ||
-			typeof value === "boolean" ||
-			allowedValuesForArg.includes(key)
-		) {
-			result[key] = value;
-		} else if (
-			// redact if its a string, unless the value is in the allow list
-			// * is a special value that allows all values for that arg
-			typeof value === "string" &&
-			!(allowedValuesForArg === "*" || allowedValuesForArg.includes(value))
-		) {
-			result[key] = "<REDACTED>";
-		} else if (Array.isArray(value)) {
-			result[key] = value.map((v) =>
-				// redact if its a string, unless the value is in the allow list
-				// * is a special value that allows all values for that arg
-				typeof v === "string" &&
-				!(allowedValuesForArg === "*" || allowedValuesForArg.includes(v))
-					? "<REDACTED>"
-					: v
-			);
-		} else {
-			result[key] = value;
-		}
-	}
-	return result;
-};

@@ -1,14 +1,88 @@
-import assert from "node:assert";
-import { fetch, File, FormData, Headers, Response } from "undici";
+import {
+	addAuthorizationHeader,
+	APIError,
+	fetchInternalBase,
+	getCloudflareApiBaseUrl,
+	performApiFetchBase,
+	UserError,
+} from "@cloudflare/workers-utils";
+import Cloudflare from "cloudflare";
+import { fetch, FormData, Headers, Request, Response } from "undici";
 import { version as wranglerVersion } from "../../package.json";
-import { getCloudflareApiBaseUrl } from "../environment-variables/misc-variables";
-import { UserError } from "../errors";
 import { logger } from "../logger";
-import { APIError, parseJSON } from "../parse";
 import { loginOrRefreshIfRequired, requireApiToken } from "../user";
-import type { ApiCredentials } from "../user";
+import type {
+	ApiCredentials,
+	ComplianceConfig,
+	Message,
+} from "@cloudflare/workers-utils";
 import type { URLSearchParams } from "node:url";
-import type { HeadersInit, RequestInit } from "undici";
+import type { HeadersInit, RequestInfo, RequestInit } from "undici";
+
+async function logRequest(request: Request, init?: RequestInit) {
+	logger.debug(`-- START CF API REQUEST: ${request.method} ${request.url}`);
+	const logRequestHeaders = cloneHeaders(request.headers);
+	logRequestHeaders.delete("Authorization");
+	logger.debugWithSanitization(
+		"HEADERS:",
+		JSON.stringify(logRequestHeaders, null, 2)
+	);
+
+	logger.debugWithSanitization("INIT:", JSON.stringify({ ...init }, null, 2));
+	if (request.body instanceof FormData) {
+		logger.debugWithSanitization(
+			"BODY:",
+			await new Response(request.body).text(),
+			null,
+			2
+		);
+	}
+	logger.debug("-- END CF API REQUEST");
+}
+
+async function logResponse(response: Response) {
+	const jsonText = await response.clone().text();
+	logger.debug(
+		"-- START CF API RESPONSE:",
+		response.statusText,
+		response.status
+	);
+	const logResponseHeaders = cloneHeaders(response.headers);
+	logResponseHeaders.delete("Authorization");
+	logger.debugWithSanitization(
+		"HEADERS:",
+		JSON.stringify(logResponseHeaders, null, 2)
+	);
+	logger.debugWithSanitization("RESPONSE:", jsonText);
+	logger.debug("-- END CF API RESPONSE");
+}
+/**
+ * This function constructs an instance of the `Cloudflare` SDK client,
+ * with a custom fetcher that uses `fetchInternal`.
+ */
+export function createCloudflareClient(complianceConfig: ComplianceConfig) {
+	return new Cloudflare({
+		fetch: async (url: RequestInfo, init?: RequestInit): Promise<Response> => {
+			const request = new Request(url, { ...init, duplex: "half" });
+			await requireLoggedIn(complianceConfig);
+			const apiToken = requireApiToken();
+
+			addAuthorizationHeader(
+				request.headers,
+				apiToken,
+				/* The CF SDK will inject `Bearer dummy` */ true
+			);
+			addUserAgent(request.headers);
+
+			await logRequest(request, init);
+
+			const response = await fetch(request.url, request);
+			await logResponse(response);
+			return response;
+		},
+		baseURL: getCloudflareApiBaseUrl(complianceConfig),
+	});
+}
 
 /*
  * performApiFetch does everything required to make a CF API request,
@@ -16,46 +90,24 @@ import type { HeadersInit, RequestInit } from "undici";
  * use `fetchInternal`
  * */
 export async function performApiFetch(
+	complianceConfig: ComplianceConfig,
 	resource: string,
 	init: RequestInit = {},
 	queryParams?: URLSearchParams,
-	abortSignal?: AbortSignal
+	abortSignal?: AbortSignal,
+	apiToken?: ApiCredentials
 ) {
-	const method = init.method ?? "GET";
-	assert(
-		resource.startsWith("/"),
-		`CF API fetch - resource path must start with a "/" but got "${resource}"`
+	apiToken = await resolveCredentials(complianceConfig, apiToken);
+	return performApiFetchBase(
+		complianceConfig,
+		resource,
+		init,
+		`wrangler/${wranglerVersion}`,
+		logger,
+		queryParams,
+		abortSignal,
+		apiToken
 	);
-	await requireLoggedIn();
-	const apiToken = requireApiToken();
-	const headers = cloneHeaders(init.headers);
-	addAuthorizationHeaderIfUnspecified(headers, apiToken);
-	addUserAgent(headers);
-
-	const queryString = queryParams ? `?${queryParams.toString()}` : "";
-	logger.debug(
-		`-- START CF API REQUEST: ${method} ${getCloudflareApiBaseUrl()}${resource}${queryString}`
-	);
-	const logHeaders = cloneHeaders(headers);
-	delete logHeaders["Authorization"];
-	logger.debugWithSanitization("HEADERS:", JSON.stringify(logHeaders, null, 2));
-
-	logger.debugWithSanitization("INIT:", JSON.stringify({ ...init }, null, 2));
-	if (init.body instanceof FormData) {
-		logger.debugWithSanitization(
-			"BODY:",
-			await new Response(init.body).text(),
-			null,
-			2
-		);
-	}
-	logger.debug("-- END CF API REQUEST");
-	return await fetch(`${getCloudflareApiBaseUrl()}${resource}${queryString}`, {
-		method,
-		...init,
-		headers,
-		signal: abortSignal,
-	});
 }
 
 /**
@@ -68,96 +120,55 @@ export async function performApiFetch(
  * This function should not be used directly, instead use the functions in `cfetch/index.ts`.
  */
 export async function fetchInternal<ResponseType>(
+	complianceConfig: ComplianceConfig,
 	resource: string,
 	init: RequestInit = {},
 	queryParams?: URLSearchParams,
-	abortSignal?: AbortSignal
-): Promise<ResponseType> {
-	const method = init.method ?? "GET";
-	const response = await performApiFetch(
+	abortSignal?: AbortSignal,
+	apiToken?: ApiCredentials
+): Promise<{ response: ResponseType; status: number }> {
+	apiToken = await resolveCredentials(complianceConfig, apiToken);
+	return fetchInternalBase(
+		complianceConfig,
 		resource,
 		init,
+		`wrangler/${wranglerVersion}`,
+		logger,
 		queryParams,
-		abortSignal
+		abortSignal,
+		apiToken
 	);
-	const jsonText = await response.text();
-	logger.debug(
-		"-- START CF API RESPONSE:",
-		response.statusText,
-		response.status
-	);
-	const logHeaders = cloneHeaders(response.headers);
-	delete logHeaders["Authorization"];
-	logger.debugWithSanitization("HEADERS:", JSON.stringify(logHeaders, null, 2));
-	logger.debugWithSanitization("RESPONSE:", jsonText);
-	logger.debug("-- END CF API RESPONSE");
+}
 
-	// HTTP 204 and HTTP 205 responses do not return a body. We need to special-case this
-	// as otherwise parseJSON will throw an error back to the user.
-	if (!jsonText && (response.status === 204 || response.status === 205)) {
-		const emptyBody = `{"result": {}, "success": true, "errors": [], "messages": []}`;
-		return parseJSON(emptyBody) as ResponseType;
-	}
+function cloneHeaders(headers: HeadersInit | undefined): Headers {
+	return new Headers(headers);
+}
 
-	try {
-		return parseJSON(jsonText) as ResponseType;
-	} catch (err) {
-		throw new APIError({
-			text: "Received a malformed response from the API",
-			notes: [
-				{
-					text: truncate(jsonText, 100),
-				},
-				{
-					text: `${method} ${resource} -> ${response.status} ${response.statusText}`,
-				},
-			],
-			status: response.status,
+/**
+ *
+ * Triggers a login or token refresh if necessary
+ */
+export async function resolveCredentials(
+	complianceConfig: ComplianceConfig,
+	apiToken?: ApiCredentials
+): Promise<ApiCredentials> {
+	await requireLoggedIn(complianceConfig);
+	return apiToken ?? requireApiToken();
+}
+
+export async function requireLoggedIn(
+	complianceConfig: ComplianceConfig
+): Promise<void> {
+	const loggedIn = await loginOrRefreshIfRequired(complianceConfig);
+	if (!loggedIn) {
+		throw new UserError("Not logged in.", {
+			telemetryMessage: "cfetch auth login required",
 		});
 	}
 }
 
-function truncate(text: string, maxLength: number): string {
-	const { length } = text;
-	if (length <= maxLength) {
-		return text;
-	}
-	return `${text.substring(0, maxLength)}... (length = ${length})`;
-}
-
-function cloneHeaders(
-	headers: HeadersInit | undefined
-): Record<string, string> {
-	return headers instanceof Headers
-		? Object.fromEntries(headers.entries())
-		: Array.isArray(headers)
-			? Object.fromEntries(headers)
-			: { ...headers };
-}
-
-async function requireLoggedIn(): Promise<void> {
-	const loggedIn = await loginOrRefreshIfRequired();
-	if (!loggedIn) {
-		throw new UserError("Not logged in.");
-	}
-}
-
-function addAuthorizationHeaderIfUnspecified(
-	headers: Record<string, string>,
-	auth: ApiCredentials
-): void {
-	if (!("Authorization" in headers)) {
-		if ("apiToken" in auth) {
-			headers["Authorization"] = `Bearer ${auth.apiToken}`;
-		} else {
-			headers["X-Auth-Key"] = auth.authKey;
-			headers["X-Auth-Email"] = auth.authEmail;
-		}
-	}
-}
-
-function addUserAgent(headers: Record<string, string>): void {
-	headers["User-Agent"] = `wrangler/${wranglerVersion}`;
+export function addUserAgent(headers: Headers): void {
+	headers.set("User-Agent", `wrangler/${wranglerVersion}`);
 }
 
 /**
@@ -171,15 +182,16 @@ function addUserAgent(headers: Record<string, string>): void {
  * before passing it
  */
 export async function fetchKVGetValue(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	key: string
 ): Promise<ArrayBuffer> {
-	await requireLoggedIn();
+	await requireLoggedIn(complianceConfig);
 	const auth = requireApiToken();
-	const headers: Record<string, string> = {};
-	addAuthorizationHeaderIfUnspecified(headers, auth);
-	const resource = `${getCloudflareApiBaseUrl()}/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${key}`;
+	const headers = new Headers();
+	addAuthorizationHeader(headers, auth);
+	const resource = `${getCloudflareApiBaseUrl(complianceConfig)}/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${key}`;
 	const response = await fetch(resource, {
 		method: "GET",
 		headers,
@@ -203,48 +215,82 @@ export async function fetchKVGetValue(
  */
 type ResponseWithBody = Response & { body: NonNullable<Response["body"]> };
 export async function fetchR2Objects(
+	complianceConfig: ComplianceConfig,
 	resource: string,
 	bodyInit: RequestInit = {}
 ): Promise<ResponseWithBody | null> {
-	await requireLoggedIn();
+	await requireLoggedIn(complianceConfig);
 	const auth = requireApiToken();
 	const headers = cloneHeaders(bodyInit.headers);
-	addAuthorizationHeaderIfUnspecified(headers, auth);
+	addAuthorizationHeader(headers, auth);
 	addUserAgent(headers);
 
-	const response = await fetch(`${getCloudflareApiBaseUrl()}${resource}`, {
-		...bodyInit,
-		headers,
-	});
+	const response = await fetch(
+		`${getCloudflareApiBaseUrl(complianceConfig)}${resource}`,
+		{
+			...bodyInit,
+			headers,
+		}
+	);
 
 	if (response.ok && response.body) {
 		return response as ResponseWithBody;
 	} else if (response.status === 404) {
 		return null;
 	} else {
-		throw new Error(
-			`Failed to fetch ${resource} - ${response.status}: ${response.statusText});`
-		);
+		// Read response body to get detailed error message
+		const notes: Message[] = [];
+		let errorCode: number | undefined;
+		try {
+			const bodyText = await response.text();
+			// Attempt to parse as a standard Cloudflare API JSON envelope to
+			// extract the structured error code (e.g. for data catalog conflicts).
+			try {
+				const json = JSON.parse(bodyText) as {
+					errors?: Array<{ code?: number; message?: string }>;
+				};
+				errorCode = json.errors?.[0]?.code;
+			} catch {
+				// Not JSON — fall through and use raw text as the note
+			}
+			notes.push({ text: bodyText });
+		} catch {
+			// If we can't read the body, continue without it
+		}
+		const apiError = new APIError({
+			text: `Failed to fetch ${resource} - ${response.status}: ${response.statusText};`,
+			status: response.status,
+			notes,
+			telemetryMessage: false,
+		});
+		if (errorCode !== undefined) {
+			apiError.code = errorCode;
+		}
+		throw apiError;
 	}
 }
 
 /**
  * This is a wrapper STOPGAP for getting the script which returns a raw text response.
  */
-export async function fetchWorker(
+export async function fetchWorkerDefinitionFromDash(
+	complianceConfig: ComplianceConfig,
 	resource: string,
 	bodyInit: RequestInit = {}
 ): Promise<{ entrypoint: string; modules: File[] }> {
-	await requireLoggedIn();
+	await requireLoggedIn(complianceConfig);
 	const auth = requireApiToken();
 	const headers = cloneHeaders(bodyInit.headers);
-	addAuthorizationHeaderIfUnspecified(headers, auth);
+	addAuthorizationHeader(headers, auth);
 	addUserAgent(headers);
 
-	let response = await fetch(`${getCloudflareApiBaseUrl()}${resource}`, {
-		...bodyInit,
-		headers,
-	});
+	let response = await fetch(
+		`${getCloudflareApiBaseUrl(complianceConfig)}${resource}`,
+		{
+			...bodyInit,
+			headers,
+		}
+	);
 
 	if (!response.ok || !response.body) {
 		logger.error(response.ok, response.body);

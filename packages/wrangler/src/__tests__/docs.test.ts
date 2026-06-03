@@ -1,25 +1,20 @@
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
-import { afterEach, beforeEach, describe, test } from "vitest";
+import { beforeEach, describe, test, vi } from "vitest";
 import openInBrowser from "../open-in-browser";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { msw } from "./helpers/msw";
 import { runWrangler } from "./helpers/run-wrangler";
 
-// NOTE: in production builds we "esbuild define" Algolia constants as globals
-// but in tests we have to attach mocks values to the globalThis object.
-
-// eslint-disable-next-line @typescript-eslint/no-namespace
-declare module globalThis {
-	let ALGOLIA_APP_ID: string | undefined;
-	let ALGOLIA_PUBLIC_KEY: string | undefined;
-}
-
 describe("wrangler docs", () => {
 	const std = mockConsoleMethods();
+	runInTempDir({ homedir: "./home" });
 
 	beforeEach(() => {
-		globalThis.ALGOLIA_APP_ID = "FAKE-ID";
-		globalThis.ALGOLIA_PUBLIC_KEY = "FAKE-KEY";
+		// NOTE: in production builds we "esbuild define" Algolia constants as globals
+		// but in tests we have to attach mocks values to the globalThis object.
+		vi.stubGlobal("ALGOLIA_APP_ID", "FAKE-ID");
+		vi.stubGlobal("ALGOLIA_PUBLIC_KEY", "FAKE-KEY");
 
 		msw.use(
 			http.post<Record<string, never>, { params: string | undefined }>(
@@ -38,11 +33,6 @@ describe("wrangler docs", () => {
 		);
 	});
 
-	afterEach(() => {
-		delete globalThis.ALGOLIA_APP_ID;
-		delete globalThis.ALGOLIA_PUBLIC_KEY;
-	});
-
 	test("--help", async ({ expect }) => {
 		const result = runWrangler("docs --help");
 
@@ -52,16 +42,17 @@ describe("wrangler docs", () => {
 
 			📚 Open Wrangler's command documentation in your browser
 
-
 			POSITIONALS
 			  search  Enter search terms (e.g. the wrangler command) you want to know more about  [array] [default: []]
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
 			  -y, --yes  Takes you to the docs, even if search fails  [boolean]"
@@ -73,11 +64,14 @@ describe("wrangler docs", () => {
 	}) => {
 		await runWrangler("docs");
 		expect(std).toMatchInlineSnapshot(`
-			Object {
+			{
 			  "debug": "",
 			  "err": "",
 			  "info": "",
-			  "out": "Opening a link in your default browser: https://developers.cloudflare.com/workers/wrangler/commands/",
+			  "out": "
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Opening a link in your default browser: https://developers.cloudflare.com/workers/wrangler/commands/",
 			  "warn": "",
 			}
 		`);
@@ -91,11 +85,14 @@ describe("wrangler docs", () => {
 	}) => {
 		await runWrangler("docs dev");
 		expect(std).toMatchInlineSnapshot(`
-			Object {
+			{
 			  "debug": "",
 			  "err": "",
 			  "info": "",
-			  "out": "Opening a link in your default browser: FAKE_DOCS_URL:{\\"params\\":\\"query=dev&hitsPerPage=1&getRankingInfo=0\\"}",
+			  "out": "
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Opening a link in your default browser: FAKE_DOCS_URL:{"params":"query=dev&hitsPerPage=1&getRankingInfo=0"}",
 			  "warn": "",
 			}
 		`);
@@ -109,11 +106,14 @@ describe("wrangler docs", () => {
 	}) => {
 		await runWrangler("docs foo bar");
 		expect(std).toMatchInlineSnapshot(`
-			Object {
+			{
 			  "debug": "",
 			  "err": "",
 			  "info": "",
-			  "out": "Opening a link in your default browser: FAKE_DOCS_URL:{\\"params\\":\\"query=foo+bar&hitsPerPage=1&getRankingInfo=0\\"}",
+			  "out": "
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Opening a link in your default browser: FAKE_DOCS_URL:{"params":"query=foo+bar&hitsPerPage=1&getRankingInfo=0"}",
 			  "warn": "",
 			}
 		`);

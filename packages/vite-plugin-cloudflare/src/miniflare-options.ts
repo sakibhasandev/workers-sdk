@@ -4,47 +4,68 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-	kCurrentWorker,
+	generateContainerBuildId,
+	resolveDockerHost,
+} from "@cloudflare/containers-shared";
+import {
+	getBrowserRenderingHeadfulFromEnv,
+	getLocalExplorerEnabledFromEnv,
+} from "@cloudflare/workers-utils";
+import {
+	buildPublicUrl,
+	getDefaultDevRegistryPath,
+	kUnsafeEphemeralUniqueKey,
 	Log,
 	LogLevel,
+	parseModuleFallbackRequest,
 	Response as MiniflareResponse,
 } from "miniflare";
 import { globSync } from "tinyglobby";
-import * as vite from "vite";
-import { unstable_getMiniflareWorkerOptions } from "wrangler";
+import * as wrangler from "wrangler";
 import { getAssetsConfig } from "./asset-config";
 import {
 	ASSET_WORKER_NAME,
-	ASSET_WORKERS_COMPATIBILITY_DATE,
+	kRequestType,
+	PROXY_SHARED_SECRET,
 	ROUTER_WORKER_NAME,
+	VITE_PROXY_WORKER_NAME,
 } from "./constants";
-import { additionalModuleRE } from "./shared";
+import { getContainerOptions, getDockerPath } from "./containers";
+import { getInputInspectorPort } from "./debug";
+import { additionalModuleRE } from "./plugins/additional-modules";
+import { ENVIRONMENT_NAME_HEADER } from "./shared";
+import { checkForNpmUpdate } from "./update-check";
+import { satisfiesMinimumViteVersion, withTrailingSlash } from "./utils";
 import type { CloudflareDevEnvironment } from "./cloudflare-environment";
+import type { ContainerTagToOptionsMap } from "./containers";
 import type {
-	PersistState,
-	ResolvedPluginConfig,
-	WorkerConfig,
-} from "./plugin-config";
-import type { MiniflareOptions, SharedOptions, WorkerOptions } from "miniflare";
-import type { FetchFunctionOptions } from "vite/module-runner";
-import type { SourcelessWorkerOptions, Unstable_Config } from "wrangler";
+	AssetsOnlyPluginContext,
+	PreviewPluginContext,
+	WorkersPluginContext,
+} from "./context";
+import type { PersistState } from "./plugin-config";
+import type {
+	MiniflareOptions,
+	WorkerdStructuredLog,
+	WorkerOptions,
+} from "miniflare";
+import type * as vite from "vite";
+import type {
+	Binding,
+	RemoteProxySession,
+	SourcelessWorkerOptions,
+} from "wrangler";
 
-type PersistOptions = Pick<
-	SharedOptions,
-	| "cachePersist"
-	| "d1Persist"
-	| "durableObjectsPersist"
-	| "kvPersist"
-	| "r2Persist"
-	| "workflowsPersist"
->;
+const INTERNAL_WORKERS_COMPATIBILITY_DATE = "2024-10-04";
+// Used to mark HTML assets as being in the public directory so that they can be resolved from their root relative paths
+const PUBLIC_DIR_PREFIX = "/__vite_public_dir__";
 
-function getPersistence(
+function getPersistenceRoot(
 	root: string,
 	persistState: PersistState
-): PersistOptions {
+): string | undefined {
 	if (persistState === false) {
-		return {};
+		return;
 	}
 
 	const defaultPersistPath = ".wrangler/state";
@@ -54,114 +75,7 @@ function getPersistence(
 		"v3"
 	);
 
-	return {
-		cachePersist: path.join(persistPath, "cache"),
-		d1Persist: path.join(persistPath, "d1"),
-		durableObjectsPersist: path.join(persistPath, "do"),
-		kvPersist: path.join(persistPath, "kv"),
-		r2Persist: path.join(persistPath, "r2"),
-		workflowsPersist: path.join(persistPath, "workflows"),
-	};
-}
-
-function missingWorkerErrorMessage(workerName: string) {
-	return `${workerName} does not match a worker name.`;
-}
-
-function getWorkerToWorkerEntrypointNamesMap(
-	workers: Array<Pick<WorkerOptions, "serviceBindings"> & { name: string }>
-) {
-	const workerToWorkerEntrypointNamesMap = new Map(
-		workers.map((workerOptions) => [workerOptions.name, new Set<string>()])
-	);
-
-	for (const worker of workers) {
-		for (const value of Object.values(worker.serviceBindings ?? {})) {
-			if (
-				typeof value === "object" &&
-				"name" in value &&
-				value.entrypoint !== undefined &&
-				value.entrypoint !== "default"
-			) {
-				const targetWorkerName =
-					value.name === kCurrentWorker ? worker.name : value.name;
-				const entrypointNames =
-					workerToWorkerEntrypointNamesMap.get(targetWorkerName);
-				assert(entrypointNames, missingWorkerErrorMessage(targetWorkerName));
-
-				entrypointNames.add(value.entrypoint);
-			}
-		}
-	}
-
-	return workerToWorkerEntrypointNamesMap;
-}
-
-function getWorkerToDurableObjectClassNamesMap(
-	workers: Array<Pick<WorkerOptions, "durableObjects"> & { name: string }>
-) {
-	const workerToDurableObjectClassNamesMap = new Map(
-		workers.map((workerOptions) => [workerOptions.name, new Set<string>()])
-	);
-
-	for (const worker of workers) {
-		for (const value of Object.values(worker.durableObjects ?? {})) {
-			if (typeof value === "string") {
-				const classNames = workerToDurableObjectClassNamesMap.get(worker.name);
-				assert(classNames, missingWorkerErrorMessage(worker.name));
-
-				classNames.add(value);
-			} else if (typeof value === "object") {
-				if (value.scriptName) {
-					const classNames = workerToDurableObjectClassNamesMap.get(
-						value.scriptName
-					);
-					assert(classNames, missingWorkerErrorMessage(value.scriptName));
-
-					classNames.add(value.className);
-				} else {
-					const classNames = workerToDurableObjectClassNamesMap.get(
-						worker.name
-					);
-					assert(classNames, missingWorkerErrorMessage(worker.name));
-
-					classNames.add(value.className);
-				}
-			}
-		}
-	}
-
-	return workerToDurableObjectClassNamesMap;
-}
-
-function getWorkerToWorkflowEntrypointClassNamesMap(
-	workers: Array<Pick<WorkerOptions, "workflows"> & { name: string }>
-) {
-	const workerToWorkflowEntrypointClassNamesMap = new Map(
-		workers.map((workerOptions) => [workerOptions.name, new Set<string>()])
-	);
-
-	for (const worker of workers) {
-		for (const value of Object.values(worker.workflows ?? {})) {
-			if (value.scriptName) {
-				const classNames = workerToWorkflowEntrypointClassNamesMap.get(
-					value.scriptName
-				);
-				assert(classNames, missingWorkerErrorMessage(value.scriptName));
-
-				classNames.add(value.className);
-			} else {
-				const classNames = workerToWorkflowEntrypointClassNamesMap.get(
-					worker.name
-				);
-				assert(classNames, missingWorkerErrorMessage(worker.name));
-
-				classNames.add(value.className);
-			}
-		}
-	}
-
-	return workerToWorkflowEntrypointClassNamesMap;
+	return persistPath;
 }
 
 // We want module names to be their absolute path without the leading slash
@@ -172,30 +86,34 @@ function getWorkerToWorkflowEntrypointClassNamesMap(
 // to paths ensures correct names. This requires us to specify `contents` in
 // the miniflare module definitions though, as the new paths don't exist.
 const miniflareModulesRoot = process.platform === "win32" ? "Z:\\" : "/";
-const ROUTER_WORKER_PATH = "./asset-workers/router-worker.js";
-const ASSET_WORKER_PATH = "./asset-workers/asset-worker.js";
+const ROUTER_WORKER_PATH = "./workers/router-worker/index.js";
+const ASSET_WORKER_PATH = "./workers/asset-worker/index.js";
+const VITE_PROXY_WORKER_PATH = "./workers/vite-proxy-worker/index.js";
+const RUNNER_PATH = "./workers/runner-worker/index.js";
+const MODULE_RUNNER_PATH = "./workers/runner-worker/module-runner.js";
+const MODULE_RUNNER_LEGACY_PATH =
+	"./workers/runner-worker/module-runner-legacy.js";
 const WRAPPER_PATH = "__VITE_WORKER_ENTRY__";
-const RUNNER_PATH = "./runner-worker/index.js";
 
-function getEntryWorkerConfig(
-	resolvedPluginConfig: ResolvedPluginConfig
-): WorkerConfig | undefined {
-	if (resolvedPluginConfig.type === "assets-only") {
-		return;
-	}
+/** Map that maps worker configPaths to their existing remote proxy session data (if any) */
+const remoteProxySessionsDataMap = new Map<
+	string,
+	{
+		session: RemoteProxySession;
+		remoteBindings: Record<string, Binding>;
+	} | null
+>();
 
-	return resolvedPluginConfig.workers[
-		resolvedPluginConfig.entryWorkerEnvironmentName
-	];
-}
+export async function getDevMiniflareOptions(
+	ctx: AssetsOnlyPluginContext | WorkersPluginContext,
+	viteDevServer: vite.ViteDevServer
+): Promise<{
+	miniflareOptions: Extract<MiniflareOptions, { workers: WorkerOptions[] }>;
+	containerTagToOptionsMap: ContainerTagToOptionsMap;
+}> {
+	const inputInspectorPort = await getInputInspectorPort(ctx, viteDevServer);
+	const { resolvedPluginConfig, resolvedViteConfig, entryWorkerConfig } = ctx;
 
-export function getDevMiniflareOptions(
-	resolvedPluginConfig: ResolvedPluginConfig,
-	viteDevServer: vite.ViteDevServer,
-	inspectorPort: number | false
-): MiniflareOptions {
-	const resolvedViteConfig = viteDevServer.config;
-	const entryWorkerConfig = getEntryWorkerConfig(resolvedPluginConfig);
 	const assetsConfig = getAssetsConfig(
 		resolvedPluginConfig,
 		entryWorkerConfig,
@@ -205,7 +123,8 @@ export function getDevMiniflareOptions(
 	const assetWorkers: Array<WorkerOptions> = [
 		{
 			name: ROUTER_WORKER_NAME,
-			compatibilityDate: ASSET_WORKERS_COMPATIBILITY_DATE,
+			compatibilityDate: INTERNAL_WORKERS_COMPATIBILITY_DATE,
+			compatibilityFlags: ["enable_ctx_exports"],
 			modulesRoot: miniflareModulesRoot,
 			modules: [
 				{
@@ -228,7 +147,7 @@ export function getDevMiniflareOptions(
 		},
 		{
 			name: ASSET_WORKER_NAME,
-			compatibilityDate: ASSET_WORKERS_COMPATIBILITY_DATE,
+			compatibilityDate: INTERNAL_WORKERS_COMPATIBILITY_DATE,
 			modulesRoot: miniflareModulesRoot,
 			modules: [
 				{
@@ -241,114 +160,284 @@ export function getDevMiniflareOptions(
 			],
 			bindings: {
 				CONFIG: assetsConfig,
+				__VITE_HEADERS__: JSON.stringify(viteDevServer.config.server.headers),
 			},
 			serviceBindings: {
-				__VITE_ASSET_EXISTS__: async (request) => {
+				__VITE_HTML_EXISTS__: async (request) => {
 					const { pathname } = new URL(request.url);
-					const filePath = path.join(resolvedViteConfig.root, pathname);
 
-					let exists: boolean;
+					if (pathname.endsWith(".html")) {
+						const { root, publicDir } = resolvedViteConfig;
+						const publicDirInRoot = publicDir.startsWith(
+							withTrailingSlash(root)
+						);
+						const publicPath = withTrailingSlash(publicDir.slice(root.length));
 
-					try {
-						exists = fs.statSync(filePath).isFile();
-					} catch (error) {
-						exists = false;
+						// Assets in the public directory should be served at the root path
+						if (publicDirInRoot && pathname.startsWith(publicPath)) {
+							return MiniflareResponse.json(null);
+						}
+
+						const publicDirFilePath = path.join(publicDir, pathname);
+						const rootDirFilePath = path.join(root, pathname);
+
+						for (const resolvedPath of [publicDirFilePath, rootDirFilePath]) {
+							try {
+								const stats = await fsp.stat(resolvedPath);
+
+								if (stats.isFile()) {
+									return MiniflareResponse.json(
+										resolvedPath === publicDirFilePath
+											? `${PUBLIC_DIR_PREFIX}${pathname}`
+											: pathname
+									);
+								}
+							} catch {}
+						}
 					}
 
-					return MiniflareResponse.json(exists);
+					return MiniflareResponse.json(null);
 				},
-				__VITE_FETCH_ASSET__: async (request) => {
+				__VITE_FETCH_HTML__: async (request) => {
 					const { pathname } = new URL(request.url);
-					const filePath = path.join(resolvedViteConfig.root, pathname);
+					const { root, publicDir } = resolvedViteConfig;
+					const isInPublicDir = pathname.startsWith(PUBLIC_DIR_PREFIX);
+					const resolvedPath = isInPublicDir
+						? path.join(publicDir, pathname.slice(PUBLIC_DIR_PREFIX.length))
+						: path.join(root, pathname);
 
 					try {
-						let html = await fsp.readFile(filePath, "utf-8");
-						html = await viteDevServer.transformIndexHtml(pathname, html);
+						let html = await fsp.readFile(resolvedPath, "utf-8");
+
+						// HTML files in the public directory should not be transformed
+						if (!isInPublicDir) {
+							html = await viteDevServer.transformIndexHtml(resolvedPath, html);
+						}
 
 						return new MiniflareResponse(html, {
 							headers: { "Content-Type": "text/html" },
 						});
-					} catch (error) {
-						throw new Error(`Unexpected error. Failed to load ${pathname}`);
+					} catch {
+						throw new Error(`Unexpected error. Failed to load "${pathname}".`);
 					}
+				},
+			},
+		},
+		{
+			name: VITE_PROXY_WORKER_NAME,
+			compatibilityDate: INTERNAL_WORKERS_COMPATIBILITY_DATE,
+			modulesRoot: miniflareModulesRoot,
+			modules: [
+				{
+					type: "ESModule",
+					path: path.join(miniflareModulesRoot, VITE_PROXY_WORKER_PATH),
+					contents: fs.readFileSync(
+						fileURLToPath(new URL(VITE_PROXY_WORKER_PATH, import.meta.url))
+					),
+				},
+			],
+			serviceBindings: {
+				...(entryWorkerConfig
+					? { ENTRY_USER_WORKER: entryWorkerConfig.name }
+					: {}),
+				__VITE_MIDDLEWARE__: {
+					node: (req, res) => viteDevServer.middlewares(req, res),
 				},
 			},
 		},
 	];
 
+	const containerTagToOptionsMap: ContainerTagToOptionsMap = new Map();
+
 	const workersFromConfig =
 		resolvedPluginConfig.type === "workers"
-			? Object.entries(resolvedPluginConfig.workers).map(
-					([environmentName, workerConfig]) => {
-						const miniflareWorkerOptions = unstable_getMiniflareWorkerOptions(
-							{
-								...workerConfig,
-								assets: undefined,
-							},
-							resolvedPluginConfig.cloudflareEnv
-						);
+			? await Promise.all(
+					[...resolvedPluginConfig.environmentNameToWorkerMap].map(
+						async ([environmentName, worker]) => {
+							const bindings =
+								wrangler.unstable_convertConfigBindingsToStartWorkerBindings(
+									worker.config
+								);
 
-						const { externalWorkers } = miniflareWorkerOptions;
+							const preExistingRemoteProxySession = worker.config.configPath
+								? remoteProxySessionsDataMap.get(worker.config.configPath)
+								: undefined;
 
-						const { ratelimits, ...workerOptions } =
-							miniflareWorkerOptions.workerOptions;
-
-						return {
-							externalWorkers,
-							worker: {
-								...workerOptions,
-								name: workerOptions.name ?? workerConfig.name,
-								unsafeInspectorProxy: inspectorPort !== false,
-								modulesRoot: miniflareModulesRoot,
-								unsafeEvalBinding: "__VITE_UNSAFE_EVAL__",
-								serviceBindings: {
-									...workerOptions.serviceBindings,
-									...(environmentName ===
-										resolvedPluginConfig.entryWorkerEnvironmentName &&
-									workerConfig.assets?.binding
-										? {
-												[workerConfig.assets.binding]: ASSET_WORKER_NAME,
-											}
-										: {}),
-									__VITE_INVOKE_MODULE__: async (request) => {
-										const payload =
-											(await request.json()) as vite.CustomPayload;
-										const invokePayloadData = payload.data as {
-											id: string;
-											name: string;
-											data: [string, string, FetchFunctionOptions];
-										};
-
-										assert(
-											invokePayloadData.name === "fetchModule",
-											`Invalid invoke event: ${invokePayloadData.name}`
+							const remoteProxySessionData =
+								!resolvedPluginConfig.remoteBindings
+									? // if remote bindings are not enabled then the proxy session can simply be null
+										null
+									: await wrangler.maybeStartOrUpdateRemoteProxySession(
+											{
+												name: worker.config.name,
+												bindings: bindings ?? {},
+												account_id: worker.config.account_id,
+											},
+											preExistingRemoteProxySession ?? null
 										);
 
-										const [moduleId] = invokePayloadData.data;
+							if (worker.config.configPath && remoteProxySessionData) {
+								remoteProxySessionsDataMap.set(
+									worker.config.configPath,
+									remoteProxySessionData
+								);
+							}
 
-										// Additional modules (CompiledWasm, Data, Text)
-										if (additionalModuleRE.test(moduleId)) {
-											const result = {
-												externalize: moduleId,
-												type: "module",
-											} satisfies vite.FetchResult;
+							let containerBuildId: string | undefined;
+							if (
+								worker.config.containers?.length &&
+								worker.config.dev.enable_containers
+							) {
+								const dockerPath = getDockerPath();
+								worker.config.dev.container_engine =
+									resolveDockerHost(dockerPath);
+								containerBuildId = generateContainerBuildId();
 
-											return MiniflareResponse.json({ result });
-										}
+								const options = getContainerOptions({
+									containersConfig: worker.config.containers,
+									containerBuildId,
+									configPath: worker.config.configPath,
+								});
+								for (const option of options ?? []) {
+									containerTagToOptionsMap.set(option.image_tag, option);
+								}
+							}
 
-										const devEnvironment = viteDevServer.environments[
-											environmentName
-										] as CloudflareDevEnvironment;
-
-										const result =
-											await devEnvironment.hot.handleInvoke(payload);
-
-										return MiniflareResponse.json(result);
+							const miniflareWorkerOptions =
+								wrangler.unstable_getMiniflareWorkerOptions(
+									{
+										...worker.config,
+										assets: undefined,
 									},
-								},
-							} satisfies Partial<WorkerOptions>,
-						};
-					}
+									resolvedPluginConfig.cloudflareEnv,
+									{
+										remoteProxyConnectionString:
+											remoteProxySessionData?.session
+												?.remoteProxyConnectionString,
+
+										containerBuildId,
+									}
+								);
+
+							const { externalWorkers, workerOptions } = miniflareWorkerOptions;
+
+							if (
+								workerOptions.browserRendering &&
+								getBrowserRenderingHeadfulFromEnv()
+							) {
+								workerOptions.browserRendering.headful = true;
+							}
+
+							const wrappers = [
+								`import { createWorkerEntrypointWrapper, createDurableObjectWrapper, createWorkflowEntrypointWrapper } from "${RUNNER_PATH}";`,
+								`export { __VITE_RUNNER_OBJECT__ } from "${RUNNER_PATH}";`,
+								`export default createWorkerEntrypointWrapper("default");`,
+							];
+
+							const exportTypes = ctx.workerNameToExportTypesMap.get(
+								worker.config.name
+							);
+							assert(exportTypes, `Expected exportTypes to be defined`);
+
+							for (const [name, type] of Object.entries(exportTypes)) {
+								wrappers.push(
+									`export const ${name} = create${type}Wrapper("${name}");`
+								);
+							}
+
+							return {
+								externalWorkers,
+								worker: {
+									...workerOptions,
+									name: worker.config.name,
+									modulesRoot: miniflareModulesRoot,
+									modules: [
+										{
+											type: "ESModule",
+											path: path.join(miniflareModulesRoot, WRAPPER_PATH),
+											contents: wrappers.join("\n"),
+										},
+										{
+											type: "ESModule",
+											path: path.join(miniflareModulesRoot, RUNNER_PATH),
+											contents: fs.readFileSync(
+												fileURLToPath(new URL(RUNNER_PATH, import.meta.url))
+											),
+										},
+										// A breaking change to the module runner was introduced in
+										// https://github.com/vitejs/vite/pull/20924 and released in Vite 7.2.0.
+										// We ship two bundled copies of vite/module-runner and select the
+										// appropriate one based on the user's installed Vite version.
+										{
+											type: "ESModule",
+											path: path.join(
+												miniflareModulesRoot,
+												"workers/runner-worker/vite/module-runner"
+											),
+											contents: fs.readFileSync(
+												fileURLToPath(
+													new URL(
+														satisfiesMinimumViteVersion("7.2.0")
+															? MODULE_RUNNER_PATH
+															: MODULE_RUNNER_LEGACY_PATH,
+														import.meta.url
+													)
+												)
+											),
+										},
+									],
+									unsafeUseModuleFallbackService: true,
+									unsafeInspectorProxy: inputInspectorPort !== false,
+									// Route dev registry requests through the vite Assets proxy worker,
+									...(environmentName ===
+										resolvedPluginConfig.entryWorkerEnvironmentName && {
+										unsafeOverrideFetchWorker: VITE_PROXY_WORKER_NAME,
+									}),
+									unsafeEvalBinding: "__VITE_UNSAFE_EVAL__",
+									serviceBindings: {
+										...workerOptions.serviceBindings,
+										...(environmentName ===
+											resolvedPluginConfig.entryWorkerEnvironmentName &&
+										worker.config.assets?.binding
+											? {
+													[worker.config.assets.binding]: {
+														node: (req, res) => {
+															req[kRequestType] = "asset";
+															viteDevServer.middlewares(req, res);
+														},
+													},
+												}
+											: {}),
+										__VITE_INVOKE_MODULE__: async (request) => {
+											const targetEnvironmentName = request.headers.get(
+												ENVIRONMENT_NAME_HEADER
+											);
+											assert(
+												targetEnvironmentName,
+												`Expected ${ENVIRONMENT_NAME_HEADER} header`
+											);
+											const payload =
+												(await request.json()) as vite.CustomPayload;
+											const devEnvironment = viteDevServer.environments[
+												targetEnvironmentName
+											] as CloudflareDevEnvironment;
+											const result =
+												await devEnvironment.hot.handleInvoke(payload);
+											return MiniflareResponse.json(result);
+										},
+									},
+									durableObjects: {
+										...workerOptions.durableObjects,
+										__VITE_RUNNER_OBJECT__: {
+											className: "__VITE_RUNNER_OBJECT__",
+											unsafeUniqueKey: kUnsafeEphemeralUniqueKey,
+											unsafePreventEviction: true,
+										},
+									},
+								} satisfies Partial<WorkerOptions>,
+							};
+						}
+					)
 				)
 			: [];
 
@@ -358,145 +447,90 @@ export function getDevMiniflareOptions(
 		(options) => options.externalWorkers
 	);
 
-	const workerToWorkerEntrypointNamesMap =
-		getWorkerToWorkerEntrypointNamesMap(userWorkers);
-	const workerToDurableObjectClassNamesMap =
-		getWorkerToDurableObjectClassNamesMap(userWorkers);
-	const workerToWorkflowEntrypointClassNamesMap =
-		getWorkerToWorkflowEntrypointClassNamesMap(userWorkers);
-
 	const logger = new ViteMiniflareLogger(resolvedViteConfig);
 
+	const serverConfig = viteDevServer.config.server;
+	const publicUrl = buildPublicUrl({
+		hostname:
+			typeof serverConfig.host === "string" ? serverConfig.host : undefined,
+		port: serverConfig.port,
+		secure: !!serverConfig.https,
+	});
+
 	return {
-		log: logger,
-		inspectorPort: inspectorPort === false ? undefined : inspectorPort,
-		unsafeInspectorProxy: inspectorPort !== false,
-		handleRuntimeStdio(stdout, stderr) {
-			const decoder = new TextDecoder();
-			stdout.forEach((data) => logger.info(decoder.decode(data)));
-			stderr.forEach((error) =>
-				logger.logWithLevel(LogLevel.ERROR, decoder.decode(error))
-			);
+		miniflareOptions: {
+			log: logger,
+			publicUrl,
+			unsafeProxySharedSecret: PROXY_SHARED_SECRET,
+			logRequests: false,
+			inspectorPort:
+				inputInspectorPort === false ? undefined : inputInspectorPort,
+			unsafeDevRegistryPath: getDefaultDevRegistryPath(),
+			unsafeTriggerHandlers: true,
+			unsafeLocalExplorer: getLocalExplorerEnabledFromEnv(),
+			telemetry: { enabled: false },
+			handleStructuredLogs: getStructuredLogsLogger(logger),
+			defaultPersistRoot: getPersistenceRoot(
+				resolvedViteConfig.root,
+				resolvedPluginConfig.persistState
+			),
+			workers: [...assetWorkers, ...externalWorkers, ...userWorkers],
+			async unsafeModuleFallbackService(request) {
+				const parsed = await parseModuleFallbackRequest(request);
+
+				if (!parsed) {
+					return new MiniflareResponse("Invalid module fallback request", {
+						status: 400,
+					});
+				}
+
+				const rawSpecifier = parsed.rawSpecifier;
+				assert(
+					rawSpecifier,
+					`Unexpected error: no specifier in request to module fallback service.`
+				);
+				const match = additionalModuleRE.exec(rawSpecifier);
+				assert(
+					match,
+					`Unexpected error: no match for module: ${rawSpecifier}.`
+				);
+				const [full, moduleType, modulePath] = match;
+				assert(
+					moduleType,
+					`Unexpected error: module type not found in reference: ${full}.`
+				);
+				assert(
+					modulePath,
+					`Unexpected error: module path not found in reference: ${full}.`
+				);
+
+				let contents: Buffer;
+
+				try {
+					contents = await fsp.readFile(modulePath);
+				} catch {
+					throw new Error(
+						`Import "${modulePath}" not found. Does the file exist?`
+					);
+				}
+
+				switch (moduleType) {
+					case "CompiledWasm": {
+						return MiniflareResponse.json({ wasm: Array.from(contents) });
+					}
+					case "Data": {
+						return MiniflareResponse.json({ data: Array.from(contents) });
+					}
+					case "Text": {
+						return MiniflareResponse.json({ text: contents.toString() });
+					}
+					default: {
+						return MiniflareResponse.error();
+					}
+				}
+			},
 		},
-		...getPersistence(
-			resolvedViteConfig.root,
-			resolvedPluginConfig.persistState
-		),
-		workers: [
-			...assetWorkers,
-			...externalWorkers,
-			...userWorkers.map((workerOptions) => {
-				const wrappers = [
-					`import { createWorkerEntrypointWrapper, createDurableObjectWrapper, createWorkflowEntrypointWrapper } from '${RUNNER_PATH}';`,
-					`export default createWorkerEntrypointWrapper('default');`,
-				];
-
-				const workerEntrypointNames = workerToWorkerEntrypointNamesMap.get(
-					workerOptions.name
-				);
-				assert(
-					workerEntrypointNames,
-					`WorkerEntrypoint names not found for worker ${workerOptions.name}`
-				);
-
-				for (const entrypointName of [...workerEntrypointNames].sort()) {
-					wrappers.push(
-						`export const ${entrypointName} = createWorkerEntrypointWrapper('${entrypointName}');`
-					);
-				}
-
-				const durableObjectClassNames = workerToDurableObjectClassNamesMap.get(
-					workerOptions.name
-				);
-				assert(
-					durableObjectClassNames,
-					`DurableObject class names not found for worker ${workerOptions.name}`
-				);
-
-				for (const className of [...durableObjectClassNames].sort()) {
-					wrappers.push(
-						`export const ${className} = createDurableObjectWrapper('${className}');`
-					);
-				}
-
-				const workflowEntrypointClassNames =
-					workerToWorkflowEntrypointClassNamesMap.get(workerOptions.name);
-				assert(
-					workflowEntrypointClassNames,
-					`WorkflowEntrypoint class names not found for worker: ${workerOptions.name}`
-				);
-
-				for (const className of [...workflowEntrypointClassNames].sort()) {
-					wrappers.push(
-						`export const ${className} = createWorkflowEntrypointWrapper('${className}');`
-					);
-				}
-
-				return {
-					...workerOptions,
-					modules: [
-						{
-							type: "ESModule",
-							path: path.join(miniflareModulesRoot, WRAPPER_PATH),
-							contents: wrappers.join("\n"),
-						},
-						{
-							type: "ESModule",
-							path: path.join(miniflareModulesRoot, RUNNER_PATH),
-							contents: fs.readFileSync(
-								fileURLToPath(new URL(RUNNER_PATH, import.meta.url))
-							),
-						},
-					],
-					unsafeUseModuleFallbackService: true,
-				} satisfies WorkerOptions;
-			}),
-		],
-		async unsafeModuleFallbackService(request) {
-			const url = new URL(request.url);
-			const rawSpecifier = url.searchParams.get("rawSpecifier");
-			assert(
-				rawSpecifier,
-				`Unexpected error: no specifier in request to module fallback service.`
-			);
-
-			const match = additionalModuleRE.exec(rawSpecifier);
-			assert(match, `Unexpected error: no match for module: ${rawSpecifier}.`);
-			const [full, moduleType, modulePath] = match;
-			assert(
-				moduleType,
-				`Unexpected error: module type not found in reference: ${full}.`
-			);
-			assert(
-				modulePath,
-				`Unexpected error: module path not found in reference: ${full}.`
-			);
-
-			let contents: Buffer;
-
-			try {
-				contents = await fsp.readFile(modulePath);
-			} catch (error) {
-				throw new Error(
-					`Import "${modulePath}" not found. Does the file exist?`
-				);
-			}
-
-			switch (moduleType) {
-				case "CompiledWasm": {
-					return MiniflareResponse.json({ wasm: Array.from(contents) });
-				}
-				case "Data": {
-					return MiniflareResponse.json({ data: Array.from(contents) });
-				}
-				case "Text": {
-					return MiniflareResponse.json({ text: contents.toString() });
-				}
-				default: {
-					return MiniflareResponse.error();
-				}
-			}
-		},
+		containerTagToOptionsMap,
 	};
 }
 
@@ -516,80 +550,155 @@ function getPreviewModules(
 				path: entryPath,
 			} as const,
 			...modulesRules.flatMap(({ type, include }) =>
-				globSync(include, { cwd: rootPath, ignore: entryPath }).map((path) => ({
-					type,
-					path,
-				}))
+				globSync(include, { cwd: rootPath, ignore: entryPath }).map(
+					(globPath) => ({
+						type,
+						path: globPath,
+					})
+				)
 			),
 		],
 	} satisfies Pick<WorkerOptions, "rootPath" | "modules">;
 }
 
-export function getPreviewMiniflareOptions(
-	vitePreviewServer: vite.PreviewServer,
-	workerConfigs: Unstable_Config[],
-	persistState: PersistState,
-	inspectorPort: number | false
-): MiniflareOptions {
-	const resolvedViteConfig = vitePreviewServer.config;
-	const workers: Array<WorkerOptions> = workerConfigs.flatMap((config) => {
-		const miniflareWorkerOptions = unstable_getMiniflareWorkerOptions(config);
+export async function getPreviewMiniflareOptions(
+	ctx: PreviewPluginContext,
+	vitePreviewServer: vite.PreviewServer
+): Promise<{
+	miniflareOptions: Extract<MiniflareOptions, { workers: WorkerOptions[] }>;
+	containerTagToOptionsMap: ContainerTagToOptionsMap;
+}> {
+	const inputInspectorPort = await getInputInspectorPort(
+		ctx,
+		vitePreviewServer
+	);
+	const { resolvedPluginConfig, resolvedViteConfig } = ctx;
+	const containerTagToOptionsMap: ContainerTagToOptionsMap = new Map();
 
-		const { externalWorkers } = miniflareWorkerOptions;
+	const workers: Array<WorkerOptions> = (
+		await Promise.all(
+			resolvedPluginConfig.workers.map(async (workerConfig) => {
+				const bindings =
+					wrangler.unstable_convertConfigBindingsToStartWorkerBindings(
+						workerConfig
+					);
 
-		const { ratelimits, modulesRules, ...workerOptions } =
-			miniflareWorkerOptions.workerOptions;
+				const preExistingRemoteProxySessionData = workerConfig.configPath
+					? remoteProxySessionsDataMap.get(workerConfig.configPath)
+					: undefined;
 
-		return [
-			{
-				...workerOptions,
-				name: workerOptions.name ?? config.name,
-				unsafeInspectorProxy: inspectorPort !== false,
-				...(miniflareWorkerOptions.main
-					? getPreviewModules(miniflareWorkerOptions.main, modulesRules)
-					: { modules: true, script: "" }),
-			},
-			...externalWorkers,
-		];
-	});
+				const remoteProxySessionData = !resolvedPluginConfig.remoteBindings
+					? // if remote bindings are not enabled then the proxy session can simply be null
+						null
+					: await wrangler.maybeStartOrUpdateRemoteProxySession(
+							{
+								name: workerConfig.name,
+								bindings: bindings ?? {},
+								account_id: workerConfig.account_id,
+							},
+							preExistingRemoteProxySessionData ?? null
+						);
+
+				if (workerConfig.configPath && remoteProxySessionData) {
+					remoteProxySessionsDataMap.set(
+						workerConfig.configPath,
+						remoteProxySessionData
+					);
+				}
+
+				let containerBuildId: string | undefined;
+				if (
+					workerConfig.containers?.length &&
+					workerConfig.dev.enable_containers
+				) {
+					const dockerPath = getDockerPath();
+					workerConfig.dev.container_engine = resolveDockerHost(dockerPath);
+					containerBuildId = generateContainerBuildId();
+
+					const options = getContainerOptions({
+						containersConfig: workerConfig.containers,
+						containerBuildId,
+						configPath: workerConfig.configPath,
+					});
+					for (const option of options ?? []) {
+						containerTagToOptionsMap.set(option.image_tag, option);
+					}
+				}
+
+				const miniflareWorkerOptions =
+					wrangler.unstable_getMiniflareWorkerOptions(workerConfig, undefined, {
+						remoteProxyConnectionString:
+							remoteProxySessionData?.session?.remoteProxyConnectionString,
+
+						containerBuildId,
+					});
+
+				const { externalWorkers } = miniflareWorkerOptions;
+
+				const { modulesRules, ...workerOptions } =
+					miniflareWorkerOptions.workerOptions;
+
+				return [
+					{
+						...workerOptions,
+						name: workerOptions.name ?? workerConfig.name,
+						unsafeInspectorProxy: inputInspectorPort !== false,
+						...(miniflareWorkerOptions.main
+							? getPreviewModules(miniflareWorkerOptions.main, modulesRules)
+							: { modules: true, script: "" }),
+					},
+					...externalWorkers,
+				] satisfies Array<WorkerOptions>;
+			})
+		)
+	).flat();
 
 	const logger = new ViteMiniflareLogger(resolvedViteConfig);
 
+	const serverConfig = vitePreviewServer.config.preview;
+	const publicUrl = buildPublicUrl({
+		hostname:
+			typeof serverConfig.host === "string" ? serverConfig.host : undefined,
+		port: serverConfig.port,
+		secure: !!serverConfig.https,
+	});
+
 	return {
-		log: logger,
-		inspectorPort: inspectorPort === false ? undefined : inspectorPort,
-		unsafeInspectorProxy: inspectorPort !== false,
-		handleRuntimeStdio(stdout, stderr) {
-			const decoder = new TextDecoder();
-			stdout.forEach((data) => logger.info(decoder.decode(data)));
-			stderr.forEach((error) =>
-				logger.logWithLevel(LogLevel.ERROR, decoder.decode(error))
-			);
+		miniflareOptions: {
+			log: logger,
+			publicUrl,
+			unsafeProxySharedSecret: PROXY_SHARED_SECRET,
+			inspectorPort:
+				inputInspectorPort === false ? undefined : inputInspectorPort,
+			unsafeDevRegistryPath: getDefaultDevRegistryPath(),
+			unsafeTriggerHandlers: true,
+			unsafeLocalExplorer: getLocalExplorerEnabledFromEnv(),
+			telemetry: { enabled: false },
+			handleStructuredLogs: getStructuredLogsLogger(logger),
+			defaultPersistRoot: getPersistenceRoot(
+				resolvedViteConfig.root,
+				resolvedPluginConfig.persistState
+			),
+			workers,
 		},
-		...getPersistence(resolvedViteConfig.root, persistState),
-		workers,
+		containerTagToOptionsMap,
 	};
 }
-
-const removedMessages = [/^Ready on http/, /^Updated and ready on http/];
 
 /**
  * A Miniflare logger that forwards messages onto a Vite logger.
  */
 class ViteMiniflareLogger extends Log {
+	#warnedCompatibilityDateFallback = false;
+
 	private logger: vite.Logger;
+
 	constructor(config: vite.ResolvedConfig) {
 		super(miniflareLogLevelFromViteLogLevel(config.logLevel));
 		this.logger = config.logger;
 	}
 
 	override logWithLevel(level: LogLevel, message: string) {
-		for (const removedMessage of removedMessages) {
-			if (removedMessage.test(message)) {
-				return;
-			}
-		}
-
 		switch (level) {
 			case LogLevel.ERROR:
 				return this.logger.error(message);
@@ -598,6 +707,37 @@ class ViteMiniflareLogger extends Log {
 			case LogLevel.INFO:
 				return this.logger.info(message);
 		}
+	}
+
+	override warn(message: string): void {
+		// workerd emits a warning when the requested compatibility date is newer
+		// than the binary supports. We intercept it here so we only show it once
+		// and only when a newer version of the plugin is actually available on
+		// npm — otherwise the warning is just noise the user cannot act on.
+		if (!message.startsWith("The latest compatibility date supported by")) {
+			this.logger.warn(message);
+			return;
+		}
+
+		if (this.#warnedCompatibilityDateFallback) {
+			return;
+		}
+		this.#warnedCompatibilityDateFallback = true;
+
+		return void checkForNpmUpdate().then((result) => {
+			if (result.status !== "update-available") {
+				return;
+			}
+			this.logger.warn(
+				`${message}\nFeatures enabled by your requested compatibility date may not be available.` +
+					`\nUpgrade to \`@cloudflare/vite-plugin@${result.latest}\` to remove this warning.`
+			);
+			return;
+		});
+	}
+
+	override logReady() {
+		// Noop so that Miniflare server start messages are not logged
 	}
 }
 
@@ -614,4 +754,24 @@ function miniflareLogLevelFromViteLogLevel(
 		case "silent":
 			return LogLevel.NONE;
 	}
+}
+
+/**
+ * Generates a log handler to be passed as the `handleStructuredLogs` option to miniflare
+ *
+ * @param logger the vite logger to use
+ * @returns the log handler to pass to miniflare
+ */
+function getStructuredLogsLogger(logger: Log) {
+	return ({ level, message }: WorkerdStructuredLog) => {
+		if (level === "warn") {
+			return logger.warn(message);
+		}
+
+		if (level === "error") {
+			return logger.logWithLevel(LogLevel.ERROR, message);
+		}
+
+		return logger.info(message);
+	};
 }

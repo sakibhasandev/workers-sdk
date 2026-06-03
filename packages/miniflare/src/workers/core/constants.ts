@@ -1,11 +1,46 @@
+/**
+ * Reserved `/cdn-cgi/` paths for internal Miniflare endpoints.
+ * These paths are reserved by Cloudflare's network and won't conflict with user routes.
+ */
+export const CorePaths = {
+	/** Magic proxy used by getPlatformProxy */
+	PLATFORM_PROXY: "/cdn-cgi/platform-proxy",
+	/** Trigger scheduled event handlers */
+	SCHEDULED: "/cdn-cgi/handler/scheduled",
+	/** Trigger email event handlers */
+	EMAIL: "/cdn-cgi/handler/email",
+	/** Handler path prefix for validation */
+	HANDLER_PREFIX: "/cdn-cgi/handler/",
+	/** Live reload WebSocket endpoint */
+	LIVE_RELOAD: "/cdn-cgi/mf/reload",
+	/** Local explorer UI and API */
+	EXPLORER: "/cdn-cgi/explorer",
+	/** Legacy way to trigger scheduled event handlers */
+	LEGACY_SCHEDULED: "/cdn-cgi/mf/scheduled",
+	/** Stream video serving endpoint */
+	STREAM_VIDEO: "/cdn-cgi/mf/stream",
+	/** Local image delivery endpoint for serving hosted images */
+	IMAGE_DELIVERY: "/cdn-cgi/mf/imagedelivery",
+} as const;
+
 export const CoreHeaders = {
-	CUSTOM_SERVICE: "MF-Custom-Service",
+	CUSTOM_FETCH_SERVICE: "MF-Custom-Fetch-Service",
+	CUSTOM_NODE_SERVICE: "MF-Custom-Node-Service",
 	ORIGINAL_URL: "MF-Original-URL",
+	/**
+	 * Stores the original hostname when using the `upstream` option.
+	 * When requests are proxied to an upstream, the `Host` header is rewritten
+	 * to match the upstream. This header preserves the original hostname
+	 * so Workers can access it if needed.
+	 */
+	ORIGINAL_HOSTNAME: "MF-Original-Hostname",
 	PROXY_SHARED_SECRET: "MF-Proxy-Shared-Secret",
 	DISABLE_PRETTY_ERROR: "MF-Disable-Pretty-Error",
 	ERROR_STACK: "MF-Experimental-Error-Stack",
 	ROUTE_OVERRIDE: "MF-Route-Override",
 	CF_BLOB: "MF-CF-Blob",
+	/** Used by the Vite plugin to pass through the original `sec-fetch-mode` header */
+	SEC_FETCH_MODE: "MF-Sec-Fetch-Mode",
 
 	// API Proxy
 	OP_SECRET: "MF-Op-Secret",
@@ -15,6 +50,7 @@ export const CoreHeaders = {
 	OP_SYNC: "MF-Op-Sync",
 	OP_STRINGIFIED_SIZE: "MF-Op-Stringified-Size",
 	OP_RESULT_TYPE: "MF-Op-Result-Type",
+	OP_ORIGINAL_URL: "MF-Op-Original-URL",
 } as const;
 
 export const CoreBindings = {
@@ -22,6 +58,7 @@ export const CoreBindings = {
 	SERVICE_USER_ROUTE_PREFIX: "MINIFLARE_USER_ROUTE_",
 	SERVICE_USER_FALLBACK: "MINIFLARE_USER_FALLBACK",
 	TEXT_CUSTOM_SERVICE: "MINIFLARE_CUSTOM_SERVICE",
+	IMAGES_SERVICE: "MINIFLARE_IMAGES_SERVICE",
 	TEXT_UPSTREAM_URL: "MINIFLARE_UPSTREAM_URL",
 	JSON_CF_BLOB: "CF_BLOB",
 	JSON_ROUTES: "MINIFLARE_ROUTES",
@@ -32,6 +69,18 @@ export const CoreBindings = {
 	DATA_PROXY_SHARED_SECRET: "MINIFLARE_PROXY_SHARED_SECRET",
 	TRIGGER_HANDLERS: "TRIGGER_HANDLERS",
 	LOG_REQUESTS: "LOG_REQUESTS",
+	STRIP_DISABLE_PRETTY_ERROR: "STRIP_DISABLE_PRETTY_ERROR",
+	SERVICE_LOCAL_EXPLORER: "MINIFLARE_LOCAL_EXPLORER",
+	EXPLORER_DISK: "MINIFLARE_EXPLORER_DISK",
+	JSON_LOCAL_EXPLORER_BINDING_MAP: "LOCAL_EXPLORER_BINDING_MAP",
+	JSON_LOCAL_EXPLORER_WORKER_NAMES: "LOCAL_EXPLORER_WORKER_NAMES",
+	JSON_EXPLORER_WORKER_OPTS: "MINIFLARE_EXPLORER_WORKER_OPTS",
+	SERVICE_CACHE: "MINIFLARE_CACHE",
+	SERVICE_DEV_REGISTRY_PROXY: "MINIFLARE_DEV_REGISTRY_PROXY",
+	JSON_TELEMETRY_CONFIG: "MINIFLARE_TELEMETRY_CONFIG",
+	DEV_REGISTRY_DEBUG_PORT: "DEV_REGISTRY_DEBUG_PORT",
+	SERVICE_STREAM: "MINIFLARE_STREAM",
+	SERVICE_IMAGES_DELIVERY: "MINIFLARE_IMAGES_DELIVERY",
 } as const;
 
 export const ProxyOps = {
@@ -84,4 +133,19 @@ export function isR2ObjectWriteHttpMetadata(targetName: string, key: string) {
 		(targetName === "HeadResult" || targetName === "GetResult") &&
 		key === "writeHttpMetadata"
 	);
+}
+
+/**
+ * See #createMediaProxy() comment for why this is special
+ */
+export function isImagesInput(targetName: string, key: string) {
+	return targetName === "ImagesBindingImpl" && key === "input";
+}
+
+// Durable Object stub RPC calls should always be async to avoid blocking the
+// Node.js event loop. The internal names are "DurableObject" and "WorkerRpc".
+// https://github.com/cloudflare/workerd/blob/62b9ceee/src/workerd/api/actor.h#L86
+// https://github.com/cloudflare/workerd/blob/62b9ceee/src/workerd/api/worker-rpc.h#L30
+export function isDurableObjectStub(targetName: string) {
+	return targetName === "DurableObject" || targetName === "WorkerRpc";
 }

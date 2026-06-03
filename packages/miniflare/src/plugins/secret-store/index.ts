@@ -1,8 +1,20 @@
+import fs from "node:fs/promises";
+import SCRIPT_KV_NAMESPACE_OBJECT from "worker:kv/namespace";
 import SCRIPT_SECRETS_STORE_SECRET from "worker:secrets-store/secret";
 import { z } from "zod";
-import { ServiceDesignator, Worker_Binding } from "../../runtime";
-import { KV_PLUGIN, KVOptionsSchema } from "../kv";
-import { PersistenceSchema, Plugin, ProxyNodeBinding } from "../shared";
+import { SharedBindings } from "../../workers";
+import { KV_NAMESPACE_OBJECT_CLASS_NAME } from "../kv";
+import {
+	getMiniflareObjectBindings,
+	getPersistPath,
+	getUserBindingServiceName,
+	objectEntryWorker,
+	PersistenceSchema,
+	ProxyNodeBinding,
+	SERVICE_LOOPBACK,
+} from "../shared";
+import type { Service, Worker_Binding } from "../../runtime";
+import type { Plugin } from "../shared";
 
 const SecretsStoreSecretsSchema = z.record(
 	z.object({
@@ -21,30 +33,6 @@ export const SecretsStoreSecretsSharedOptionsSchema = z.object({
 
 export const SECRET_STORE_PLUGIN_NAME = "secrets-store";
 
-function getkvNamespacesOptions(
-	secretsStoreSecrets: z.input<typeof SecretsStoreSecretsSchema>
-): z.input<typeof KVOptionsSchema> {
-	// Get unique store ids
-	const storeIds = new Set(
-		Object.values(secretsStoreSecrets).map((store) => store.store_id)
-	);
-	// Setup a KV Namespace per store id with store id as the binding name
-	const storeIdKvNamespaceEntries = Array.from(storeIds).map((storeId) => [
-		storeId,
-		`${SECRET_STORE_PLUGIN_NAME}:${storeId}`,
-	]);
-
-	return {
-		kvNamespaces: Object.fromEntries(storeIdKvNamespaceEntries),
-	};
-}
-
-function isKvBinding(
-	binding: Worker_Binding
-): binding is Worker_Binding & { kvNamespace: ServiceDesignator } {
-	return "kvNamespace" in binding;
-}
-
 export const SECRET_STORE_PLUGIN: Plugin<
 	typeof SecretsStoreSecretsOptionsSchema,
 	typeof SecretsStoreSecretsSharedOptionsSchema
@@ -62,7 +50,10 @@ export const SECRET_STORE_PLUGIN: Plugin<
 			return {
 				name,
 				service: {
-					name: `${SECRET_STORE_PLUGIN_NAME}:${config.store_id}:${config.secret_name}`,
+					name: getUserBindingServiceName(
+						SECRET_STORE_PLUGIN_NAME,
+						`${config.store_id}:${config.secret_name}`
+					),
 					entrypoint: "SecretsStoreSecret",
 				},
 			};
@@ -80,65 +71,117 @@ export const SECRET_STORE_PLUGIN: Plugin<
 			])
 		);
 	},
-	async getServices({ options, sharedOptions, ...restOptions }) {
-		if (!options.secretsStoreSecrets) {
+	async getServices({
+		options,
+		sharedOptions,
+		tmpPath,
+		defaultPersistRoot,
+		unsafeStickyBlobs,
+	}) {
+		const configs = options.secretsStoreSecrets
+			? Object.values(options.secretsStoreSecrets)
+			: [];
+
+		if (configs.length === 0) {
 			return [];
 		}
 
-		const kvServices = await KV_PLUGIN.getServices({
-			options: getkvNamespacesOptions(options.secretsStoreSecrets),
-			sharedOptions: {
-				kvPersist: sharedOptions.secretsStorePersist,
-			},
-			...restOptions,
-		});
-
-		const kvBindings = await KV_PLUGIN.getBindings(
-			getkvNamespacesOptions(options.secretsStoreSecrets),
-			restOptions.workerIndex
+		const persistPath = getPersistPath(
+			SECRET_STORE_PLUGIN_NAME,
+			tmpPath,
+			defaultPersistRoot,
+			sharedOptions.secretsStorePersist
 		);
 
-		if (!kvBindings || !kvBindings.every(isKvBinding)) {
-			throw new Error(
-				"Expected KV plugin to return bindings with kvNamespace defined"
-			);
-		}
+		await fs.mkdir(persistPath, { recursive: true });
 
-		if (!Array.isArray(kvServices)) {
-			throw new Error("Expected KV plugin to return an array of services");
-		}
-
-		return [
-			...kvServices,
-			...Object.entries(options.secretsStoreSecrets).map<Worker_Binding>(
-				([_, config]) => {
-					return {
-						name: `${SECRET_STORE_PLUGIN_NAME}:${config.store_id}:${config.secret_name}`,
-						worker: {
-							compatibilityDate: "2025-01-01",
-							modules: [
-								{
-									name: "secret.worker.js",
-									esModule: SCRIPT_SECRETS_STORE_SECRET(),
-								},
-							],
-							bindings: [
-								{
-									name: "store",
-									kvNamespace: kvBindings.find(
-										// Look up the corresponding KV namespace for the store id
-										(binding) => binding.name === config.store_id
-									)?.kvNamespace,
-								},
-								{
-									name: "secret_name",
-									json: JSON.stringify(config.secret_name),
-								},
-							],
+		const storageService = {
+			name: `${SECRET_STORE_PLUGIN_NAME}:storage`,
+			disk: { path: persistPath, writable: true },
+		} satisfies Service;
+		const objectService = {
+			name: `${SECRET_STORE_PLUGIN_NAME}:ns`,
+			worker: {
+				compatibilityDate: "2023-07-24",
+				compatibilityFlags: ["nodejs_compat", "experimental"],
+				modules: [
+					{
+						name: "namespace.worker.js",
+						esModule: SCRIPT_KV_NAMESPACE_OBJECT(),
+					},
+				],
+				durableObjectNamespaces: [
+					{
+						className: KV_NAMESPACE_OBJECT_CLASS_NAME,
+						uniqueKey: `miniflare-secrets-store-${KV_NAMESPACE_OBJECT_CLASS_NAME}`,
+					},
+				],
+				// Store Durable Object SQL databases in persist path
+				durableObjectStorage: { localDisk: storageService.name },
+				// Bind blob disk directory service to object
+				bindings: [
+					{
+						name: SharedBindings.MAYBE_SERVICE_BLOBS,
+						service: { name: storageService.name },
+					},
+					{
+						name: SharedBindings.MAYBE_SERVICE_LOOPBACK,
+						service: { name: SERVICE_LOOPBACK },
+					},
+					...getMiniflareObjectBindings(unsafeStickyBlobs),
+				],
+			},
+		} satisfies Service;
+		const services = configs.flatMap<Service>((config) => {
+			const kvNamespaceService = {
+				name: `${SECRET_STORE_PLUGIN_NAME}:ns:${config.store_id}`,
+				worker: objectEntryWorker(
+					{
+						serviceName: objectService.name,
+						className: KV_NAMESPACE_OBJECT_CLASS_NAME,
+					},
+					config.store_id
+				),
+			} satisfies Service;
+			const secretStoreSecretService = {
+				name: getUserBindingServiceName(
+					SECRET_STORE_PLUGIN_NAME,
+					`${config.store_id}:${config.secret_name}`
+				),
+				worker: {
+					compatibilityDate: "2025-01-01",
+					modules: [
+						{
+							name: "secret.worker.js",
+							esModule: SCRIPT_SECRETS_STORE_SECRET(),
 						},
-					};
-				}
-			),
-		];
+					],
+					bindings: [
+						{
+							name: "store",
+							kvNamespace: {
+								name: kvNamespaceService.name,
+							},
+						},
+						{
+							name: "secret_name",
+							json: JSON.stringify(config.secret_name),
+						},
+					],
+				},
+			} satisfies Service;
+
+			return [kvNamespaceService, secretStoreSecretService];
+		});
+
+		return [...services, storageService, objectService];
+	},
+	getPersistPath({ secretsStorePersist }, tmpPath) {
+		return getPersistPath(
+			SECRET_STORE_PLUGIN_NAME,
+			tmpPath,
+			undefined,
+			secretsStorePersist
+		);
 	},
 };

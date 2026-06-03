@@ -1,32 +1,47 @@
-import { cancel, startSection } from "@cloudflare/cli";
-import { processArgument } from "@cloudflare/cli/args";
-import { inputPrompt, spinner } from "@cloudflare/cli/interactive";
+import { cancel, startSection } from "@cloudflare/cli-shared-helpers";
+import { processArgument } from "@cloudflare/cli-shared-helpers/args";
+import {
+	inputPrompt,
+	spinner,
+} from "@cloudflare/cli-shared-helpers/interactive";
+import { DeploymentsService } from "@cloudflare/containers-shared";
+import { createCommand } from "../core/create-command";
+import { isNonInteractiveOrCI } from "../is-interactive";
+import { logger } from "../logger";
 import { pollSSHKeysUntilCondition, waitForPlacement } from "./cli";
 import { pickDeployment } from "./cli/deployments";
 import { getLocation } from "./cli/locations";
-import { DeploymentsService } from "./client";
 import {
+	cloudchamberScope,
 	collectEnvironmentVariables,
 	collectLabels,
-	interactWithUser,
-	loadAccountSpinner,
+	fillOpenAPIConfiguration,
 	parseImageName,
 	promptForEnvironmentVariables,
 	promptForLabels,
 	renderDeploymentConfiguration,
 	renderDeploymentMutationError,
+	resolveMemory,
 } from "./common";
 import { wrap } from "./helpers/wrap";
+import {
+	checkInstanceType,
+	promptForInstanceType,
+} from "./instance-type/instance-type";
 import { loadAccount } from "./locations";
 import { sshPrompts } from "./ssh/ssh";
-import type { Config } from "../config";
 import type {
-	CommonYargsArgvJSON,
-	StrictYargsOptionsToInterfaceJSON,
+	CommonYargsArgv,
+	StrictYargsOptionsToInterface,
 } from "../yargs-types";
-import type { DeploymentV2, SSHPublicKeyID } from "./client";
+import type {
+	DeploymentV2,
+	ModifyDeploymentV2RequestBody,
+	SSHPublicKeyID,
+} from "@cloudflare/containers-shared";
+import type { Config } from "@cloudflare/workers-utils";
 
-export function modifyCommandOptionalYargs(yargs: CommonYargsArgvJSON) {
+export function modifyCommandOptionalYargs(yargs: CommonYargsArgv) {
 	return yargs
 		.positional("deploymentId", {
 			type: "string",
@@ -67,6 +82,13 @@ export function modifyCommandOptionalYargs(yargs: CommonYargsArgvJSON) {
 			demandOption: false,
 			describe: "The new location that the deployment will have from now on",
 		})
+		.option("instance-type", {
+			requiresArg: true,
+			choices: ["dev", "basic", "standard"] as const,
+			demandOption: false,
+			describe:
+				"The new instance type that the deployment will have from now on",
+		})
 		.option("vcpu", {
 			requiresArg: true,
 			type: "number",
@@ -82,14 +104,10 @@ export function modifyCommandOptionalYargs(yargs: CommonYargsArgvJSON) {
 }
 
 export async function modifyCommand(
-	modifyArgs: StrictYargsOptionsToInterfaceJSON<
-		typeof modifyCommandOptionalYargs
-	>,
+	modifyArgs: StrictYargsOptionsToInterface<typeof modifyCommandOptionalYargs>,
 	config: Config
 ) {
-	await loadAccountSpinner(modifyArgs);
-
-	if (!interactWithUser(modifyArgs)) {
+	if (isNonInteractiveOrCI()) {
 		if (!modifyArgs.deploymentId) {
 			throw new Error(
 				"there needs to be a deploymentId when you can't interact with the wrangler cli"
@@ -103,19 +121,29 @@ export async function modifyCommand(
 		);
 		const labels = collectLabels(modifyArgs.label);
 
+		const memoryMib = resolveMemory(modifyArgs, config.cloudchamber);
+		const vcpu = modifyArgs.vcpu ?? config.cloudchamber.vcpu;
+		const instanceType = checkInstanceType(modifyArgs, config.cloudchamber);
+
+		const modifyRequest: ModifyDeploymentV2RequestBody = {
+			image: modifyArgs.image ?? config.cloudchamber.image,
+			location: modifyArgs.location ?? config.cloudchamber.location,
+			environment_variables: environmentVariables,
+			labels: labels,
+			ssh_public_key_ids: modifyArgs.sshPublicKeyId,
+			instance_type: instanceType,
+			vcpu: undefined,
+			memory_mib: undefined,
+		};
+		if (instanceType === undefined) {
+			modifyRequest.vcpu = vcpu;
+			modifyRequest.memory_mib = memoryMib;
+		}
 		const deployment = await DeploymentsService.modifyDeploymentV2(
 			modifyArgs.deploymentId,
-			{
-				image: modifyArgs.image ?? config.cloudchamber.image,
-				location: modifyArgs.location ?? config.cloudchamber.location,
-				environment_variables: environmentVariables,
-				labels: labels,
-				ssh_public_key_ids: modifyArgs.sshPublicKeyId,
-				vcpu: modifyArgs.vcpu ?? config.cloudchamber.vcpu,
-				memory: modifyArgs.memory ?? config.cloudchamber.memory,
-			}
+			modifyRequest
 		);
-		console.log(JSON.stringify(deployment, null, 4));
+		logger.json(deployment);
 		return;
 	}
 
@@ -123,7 +151,7 @@ export async function modifyCommand(
 }
 
 async function handleSSH(
-	args: StrictYargsOptionsToInterfaceJSON<typeof modifyCommandOptionalYargs>,
+	args: StrictYargsOptionsToInterface<typeof modifyCommandOptionalYargs>,
 	config: Config,
 	deployment: DeploymentV2
 ): Promise<SSHPublicKeyID[] | undefined> {
@@ -179,7 +207,7 @@ async function handleSSH(
 }
 
 async function handleModifyCommand(
-	args: StrictYargsOptionsToInterfaceJSON<typeof modifyCommandOptionalYargs>,
+	args: StrictYargsOptionsToInterface<typeof modifyCommandOptionalYargs>,
 	config: Config
 ) {
 	startSection("Modify deployment");
@@ -195,6 +223,7 @@ async function handleModifyCommand(
 			if (typeof value !== "string") {
 				return "Unknown error";
 			}
+
 			const { err } = parseImageName(value);
 			return err;
 		},
@@ -228,11 +257,15 @@ async function handleModifyCommand(
 		true
 	);
 
+	const memoryMib = resolveMemory(args, config.cloudchamber);
+	const instanceType = await promptForInstanceType(true);
+
 	renderDeploymentConfiguration("modify", {
 		image,
 		location: location ?? deployment.location.name,
+		instanceType: instanceType,
 		vcpu: args.vcpu ?? config.cloudchamber.vcpu ?? deployment.vcpu,
-		memory: args.memory ?? config.cloudchamber.memory ?? deployment.memory,
+		memoryMib: memoryMib ?? deployment.memory_mib,
 		env: args.env,
 		environmentVariables:
 			selectedEnvironmentVariables !== undefined
@@ -256,16 +289,20 @@ async function handleModifyCommand(
 		"Modifying your container",
 		"shortly your container will be modified to a new version"
 	);
+	const modifyRequest: ModifyDeploymentV2RequestBody = {
+		image,
+		location,
+		ssh_public_key_ids: keys,
+		environment_variables: selectedEnvironmentVariables,
+		labels: selectedLabels,
+		instance_type: instanceType,
+	};
+	if (instanceType === undefined) {
+		modifyRequest.vcpu = args.vcpu ?? config.cloudchamber.vcpu;
+		modifyRequest.memory_mib = memoryMib;
+	}
 	const [newDeployment, err] = await wrap(
-		DeploymentsService.modifyDeploymentV2(deployment.id, {
-			image,
-			location,
-			ssh_public_key_ids: keys,
-			environment_variables: selectedEnvironmentVariables,
-			labels: selectedLabels,
-			vcpu: args.vcpu ?? config.cloudchamber.vcpu,
-			memory: args.memory ?? config.cloudchamber.memory,
-		})
+		DeploymentsService.modifyDeploymentV2(deployment.id, modifyRequest)
 	);
 	stop();
 	if (err) {
@@ -277,3 +314,80 @@ async function handleModifyCommand(
 }
 
 const modifyImageQuestion = "URL of the image to use in your deployment";
+
+export const cloudchamberModifyCommand = createCommand({
+	metadata: {
+		description: "Modify an existing deployment",
+		status: "alpha",
+		owner: "Product: Cloudchamber",
+		hidden: false,
+	},
+	behaviour: {
+		printBanner: () => !isNonInteractiveOrCI(),
+	},
+	args: {
+		deploymentId: {
+			type: "string",
+			demandOption: false,
+			describe: "The deployment you want to modify",
+		},
+		var: {
+			requiresArg: true,
+			type: "array",
+			demandOption: false,
+			describe: "Container environment variables",
+			coerce: (arg: unknown[]) => arg.map((a) => a?.toString() ?? ""),
+		},
+		label: {
+			requiresArg: true,
+			type: "array",
+			demandOption: false,
+			describe: "Deployment labels",
+			coerce: (arg: unknown[]) => arg.map((a) => a?.toString() ?? ""),
+		},
+		"ssh-public-key-id": {
+			requiresArg: true,
+			type: "string",
+			array: true,
+			demandOption: false,
+			describe:
+				"Public SSH key IDs to include in this container. You can add one to your account with `wrangler cloudchamber ssh create",
+		},
+		image: {
+			requiresArg: true,
+			type: "string",
+			demandOption: false,
+			describe: "The new image that the deployment will have from now on",
+		},
+		location: {
+			requiresArg: true,
+			type: "string",
+			demandOption: false,
+			describe: "The new location that the deployment will have from now on",
+		},
+		"instance-type": {
+			requiresArg: true,
+			choices: ["dev", "basic", "standard"] as const,
+			demandOption: false,
+			describe:
+				"The new instance type that the deployment will have from now on",
+		},
+		vcpu: {
+			requiresArg: true,
+			type: "number",
+			demandOption: false,
+			describe: "The new vcpu that the deployment will have from now on",
+		},
+		memory: {
+			requiresArg: true,
+			type: "string",
+			demandOption: false,
+			describe: "The new memory that the deployment will have from now on",
+		},
+	},
+	positionalArgs: ["deploymentId"],
+	async handler(args, { config }) {
+		await fillOpenAPIConfiguration(config, cloudchamberScope);
+		await modifyCommand(args, config);
+	},
+});

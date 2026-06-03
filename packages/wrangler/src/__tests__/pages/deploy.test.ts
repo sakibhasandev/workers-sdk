@@ -1,11 +1,26 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { chdir } from "node:process";
-import TOML from "@iarna/toml";
+import {
+	runInTempDir,
+	writeWranglerConfig,
+} from "@cloudflare/workers-utils/test-helpers";
+import ci from "ci-info";
 import { execa } from "execa";
 import { http, HttpResponse } from "msw";
+import TOML from "smol-toml";
 import dedent from "ts-dedent";
+/* eslint-disable-next-line no-restricted-imports --
+ * Uses expect in MSW handlers outside test callbacks
+ * TODO: remove this `expect` import
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { version } from "../../../package.json";
-import { ROUTES_SPEC_VERSION } from "../../pages/constants";
+import { saveToConfigCache } from "../../config-cache";
+import { logger } from "../../logger";
+import {
+	PAGES_CONFIG_CACHE_FILENAME,
+	ROUTES_SPEC_VERSION,
+} from "../../pages/constants";
 import { ApiErrorCodes } from "../../pages/errors";
 import { isRoutesJSONSpec } from "../../pages/functions/routes-validation";
 import { endEventLoop } from "../helpers/end-event-loop";
@@ -17,11 +32,16 @@ import { useMockIsTTY } from "../helpers/mock-istty";
 import { mockSetTimeout } from "../helpers/mock-set-timeout";
 import { msw } from "../helpers/msw";
 import { normalizeProgressSteps } from "../helpers/normalize-progress";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
-import { toString } from "../helpers/serialize-form-data-entry";
-import { writeWranglerConfig } from "../helpers/write-wrangler-config";
-import type { Project, UploadPayloadFile } from "../../pages/types";
+import {
+	formDataToObject,
+	toString,
+} from "../helpers/serialize-form-data-entry";
+import type {
+	PagesConfigCache,
+	Project,
+	UploadPayloadFile,
+} from "../../pages/types";
 import type { StrictRequest } from "msw";
 import type { FormDataEntryValue } from "undici";
 
@@ -39,7 +59,7 @@ describe("pages deploy", () => {
 
 	//TODO Abstract MSW handlers that repeat to this level - JACOB
 	beforeEach(() => {
-		vi.stubEnv("CI", "true");
+		vi.mocked(ci).isCI = true;
 		setIsTTY(false);
 	});
 
@@ -51,7 +71,7 @@ describe("pages deploy", () => {
 		msw.restoreHandlers();
 	});
 
-	it("should be aliased with 'wrangler pages deploy'", async () => {
+	it("should be aliased with 'wrangler pages deploy'", async ({ expect }) => {
 		await runWrangler("pages deploy --help");
 		await endEventLoop();
 
@@ -64,9 +84,11 @@ describe("pages deploy", () => {
 			  directory  The directory of static files to upload  [string]
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
 			      --project-name        The name of the project you want to deploy to  [string]
@@ -80,7 +102,9 @@ describe("pages deploy", () => {
 		`);
 	});
 
-	it("should error if no `[<directory>]` arg is specified in the `pages deploy` command", async () => {
+	it("should error if no `[<directory>]` arg is specified in the `pages deploy` command", async ({
+		expect,
+	}) => {
 		await expect(
 			runWrangler("pages deploy")
 		).rejects.toThrowErrorMatchingInlineSnapshot(
@@ -88,15 +112,19 @@ describe("pages deploy", () => {
 		);
 	});
 
-	it("should error if no `[--project-name]` is specified", async () => {
+	it("should error if no `[--project-name]` is specified", async ({
+		expect,
+	}) => {
 		await expect(
 			runWrangler("pages deploy public")
 		).rejects.toThrowErrorMatchingInlineSnapshot(
-			`[Error: Must specify a project name.]`
+			`[Error: Missing Pages project name. Use --project-name <name> or set the name in your Wrangler configuration file.]`
 		);
 	});
 
-	it("should error if the [--config] command line arg was specififed", async () => {
+	it("should error if the [--config] command line arg was specififed", async ({
+		expect,
+	}) => {
 		await expect(
 			runWrangler("pages deploy public --config=/path/to/wrangler.toml")
 		).rejects.toThrowErrorMatchingInlineSnapshot(
@@ -104,7 +132,9 @@ describe("pages deploy", () => {
 		);
 	});
 
-	it("should error if the [--env] command line arg was specififed", async () => {
+	it("should error if the [--env] command line arg was specififed", async ({
+		expect,
+	}) => {
 		await expect(
 			runWrangler("pages deploy public --env=production")
 		).rejects.toThrowErrorMatchingInlineSnapshot(
@@ -112,9 +142,10 @@ describe("pages deploy", () => {
 		);
 	});
 
-	it("should upload a directory of files", async () => {
+	it("should upload a directory of files", async ({ expect }) => {
 		writeFileSync("logo.png", "foobar");
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -173,16 +204,15 @@ describe("pages deploy", () => {
 				"*/accounts/:accountId/pages/projects/foo/deployments",
 				async ({ request, params }) => {
 					expect(params.accountId).toEqual("some-account-id");
-					expect(await request.formData()).toMatchInlineSnapshot(`
-				FormData {
-				  Symbol(state): Array [
-				    Object {
-				      "name": "manifest",
-				      "value": "{\\"/logo.png\\":\\"2082190357cfd3617ccfe04f340c6247\\"}",
-				    },
-				  ],
-				}
-			`);
+					expect(await formDataToObject(await request.formData()))
+						.toMatchInlineSnapshot(`
+							[
+							  {
+							    "name": "manifest",
+							    "value": "{"/logo.png":"2082190357cfd3617ccfe04f340c6247"}",
+							  },
+							]
+						`);
 					return HttpResponse.json(
 						{
 							success: true,
@@ -246,17 +276,21 @@ describe("pages deploy", () => {
 
 		expect(getProjectRequestCount).toBe(2);
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Success! Uploaded 1 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 1 files (TIMINGS)
 
 			🌎 Deploying...
 			✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 		`);
 	});
 
-	it("should retry uploads", async () => {
+	it("should retry uploads", async ({ expect }) => {
 		writeFileSync("logo.txt", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -341,16 +375,15 @@ describe("pages deploy", () => {
 				"*/accounts/:accountId/pages/projects/foo/deployments",
 				async ({ request, params }) => {
 					expect(params.accountId).toEqual("some-account-id");
-					expect(await request.formData()).toMatchInlineSnapshot(`
-				FormData {
-				  Symbol(state): Array [
-				    Object {
-				      "name": "manifest",
-				      "value": "{\\"/logo.txt\\":\\"1a98fb08af91aca4a7df1764a2c4ddb0\\"}",
-				    },
-				  ],
-				}
-			`);
+					expect(await formDataToObject(await request.formData()))
+						.toMatchInlineSnapshot(`
+							[
+							  {
+							    "name": "manifest",
+							    "value": "{"/logo.txt":"1a98fb08af91aca4a7df1764a2c4ddb0"}",
+							  },
+							]
+						`);
 
 					return HttpResponse.json(
 						{
@@ -417,17 +450,21 @@ describe("pages deploy", () => {
 		expect(getProjectRequestCount).toBe(2);
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Success! Uploaded 1 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 1 files (TIMINGS)
 
 			🌎 Deploying...
 			✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 		`);
 	});
 
-	it("should retry POST /deployments", async () => {
+	it("should retry POST /deployments", async ({ expect }) => {
 		writeFileSync("logo.txt", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -491,16 +528,15 @@ describe("pages deploy", () => {
 					requests.push(request);
 					expect(params.accountId).toEqual("some-account-id");
 					if (requests.length === 1) {
-						expect(await request.formData()).toMatchInlineSnapshot(`
-				      FormData {
-				        Symbol(state): Array [
-				          Object {
-				            "name": "manifest",
-				            "value": "{\\"/logo.txt\\":\\"1a98fb08af91aca4a7df1764a2c4ddb0\\"}",
-				          },
-				        ],
-				      }
-			    `);
+						expect(await formDataToObject(await request.formData()))
+							.toMatchInlineSnapshot(`
+								[
+								  {
+								    "name": "manifest",
+								    "value": "{"/logo.txt":"1a98fb08af91aca4a7df1764a2c4ddb0"}",
+								  },
+								]
+							`);
 					}
 
 					if (requests.length < 2) {
@@ -581,14 +617,17 @@ describe("pages deploy", () => {
 		expect(requests.length).toBe(2);
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Success! Uploaded 1 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 1 files (TIMINGS)
 
 			🌎 Deploying...
 			✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 		`);
 	});
 
-	it("should retry GET /deployments/:deploymentId", async () => {
+	it("should retry GET /deployments/:deploymentId", async ({ expect }) => {
 		// set up the directory of static files to upload.
 		mkdirSync("public");
 		writeFileSync("public/README.md", "This is a readme");
@@ -608,6 +647,7 @@ describe("pages deploy", () => {
 		);
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -711,10 +751,10 @@ describe("pages deploy", () => {
 					]);
 
 					expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+						{
+						  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+						}
+					`);
 
 					return HttpResponse.json(
 						{
@@ -801,7 +841,10 @@ describe("pages deploy", () => {
 		expect(getProjectRequestCount).toEqual(2);
 		expect(getDeploymentDetailsRequestCount).toEqual(3);
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Compiled Worker successfully
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Compiled Worker successfully
 			✨ Success! Uploaded 1 files (TIMINGS)
 
 			✨ Uploading Functions bundle
@@ -812,15 +855,38 @@ describe("pages deploy", () => {
 		expect(std.err).toMatchInlineSnapshot(`""`);
 	});
 
-	it("should refetch a JWT if it expires while uploading", async () => {
+	it("should refetch a JWT if it expires while uploading", async ({
+		expect,
+	}) => {
 		writeFileSync("logo.txt", "foobar");
-		mockGetUploadTokenRequest(
-			"<<funfetti-auth-jwt>>",
-			"some-account-id",
-			"foo"
-		);
 
+		// JWT is fetched 3 times:
+		// 1. For validation (before upload)
+		// 2. For upload's initial fetch
+		// 3. For upload's refresh after UNAUTHORIZED
+		let jwtFetchCount = 0;
 		msw.use(
+			http.get(
+				`*/accounts/:accountId/pages/projects/foo/upload-token`,
+				({ params }) => {
+					expect(params.accountId).toEqual("some-account-id");
+					jwtFetchCount++;
+					// First two fetches return jwt1, third fetch (refresh) returns jwt2
+					const jwt =
+						jwtFetchCount <= 2
+							? "<<funfetti-auth-jwt>>"
+							: "<<funfetti-auth-jwt2>>";
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: { jwt },
+						},
+						{ status: 200 }
+					);
+				}
+			),
 			http.post<never, { hashes: string[] }>(
 				"*/pages/assets/check-missing",
 				async ({ request }) => {
@@ -862,21 +928,6 @@ describe("pages deploy", () => {
 							],
 							messages: [],
 							result: null,
-						},
-						{ status: 200 }
-					);
-				},
-				{ once: true }
-			),
-			http.get(
-				`*/accounts/:accountId/pages/projects/foo/upload-token`,
-				() => {
-					return HttpResponse.json(
-						{
-							success: true,
-							errors: [],
-							messages: [],
-							result: { jwt: "<<funfetti-auth-jwt2>>" },
 						},
 						{ status: 200 }
 					);
@@ -939,16 +990,15 @@ describe("pages deploy", () => {
 				"*/accounts/:accountId/pages/projects/foo/deployments",
 				async ({ request, params }) => {
 					expect(params.accountId).toEqual("some-account-id");
-					expect(await request.formData()).toMatchInlineSnapshot(`
-				      FormData {
-				        Symbol(state): Array [
-				          Object {
-				            "name": "manifest",
-				            "value": "{\\"/logo.txt\\":\\"1a98fb08af91aca4a7df1764a2c4ddb0\\"}",
-				          },
-				        ],
-				      }
-			    `);
+					expect(await formDataToObject(await request.formData()))
+						.toMatchInlineSnapshot(`
+							[
+							  {
+							    "name": "manifest",
+							    "value": "{"/logo.txt":"1a98fb08af91aca4a7df1764a2c4ddb0"}",
+							  },
+							]
+						`);
 
 					return HttpResponse.json(
 						{
@@ -1009,20 +1059,26 @@ describe("pages deploy", () => {
 		await runWrangler("pages deploy . --project-name=foo");
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Success! Uploaded 1 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 1 files (TIMINGS)
 
 			🌎 Deploying...
 			✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 		`);
 	});
 
-	it("should try to use multiple buckets (up to the max concurrency)", async () => {
+	it("should try to use multiple buckets (up to the max concurrency)", async ({
+		expect,
+	}) => {
 		writeFileSync("logo.txt", "foobar");
 		writeFileSync("logo.png", "foobar");
 		writeFileSync("logo.html", "foobar");
 		writeFileSync("logo.js", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -1095,13 +1151,13 @@ describe("pages deploy", () => {
 					const manifest = JSON.parse(await toString(body.get("manifest")));
 
 					expect(manifest).toMatchInlineSnapshot(`
-				                                Object {
-				                                  "/logo.html": "d96fef225537c9f5e44a3cb27fd0b492",
-				                                  "/logo.js": "6be321bef99e758250dac034474ddbb8",
-				                                  "/logo.png": "2082190357cfd3617ccfe04f340c6247",
-				                                  "/logo.txt": "1a98fb08af91aca4a7df1764a2c4ddb0",
-				                                }
-			                          `);
+						{
+						  "/logo.html": "d96fef225537c9f5e44a3cb27fd0b492",
+						  "/logo.js": "6be321bef99e758250dac034474ddbb8",
+						  "/logo.png": "2082190357cfd3617ccfe04f340c6247",
+						  "/logo.txt": "1a98fb08af91aca4a7df1764a2c4ddb0",
+						}
+					`);
 
 					return HttpResponse.json(
 						{
@@ -1203,14 +1259,17 @@ describe("pages deploy", () => {
 		);
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Success! Uploaded 4 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 4 files (TIMINGS)
 
 			🌎 Deploying...
 			✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 		`);
 	});
 
-	it("should resolve child directories correctly", async () => {
+	it("should resolve child directories correctly", async ({ expect }) => {
 		mkdirSync("public");
 		mkdirSync("public/imgs");
 		writeFileSync("public/logo.txt", "foobar");
@@ -1219,6 +1278,7 @@ describe("pages deploy", () => {
 		writeFileSync("public/logo.js", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -1289,13 +1349,13 @@ describe("pages deploy", () => {
 					const body = await request.formData();
 					const manifest = JSON.parse(await toString(body.get("manifest")));
 					expect(manifest).toMatchInlineSnapshot(`
-				                                Object {
-				                                  "/imgs/logo.png": "2082190357cfd3617ccfe04f340c6247",
-				                                  "/logo.html": "d96fef225537c9f5e44a3cb27fd0b492",
-				                                  "/logo.js": "6be321bef99e758250dac034474ddbb8",
-				                                  "/logo.txt": "1a98fb08af91aca4a7df1764a2c4ddb0",
-				                                }
-			                          `);
+						{
+						  "/imgs/logo.png": "2082190357cfd3617ccfe04f340c6247",
+						  "/logo.html": "d96fef225537c9f5e44a3cb27fd0b492",
+						  "/logo.js": "6be321bef99e758250dac034474ddbb8",
+						  "/logo.txt": "1a98fb08af91aca4a7df1764a2c4ddb0",
+						}
+					`);
 
 					return HttpResponse.json(
 						{
@@ -1396,14 +1456,17 @@ describe("pages deploy", () => {
 		);
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Success! Uploaded 4 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 4 files (TIMINGS)
 
 			🌎 Deploying...
 			✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 		`);
 	});
 
-	it("should resolve the current directory correctly", async () => {
+	it("should resolve the current directory correctly", async ({ expect }) => {
 		mkdirSync("public");
 		mkdirSync("public/imgs");
 		writeFileSync("public/logo.txt", "foobar");
@@ -1412,6 +1475,7 @@ describe("pages deploy", () => {
 		writeFileSync("public/logo.js", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -1483,13 +1547,13 @@ describe("pages deploy", () => {
 					const body = await request.formData();
 					const manifest = JSON.parse(await toString(body.get("manifest")));
 					expect(manifest).toMatchInlineSnapshot(`
-				                                Object {
-				                                  "/imgs/logo.png": "2082190357cfd3617ccfe04f340c6247",
-				                                  "/logo.html": "d96fef225537c9f5e44a3cb27fd0b492",
-				                                  "/logo.js": "6be321bef99e758250dac034474ddbb8",
-				                                  "/logo.txt": "1a98fb08af91aca4a7df1764a2c4ddb0",
-				                                }
-			                          `);
+						{
+						  "/imgs/logo.png": "2082190357cfd3617ccfe04f340c6247",
+						  "/logo.html": "d96fef225537c9f5e44a3cb27fd0b492",
+						  "/logo.js": "6be321bef99e758250dac034474ddbb8",
+						  "/logo.txt": "1a98fb08af91aca4a7df1764a2c4ddb0",
+						}
+					`);
 
 					return HttpResponse.json(
 						{
@@ -1591,20 +1655,26 @@ describe("pages deploy", () => {
 		);
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Success! Uploaded 4 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 4 files (TIMINGS)
 
 			🌎 Deploying...
 			✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 		`);
 	});
 
-	it("should not error when directory names contain periods and houses a extensionless file", async () => {
+	it("should not error when directory names contain periods and houses a extensionless file", async ({
+		expect,
+	}) => {
 		mkdirSync(".well-known");
 		// Note: same content as previous test, but since it's a different extension,
 		// it hashes to a different value
 		writeFileSync(".well-known/foobar", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -1741,12 +1811,15 @@ describe("pages deploy", () => {
 	});
 
 	// regression test for issue #3629
-	it("should not error when deploying a new project with a new repo", async () => {
-		vi.stubEnv("CI", "false");
+	it("should not error when deploying a new project with a new repo", async ({
+		expect,
+	}) => {
+		vi.mocked(ci).isCI = false;
 		setIsTTY(true);
 		await execa("git", ["init"]);
 		writeFileSync("logo.png", "foobar");
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -1805,20 +1878,19 @@ describe("pages deploy", () => {
 				"*/accounts/:accountId/pages/projects/foo/deployments",
 				async ({ request, params }) => {
 					expect(params.accountId).toEqual("some-account-id");
-					expect(await request.formData()).toMatchInlineSnapshot(`
-						FormData {
-						  Symbol(state): Array [
-						    Object {
-						      "name": "manifest",
-						      "value": "{\\"/logo.png\\":\\"2082190357cfd3617ccfe04f340c6247\\"}",
-						    },
-						    Object {
-						      "name": "commit_dirty",
-						      "value": "true",
-						    },
-						  ],
-						}
-					`);
+					expect(await formDataToObject(await request.formData()))
+						.toMatchInlineSnapshot(`
+							[
+							  {
+							    "name": "manifest",
+							    "value": "{"/logo.png":"2082190357cfd3617ccfe04f340c6247"}",
+							  },
+							  {
+							    "name": "commit_dirty",
+							    "value": "true",
+							  },
+							]
+						`);
 					return HttpResponse.json(
 						{
 							success: true,
@@ -1879,7 +1951,6 @@ describe("pages deploy", () => {
 					const body = (await request.json()) as Record<string, unknown>;
 
 					expect(params.accountId).toEqual("some-account-id");
-					console.dir(body);
 					expect(body).toEqual({
 						name: "foo",
 						production_branch: "main",
@@ -1933,7 +2004,10 @@ describe("pages deploy", () => {
 
 		expect(getProjectRequestCount).toBe(2);
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-			"✨ Successfully created the 'foo' project.
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Successfully created the 'foo' project.
 			✨ Success! Uploaded 1 files (TIMINGS)
 
 			🌎 Deploying...
@@ -1942,7 +2016,7 @@ describe("pages deploy", () => {
 	});
 
 	describe("with Pages Functions", () => {
-		it("should upload a Functions project", async () => {
+		it("should upload a Functions project", async ({ expect }) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -1959,6 +2033,7 @@ describe("pages deploy", () => {
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -2075,10 +2150,10 @@ describe("pages deploy", () => {
 						]);
 
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						// the contents of the generated `_worker.bundle` file is pretty massive, so I don't
 						// think snapshot testing makes much sense here. Plus, calling
@@ -2181,7 +2256,10 @@ describe("pages deploy", () => {
 
 			expect(getProjectRequestCount).toEqual(2);
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Compiled Worker successfully
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Compiled Worker successfully
 				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Uploading Functions bundle
@@ -2192,7 +2270,9 @@ describe("pages deploy", () => {
 			expect(std.err).toMatchInlineSnapshot('""');
 		});
 
-		it("should bundle Functions and resolve its external module imports", async () => {
+		it("should bundle Functions and resolve its external module imports", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -2218,6 +2298,7 @@ describe("pages deploy", () => {
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -2304,10 +2385,10 @@ describe("pages deploy", () => {
 							].sort()
 						);
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						// some fields in workerBundle, such as the undici form boundary
 						// or the file hashes, are randomly generated. Let's replace these
@@ -2436,7 +2517,10 @@ async function onRequest() {
 
 			expect(getProjectRequestCount).toEqual(2);
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Compiled Worker successfully
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Compiled Worker successfully
 				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Uploading Functions bundle
@@ -2448,7 +2532,9 @@ async function onRequest() {
 			expect(std.err).toMatchInlineSnapshot('""');
 		});
 
-		it("should upload _routes.json for Functions projects, if provided", async () => {
+		it("should upload _routes.json for Functions projects, if provided", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -2487,6 +2573,7 @@ async function onRequest() {
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -2598,10 +2685,10 @@ async function onRequest() {
 						);
 
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						// file content of generated `_worker.bundle` is too massive to snapshot test
 						expect(generatedWorkerBundle).not.toBeNull();
@@ -2704,7 +2791,10 @@ async function onRequest() {
 
 			expect(getProjectRequestCount).toEqual(2);
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Compiled Worker successfully
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Compiled Worker successfully
 				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Uploading Functions bundle
@@ -2717,7 +2807,9 @@ async function onRequest() {
 			expect(std.err).toMatchInlineSnapshot('""');
 		});
 
-		it("should not deploy Functions projects that provide an invalid custom _routes.json file", async () => {
+		it("should not deploy Functions projects that provide an invalid custom _routes.json file", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -2746,6 +2838,7 @@ async function onRequest() {
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -2844,7 +2937,78 @@ and that at least one include rule is provided.
 			expect(getProjectRequestCount).toEqual(2);
 		});
 
-		it("should fail with the appropriate error message, if the deployment of the project failed", async () => {
+		it("should surface a clear error when _routes.json contains invalid JSON (Functions)", async ({
+			expect,
+		}) => {
+			mkdirSync("public");
+			writeFileSync("public/README.md", "This is a readme");
+			writeFileSync("public/_routes.json", `{ invalid json `);
+			mkdirSync("functions");
+			writeFileSync(
+				"functions/hello.js",
+				`export async function onRequest() { return new Response("Hello, world!"); }`
+			);
+			mockGetUploadTokenRequest(
+				expect,
+				"<<funfetti-auth-jwt>>",
+				"some-account-id",
+				"foo"
+			);
+			let getProjectRequestCount = 0;
+			msw.use(
+				http.post(
+					"*/pages/assets/check-missing",
+					async ({ request }) => {
+						const body = (await request.json()) as { hashes: string[] };
+						expect(request.headers.get("Authorization")).toBe(
+							"Bearer <<funfetti-auth-jwt>>"
+						);
+						return HttpResponse.json(
+							{ success: true, errors: [], messages: [], result: body.hashes },
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.post(
+					"*/pages/assets/upload",
+					async ({ request }) => {
+						expect(request.headers.get("Authorization")).toBe(
+							"Bearer <<funfetti-auth-jwt>>"
+						);
+						return HttpResponse.json(
+							{ success: true, errors: [], messages: [], result: null },
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo",
+					async ({ params }) => {
+						getProjectRequestCount++;
+						expect(params.accountId).toEqual("some-account-id");
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: { deployment_configs: { production: {}, preview: {} } },
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+			await expect(
+				runWrangler("pages deploy public --project-name=foo")
+			).rejects.toThrow(/^Invalid _routes\.json file at .*_routes\.json: /);
+			expect(getProjectRequestCount).toEqual(2);
+		});
+
+		it("should fail with the appropriate error message, if the deployment of the project failed", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -2864,6 +3028,7 @@ and that at least one include rule is provided.
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -2964,10 +3129,10 @@ and that at least one include rule is provided.
 						]);
 
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						return HttpResponse.json(
 							{
@@ -3055,13 +3220,13 @@ and that at least one include rule is provided.
 
 			await expect(runWrangler("pages deploy public --project-name=foo"))
 				.rejects.toThrow(`Deployment failed!
-Failed to publish your Function. Got error: Uncaught TypeError: a is not a function
+	Failed to publish your Function. Got error: Uncaught TypeError: a is not a function
   at functionsWorker-0.11031665179307093.js:41:1`);
 		});
 	});
 
 	describe("in Advanced Mode [_worker,js]", () => {
-		it("should upload an Advanced Mode project", async () => {
+		it("should upload an Advanced Mode project", async ({ expect }) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -3081,6 +3246,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -3157,10 +3323,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 						);
 
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						await expect(workerHasD1Shim(workerBundle)).resolves.toBeFalsy();
 						expect(await toString(workerBundle)).toContain(
@@ -3238,7 +3404,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 
 			expect(getProjectRequestCount).toEqual(2);
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Compiled Worker successfully
 				✨ Uploading Worker bundle
@@ -3249,7 +3418,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.err).toMatchInlineSnapshot('""');
 		});
 
-		it("should bundle _worker.js and resolve its external module imports", async () => {
+		it("should bundle _worker.js and resolve its external module imports", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -3286,6 +3457,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -3366,10 +3538,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 							["manifest", "_worker.bundle"].sort()
 						);
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 						// some fields in workerBundle, such as the undici form boundary
 						// or the file hashes, are randomly generated. Let's replace these
 						// dynamic values with static ones so we can properly test the
@@ -3399,25 +3571,25 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 						// small enough, let's go ahead and snapshot test the whole thing
 						expect(workerBundleWithConstantData).toMatchInlineSnapshot(`
 							"------formdata-undici-0.test
-							Content-Disposition: form-data; name=\\"metadata\\"
+							Content-Disposition: form-data; name="metadata"
 
-							{\\"main_module\\":\\"bundledWorker-0.test.mjs\\"}
+							{"main_module":"bundledWorker-0.test.mjs"}
 							------formdata-undici-0.test
-							Content-Disposition: form-data; name=\\"bundledWorker-0.test.mjs\\"; filename=\\"bundledWorker-0.test.mjs\\"
+							Content-Disposition: form-data; name="bundledWorker-0.test.mjs"; filename="bundledWorker-0.test.mjs"
 							Content-Type: application/javascript+module
 
 							// _worker.js
-							import wasm from \\"./test-hello.wasm\\";
-							import html from \\"./test-hello.html\\";
+							import wasm from "./test-hello.wasm";
+							import html from "./test-hello.html";
 							var worker_default = {
 							  async fetch(request, env) {
 							    const url = new URL(request.url);
 							    const helloModule = await WebAssembly.instantiate(wasm);
 							    const wasmGreeting = helloModule.exports.hello;
-							    if (url.pathname.startsWith(\\"/hello-wasm\\")) {
+							    if (url.pathname.startsWith("/hello-wasm")) {
 							      return new Response(wasmGreeting);
 							    }
-							    if (url.pathname.startsWith(\\"/hello-text\\")) {
+							    if (url.pathname.startsWith("/hello-text")) {
 							      return new Response(html);
 							    }
 							    return env.ASSETS.fetch(request);
@@ -3429,16 +3601,17 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 							//# sourceMappingURL=bundledWorker-0.test.mjs.map
 
 							------formdata-undici-0.test
-							Content-Disposition: form-data; name=\\"./test-hello.wasm\\"; filename=\\"./test-hello.wasm\\"
+							Content-Disposition: form-data; name="./test-hello.wasm"; filename="./test-hello.wasm"
 							Content-Type: application/wasm
 
 							Hello wasm modules
 							------formdata-undici-0.test
-							Content-Disposition: form-data; name=\\"./test-hello.html\\"; filename=\\"./test-hello.html\\"
+							Content-Disposition: form-data; name="./test-hello.html"; filename="./test-hello.html"
 							Content-Type: text/plain
 
 							<html><body>Hello text modules</body></html>
-							------formdata-undici-0.test--"
+							------formdata-undici-0.test--
+							"
 						`);
 
 						return HttpResponse.json(
@@ -3507,7 +3680,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 
 			expect(getProjectRequestCount).toEqual(2);
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Compiled Worker successfully
 				✨ Uploading Worker bundle
@@ -3519,7 +3695,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.err).toMatchInlineSnapshot('""');
 		});
 
-		it("should upload _routes.json for Advanced Mode projects, if provided", async () => {
+		it("should upload _routes.json for Advanced Mode projects, if provided", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -3551,6 +3729,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -3654,10 +3833,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 						]);
 						expect(params.accountId).toEqual("some-account-id");
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						// some fields in workerBundle, such as the undici form boundary
 						// or the file hashes, are randomly generated. Let's replace these
@@ -3679,28 +3858,29 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 						// `bundledWorker`, the wasm import, etc., and since `workerBundle` is
 						// small enough, let's go ahead and snapshot test the whole thing
 						expect(workerBundleWithConstantData).toMatchInlineSnapshot(`
-				"------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"metadata\\"
+							"------formdata-undici-0.test
+							Content-Disposition: form-data; name="metadata"
 
-				{\\"main_module\\":\\"bundledWorker-0.test.mjs\\"}
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"bundledWorker-0.test.mjs\\"; filename=\\"bundledWorker-0.test.mjs\\"
-				Content-Type: application/javascript+module
+							{"main_module":"bundledWorker-0.test.mjs"}
+							------formdata-undici-0.test
+							Content-Disposition: form-data; name="bundledWorker-0.test.mjs"; filename="bundledWorker-0.test.mjs"
+							Content-Type: application/javascript+module
 
-				// _worker.js
-				var worker_default = {
-				  async fetch(request, env) {
-				    const url = new URL(request.url);
-				    return url.pathname.startsWith(\\"/api/\\") ? new Response(\\"Ok\\") : env.ASSETS.fetch(request);
-				  }
-				};
-				export {
-				  worker_default as default
-				};
-				//# sourceMappingURL=bundledWorker-0.test.mjs.map
+							// _worker.js
+							var worker_default = {
+							  async fetch(request, env) {
+							    const url = new URL(request.url);
+							    return url.pathname.startsWith("/api/") ? new Response("Ok") : env.ASSETS.fetch(request);
+							  }
+							};
+							export {
+							  worker_default as default
+							};
+							//# sourceMappingURL=bundledWorker-0.test.mjs.map
 
-				------formdata-undici-0.test--"
-			`);
+							------formdata-undici-0.test--
+							"
+						`);
 
 						expect(JSON.parse(customRoutesJSON)).toMatchObject({
 							version: ROUTES_SPEC_VERSION,
@@ -3773,7 +3953,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 
 			expect(getProjectRequestCount).toEqual(2);
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Compiled Worker successfully
 				✨ Uploading Worker bundle
@@ -3786,7 +3969,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should not deploy Advanced Mode projects that provide an invalid _routes.json file", async () => {
+		it("should not deploy Advanced Mode projects that provide an invalid _routes.json file", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -3817,6 +4002,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -3916,7 +4102,77 @@ and that at least one include rule is provided.
 			expect(getProjectRequestCount).toEqual(2);
 		});
 
-		it("should ignore the entire /functions directory if _worker.js is provided", async () => {
+		it("should surface a clear error when _routes.json contains invalid JSON (Advanced Mode)", async ({
+			expect,
+		}) => {
+			mkdirSync("public");
+			writeFileSync("public/README.md", "This is a readme");
+			writeFileSync("public/_routes.json", `{ invalid json `);
+			writeFileSync(
+				"public/_worker.js",
+				`export default { async fetch(request, env) { const url = new URL(request.url); return url.pathname.startsWith('/api/') ? new Response('Ok') : env.ASSETS.fetch(request); } };`
+			);
+			mockGetUploadTokenRequest(
+				expect,
+				"<<funfetti-auth-jwt>>",
+				"some-account-id",
+				"foo"
+			);
+			let getProjectRequestCount = 0;
+			msw.use(
+				http.post(
+					"*/pages/assets/check-missing",
+					async ({ request }) => {
+						const body = (await request.json()) as { hashes: string[] };
+						expect(request.headers.get("Authorization")).toBe(
+							"Bearer <<funfetti-auth-jwt>>"
+						);
+						return HttpResponse.json(
+							{ success: true, errors: [], messages: [], result: body.hashes },
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.post(
+					"*/pages/assets/upload",
+					async ({ request }) => {
+						expect(request.headers.get("Authorization")).toBe(
+							"Bearer <<funfetti-auth-jwt>>"
+						);
+						return HttpResponse.json(
+							{ success: true, errors: [], messages: [], result: null },
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo",
+					async ({ params }) => {
+						getProjectRequestCount++;
+						expect(params.accountId).toEqual("some-account-id");
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: { deployment_configs: { production: {}, preview: {} } },
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+			await expect(
+				runWrangler("pages deploy public --project-name=foo")
+			).rejects.toThrow(/^Invalid _routes\.json file at .*_routes\.json: /);
+			expect(getProjectRequestCount).toEqual(2);
+		});
+
+		it("should ignore the entire /functions directory if _worker.js is provided", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -3946,6 +4202,7 @@ and that at least one include rule is provided.
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -4023,10 +4280,10 @@ and that at least one include rule is provided.
 							["manifest", "_worker.bundle"].sort()
 						);
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						// some fields in workerBundle, such as the undici form boundary
 						// or the file hashes, are randomly generated. Let's replace these
@@ -4048,28 +4305,29 @@ and that at least one include rule is provided.
 						// `bundledWorker`, the wasm import, etc., and since `workerBundle` is
 						// small enough, let's go ahead and snapshot test the whole thing
 						expect(workerBundleWithConstantData).toMatchInlineSnapshot(`
-				"------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"metadata\\"
+							"------formdata-undici-0.test
+							Content-Disposition: form-data; name="metadata"
 
-				{\\"main_module\\":\\"bundledWorker-0.test.mjs\\"}
-				------formdata-undici-0.test
-				Content-Disposition: form-data; name=\\"bundledWorker-0.test.mjs\\"; filename=\\"bundledWorker-0.test.mjs\\"
-				Content-Type: application/javascript+module
+							{"main_module":"bundledWorker-0.test.mjs"}
+							------formdata-undici-0.test
+							Content-Disposition: form-data; name="bundledWorker-0.test.mjs"; filename="bundledWorker-0.test.mjs"
+							Content-Type: application/javascript+module
 
-				// _worker.js
-				var worker_default = {
-				  async fetch(request, env) {
-				    const url = new URL(request.url);
-				    return url.pathname.startsWith(\\"/api/\\") ? new Response(\\"Ok\\") : env.ASSETS.fetch(request);
-				  }
-				};
-				export {
-				  worker_default as default
-				};
-				//# sourceMappingURL=bundledWorker-0.test.mjs.map
+							// _worker.js
+							var worker_default = {
+							  async fetch(request, env) {
+							    const url = new URL(request.url);
+							    return url.pathname.startsWith("/api/") ? new Response("Ok") : env.ASSETS.fetch(request);
+							  }
+							};
+							export {
+							  worker_default as default
+							};
+							//# sourceMappingURL=bundledWorker-0.test.mjs.map
 
-				------formdata-undici-0.test--"
-			`);
+							------formdata-undici-0.test--
+							"
+						`);
 
 						return HttpResponse.json(
 							{
@@ -4134,7 +4392,10 @@ and that at least one include rule is provided.
 
 			expect(getProjectRequestCount).toEqual(2);
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Compiled Worker successfully
 				✨ Uploading Worker bundle
@@ -4145,7 +4406,9 @@ and that at least one include rule is provided.
 			expect(std.err).toMatchInlineSnapshot('""');
 		});
 
-		it("should error with --no-bundle and a single _worker.js file", async () => {
+		it("should error with --no-bundle and a single _worker.js file", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -4167,6 +4430,7 @@ and that at least one include rule is provided.
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -4222,66 +4486,6 @@ and that at least one include rule is provided.
 								errors: [],
 								messages: [],
 								result: true,
-							},
-							{ status: 200 }
-						);
-					},
-					{ once: true }
-				),
-				http.post(
-					"*/accounts/:accountId/pages/projects/foo/deployments",
-					async ({ request, params }) => {
-						expect(params.accountId).toEqual("some-account-id");
-						const body = await request.formData();
-						const manifest = JSON.parse(await toString(body.get("manifest")));
-						const workerBundle = body.get("_worker.bundle");
-
-						// make sure this is all we uploaded
-						expect([...body.keys()].sort()).toEqual(
-							["manifest", "_worker.bundle"].sort()
-						);
-
-						expect(manifest).toMatchInlineSnapshot(`
-																								Object {
-																									"/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-																								}
-																				`);
-
-						await expect(workerHasD1Shim(workerBundle)).resolves.toBeFalsy();
-						expect(await toString(workerBundle)).toContain(`some-module`);
-
-						return HttpResponse.json(
-							{
-								success: true,
-								errors: [],
-								messages: [],
-								result: {
-									id: "123-456-789",
-									url: "https://abcxyz.foo.pages.dev/",
-								},
-							},
-							{ status: 200 }
-						);
-					},
-					{ once: true }
-				),
-				http.get(
-					"*/accounts/:accountId/pages/projects/foo/deployments/:deploymentId",
-					async ({ params }) => {
-						expect(params.accountId).toEqual("some-account-id");
-						expect(params.deploymentId).toEqual("123-456-789");
-
-						return HttpResponse.json(
-							{
-								success: true,
-								errors: [],
-								messages: [],
-								result: {
-									latest_stage: {
-										name: "deploy",
-										status: "success",
-									},
-								},
 							},
 							{ status: 200 }
 						);
@@ -4326,7 +4530,9 @@ and that at least one include rule is provided.
 			);
 		});
 
-		it("should not error with --no-bundle and an index.js in a _worker.js/ directory", async () => {
+		it("should not error with --no-bundle and an index.js in a _worker.js/ directory", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -4349,6 +4555,7 @@ and that at least one include rule is provided.
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -4424,10 +4631,10 @@ and that at least one include rule is provided.
 						);
 
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						await expect(workerHasD1Shim(workerBundle)).resolves.toBeFalsy();
 						expect(await toString(workerBundle)).toContain(`some-module`);
@@ -4500,7 +4707,10 @@ and that at least one include rule is provided.
 			await runWrangler("pages deploy public --project-name=foo --no-bundle");
 
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				✨ Uploading Worker bundle
 				🌎 Deploying...
@@ -4510,7 +4720,9 @@ and that at least one include rule is provided.
 			expect(std.err).toMatchInlineSnapshot('""');
 		});
 
-		it("should fail with the appropriate logs, if the deployment of the project failed", async () => {
+		it("should fail with the appropriate logs, if the deployment of the project failed", async ({
+			expect,
+		}) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -4533,6 +4745,7 @@ and that at least one include rule is provided.
 			);
 
 			mockGetUploadTokenRequest(
+				expect,
 				"<<funfetti-auth-jwt>>",
 				"some-account-id",
 				"foo"
@@ -4608,10 +4821,10 @@ and that at least one include rule is provided.
 						);
 
 						expect(manifest).toMatchInlineSnapshot(`
-				Object {
-				  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
-				}
-			`);
+							{
+							  "/README.md": "13a03eaf24ae98378acd36ea00f77f2f",
+							}
+						`);
 
 						await expect(workerHasD1Shim(workerBundle)).resolves.toBeFalsy();
 						expect(await toString(workerBundle)).toContain(
@@ -4711,7 +4924,7 @@ and that at least one include rule is provided.
 
 			await expect(runWrangler("pages deploy public --project-name=foo"))
 				.rejects.toThrow(`Deployment failed!
-Failed to publish your Function. Got error: Uncaught TypeError: a is not a function
+	Failed to publish your Function. Got error: Uncaught TypeError: a is not a function
   at functionsWorker-0.11031665179307093.js:41:1`);
 		});
 	});
@@ -4719,7 +4932,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 	describe.each(["wrangler.json", "wrangler.toml"])(
 		"with %s configuration",
 		(configPath) => {
-			it(`should support ${configPath}`, async () => {
+			it(`should support ${configPath}`, async ({ expect }) => {
 				// set up the directory of static files to upload.
 				mkdirSync("public");
 				writeFileSync("public/README.md", "This is a readme");
@@ -4748,6 +4961,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 				);
 
 				mockGetUploadTokenRequest(
+					expect,
 					"<<funfetti-auth-jwt>>",
 					"some-account-id",
 					"pages-is-awesome"
@@ -4914,13 +5128,17 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 				expect(std.err).toBe("");
 			});
 
-			it("should error if user attempts to specify a custom config file path", async () => {
+			it("should error if user attempts to specify a custom config file path", async ({
+				expect,
+			}) => {
 				await expect(
 					runWrangler("pages deploy --config foo.toml")
 				).rejects.toThrowErrorMatchingSnapshot();
 			});
 
-			it("should warn and ignore the config file, if it doesn't specify the `pages_build_output_dir` field", async () => {
+			it("should warn and ignore the config file, if it doesn't specify the `pages_build_output_dir` field", async ({
+				expect,
+			}) => {
 				// set up the directory of static files to upload.
 				mkdirSync("public");
 				writeFileSync("public/index.html", "Greetings from Pages");
@@ -4959,7 +5177,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 				);
 			});
 
-			it("should always deploy to the Pages project specified by the top-level `name` configuration field, regardless of the corresponding env-level configuration", async () => {
+			it("should always deploy to the Pages project specified by the top-level `name` configuration field, regardless of the corresponding env-level configuration", async ({
+				expect,
+			}) => {
 				// set up the directory of static files to upload.
 				mkdirSync("public");
 				writeFileSync("public/README.md", "This is a readme");
@@ -4992,6 +5212,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 				);
 
 				mockGetUploadTokenRequest(
+					expect,
 					"<<funfetti-auth-jwt>>",
 					"some-account-id",
 					"pages-project"
@@ -5173,6 +5394,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 		aliases?: string[]
 	) => {
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -5279,7 +5501,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 		const workerIsBundled = async (contents: FormDataEntryValue | null) =>
 			(await toString(contents)).includes("worker_default as default");
 
-		it("should bundle the _worker.js when both `--bundle` and `--no-bundle` are omitted", async () => {
+		it("should bundle the _worker.js when both `--bundle` and `--no-bundle` are omitted", async ({
+			expect,
+		}) => {
 			simulateServer((generatedWorkerJS) =>
 				expect(workerIsBundled(generatedWorkerJS)).resolves.toBeTruthy()
 			);
@@ -5287,7 +5511,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.out).toContain("✨ Uploading Worker bundle");
 		});
 
-		it("should not bundle the _worker.js when `--no-bundle` is set", async () => {
+		it("should not bundle the _worker.js when `--no-bundle` is set", async ({
+			expect,
+		}) => {
 			simulateServer((generatedWorkerJS) =>
 				expect(workerIsBundled(generatedWorkerJS)).resolves.toBeFalsy()
 			);
@@ -5295,7 +5521,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.out).toContain("✨ Uploading Worker bundle");
 		});
 
-		it("should not allow 3rd party imports when not bundling", async () => {
+		it("should not allow 3rd party imports when not bundling", async ({
+			expect,
+		}) => {
 			// Add in a 3rd party import to the bundle
 			writeFileSync(
 				"public/_worker.js",
@@ -5324,7 +5552,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			);
 		});
 
-		it("should allow `cloudflare:...` imports when not bundling", async () => {
+		it("should allow `cloudflare:...` imports when not bundling", async ({
+			expect,
+		}) => {
 			// Add in a 3rd party import to the bundle
 			writeFileSync(
 				"public/_worker.js",
@@ -5346,7 +5576,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.out).toContain("✨ Uploading Worker bundle");
 		});
 
-		it("should allow `node:...` imports when not bundling and marked with nodejs_compat", async () => {
+		it("should allow `node:...` imports when not bundling and marked with nodejs_compat", async ({
+			expect,
+		}) => {
 			// Add in a node built-in import to the bundle
 			writeFileSync(
 				"public/_worker.js",
@@ -5369,7 +5601,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.out).toContain("✨ Uploading Worker bundle");
 		});
 
-		it("should not allow `node:...` imports when not bundling and not marked nodejs_compat", async () => {
+		it("should not allow `node:...` imports when not bundling and not marked nodejs_compat", async ({
+			expect,
+		}) => {
 			// Add in a node built-in import to the bundle
 			writeFileSync(
 				"public/_worker.js",
@@ -5397,7 +5631,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			);
 		});
 
-		it("should not bundle the _worker.js when `--bundle` is set to false", async () => {
+		it("should not bundle the _worker.js when `--bundle` is set to false", async ({
+			expect,
+		}) => {
 			simulateServer((generatedWorkerJS) =>
 				expect(workerIsBundled(generatedWorkerJS)).resolves.toBeFalsy()
 			);
@@ -5407,7 +5643,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.out).toContain("✨ Uploading Worker bundle");
 		});
 
-		it("should bundle the _worker.js when the `--no-bundle` is set to false", async () => {
+		it("should bundle the _worker.js when the `--no-bundle` is set to false", async ({
+			expect,
+		}) => {
 			simulateServer((generatedWorkerJS) =>
 				expect(workerIsBundled(generatedWorkerJS)).resolves.toBeTruthy()
 			);
@@ -5417,7 +5655,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.out).toContain("✨ Uploading Worker bundle");
 		});
 
-		it("should bundle the _worker.js when the `--bundle` is set to true", async () => {
+		it("should bundle the _worker.js when the `--bundle` is set to true", async ({
+			expect,
+		}) => {
 			simulateServer((generatedWorkerJS) =>
 				expect(workerIsBundled(generatedWorkerJS)).resolves.toBeTruthy()
 			);
@@ -5434,7 +5674,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			it(
 				"should not bundle the _worker.js when `no_bundle = true` in Wrangler config: " +
 					configPath,
-				async () => {
+				async ({ expect }) => {
 					mkdirSync("public/_worker.js", { recursive: true });
 					writeFileSync(
 						"public/_worker.js/index.js",
@@ -5493,7 +5733,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			);
 		});
 
-		it("should upload sourcemaps for functions directory projects", async () => {
+		it("should upload sourcemaps for functions directory projects", async ({
+			expect,
+		}) => {
 			mkdirSync("functions");
 			writeFileSync(
 				"functions/[[path]].ts",
@@ -5510,13 +5752,17 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 				expect(contents).toContain(
 					'Content-Disposition: form-data; name="functionsWorker-0.test.js.map"'
 				);
-				expect(contents).toContain('"sources":["[[path]].ts"');
+				expect(contents).toContain(
+					`"sources":["${encodeURIComponent("[[path]].ts")}"`
+				);
 			});
 
 			await runWrangler("pages deploy");
 		});
 
-		it("should upload sourcemaps for _worker.js file projects", async () => {
+		it("should upload sourcemaps for _worker.js file projects", async ({
+			expect,
+		}) => {
 			writeFileSync(
 				"dist/_worker.js",
 				dedent`
@@ -5540,7 +5786,9 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			await runWrangler("pages deploy");
 		});
 
-		it("should upload sourcemaps for _worker.js directory projects", async () => {
+		it("should upload sourcemaps for _worker.js directory projects", async ({
+			expect,
+		}) => {
 			mkdirSync("dist/_worker.js");
 			mkdirSync("dist/_worker.js/chunks");
 			writeFileSync(
@@ -5591,7 +5839,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 	});
 
 	describe("deployment aliases", () => {
-		it("should support outputting an alias url", async () => {
+		it("should support outputting an alias url", async ({ expect }) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -5601,7 +5849,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			await runWrangler("pages deploy public --project-name=foo");
 
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				🌎 Deploying...
 				✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/
@@ -5611,7 +5862,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("ignores custom domains", async () => {
+		it("ignores custom domains", async ({ expect }) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -5621,7 +5872,10 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			await runWrangler("pages deploy public --project-name=foo");
 
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				🌎 Deploying...
 				✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
@@ -5630,7 +5884,7 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("continues to work fine if no aliases", async () => {
+		it("continues to work fine if no aliases", async ({ expect }) => {
 			// set up the directory of static files to upload.
 			mkdirSync("public");
 			writeFileSync("public/README.md", "This is a readme");
@@ -5640,13 +5894,577 @@ Failed to publish your Function. Got error: Uncaught TypeError: a is not a funct
 			await runWrangler("pages deploy public --project-name=foo");
 
 			expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-				"✨ Success! Uploaded 1 files (TIMINGS)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				✨ Success! Uploaded 1 files (TIMINGS)
 
 				🌎 Deploying...
 				✨ Deployment complete! Take a peek over at https://abcxyz.foo.pages.dev/"
 			`);
 
 			expect(std.err).toMatchInlineSnapshot(`""`);
+		});
+	});
+
+	describe("deploys with custom commit information", () => {
+		it("should accept and send --commit-hash parameter", async ({ expect }) => {
+			mkdirSync("public");
+			writeFileSync("public/README.md", "# Test project");
+
+			mockGetUploadTokenRequest(
+				expect,
+				"<<funfetti-auth-jwt>>",
+				"some-account-id",
+				"foo"
+			);
+
+			let deploymentFormData: Record<string, unknown> | null = null;
+
+			msw.use(
+				http.post(
+					"*/pages/assets/check-missing",
+					async () => {
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: [],
+							},
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.post("*/pages/assets/upload", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: null,
+						},
+						{ status: 200 }
+					);
+				}),
+				http.get("*/accounts/:accountId/pages/projects/foo", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: { deployment_configs: { production: {}, preview: {} } },
+						},
+						{ status: 200 }
+					);
+				}),
+				http.post(
+					"*/accounts/:accountId/pages/projects/foo/deployments",
+					async ({ request }) => {
+						const formData = await request.formData();
+						const formDataObj: Record<string, unknown> = {};
+						for (const [key, value] of formData.entries()) {
+							formDataObj[key] = value;
+						}
+						deploymentFormData = formDataObj;
+
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									id: "123-456-789",
+									url: "https://abcxyz.foo.pages.dev/",
+								},
+							},
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo/deployments/:deploymentId",
+					async () => {
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									id: "123-456-789",
+									latest_stage: {
+										name: "deploy",
+										status: "success",
+									},
+								},
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+
+			await runWrangler(
+				"pages deploy public --project-name=foo --commit-hash=abc123def456 --commit-message='Test commit'"
+			);
+
+			// Verify the commit_hash was sent in the deployment request
+			expect(deploymentFormData).not.toBeNull();
+			expect(deploymentFormData).toHaveProperty("commit_hash", "abc123def456");
+			expect(deploymentFormData).toHaveProperty(
+				"commit_message",
+				"Test commit"
+			);
+		});
+	});
+
+	describe("git detection debug logging", () => {
+		afterEach(() => {
+			logger.resetLoggerLevel();
+		});
+
+		it("should output debug logs for git detection when WRANGLER_LOG=debug", async ({
+			expect,
+		}) => {
+			vi.stubEnv("WRANGLER_LOG", "debug");
+			logger.loggerLevel = "debug";
+
+			mkdirSync("public");
+			writeFileSync("public/README.md", "# Test project");
+
+			mockGetUploadTokenRequest(
+				expect,
+				"<<funfetti-auth-jwt>>",
+				"some-account-id",
+				"foo"
+			);
+
+			msw.use(
+				http.post("*/pages/assets/check-missing", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: [],
+						},
+						{ status: 200 }
+					);
+				}),
+				http.post("*/pages/assets/upload", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: null,
+						},
+						{ status: 200 }
+					);
+				}),
+				http.get("*/accounts/:accountId/pages/projects/foo", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: { deployment_configs: { production: {}, preview: {} } },
+						},
+						{ status: 200 }
+					);
+				}),
+				http.post(
+					"*/accounts/:accountId/pages/projects/foo/deployments",
+					async () => {
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									id: "123-456-789",
+									url: "https://abcxyz.foo.pages.dev/",
+								},
+							},
+							{ status: 200 }
+						);
+					}
+				),
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo/deployments/:deploymentId",
+					async () => {
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									id: "123-456-789",
+									latest_stage: {
+										name: "deploy",
+										status: "success",
+									},
+								},
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+
+			await runWrangler("pages deploy public --project-name=foo");
+
+			// Verify debug logs contain git detection messages
+			expect(std.debug).toContain(
+				"pages deploy: Detecting git repository information..."
+			);
+			expect(std.debug).toContain("pages deploy: Git information summary");
+		});
+
+		it("should log git summary even when flags are provided outside a git repo", async ({
+			expect,
+		}) => {
+			vi.stubEnv("WRANGLER_LOG", "debug");
+			logger.loggerLevel = "debug";
+
+			mkdirSync("public");
+			writeFileSync("public/README.md", "# Test project");
+
+			mockGetUploadTokenRequest(
+				expect,
+				"<<funfetti-auth-jwt>>",
+				"some-account-id",
+				"foo"
+			);
+
+			msw.use(
+				http.post("*/pages/assets/check-missing", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: [],
+						},
+						{ status: 200 }
+					);
+				}),
+				http.post("*/pages/assets/upload", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: null,
+						},
+						{ status: 200 }
+					);
+				}),
+				http.get("*/accounts/:accountId/pages/projects/foo", async () => {
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							messages: [],
+							result: { deployment_configs: { production: {}, preview: {} } },
+						},
+						{ status: 200 }
+					);
+				}),
+				http.post(
+					"*/accounts/:accountId/pages/projects/foo/deployments",
+					async () => {
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									id: "123-456-789",
+									url: "https://abcxyz.foo.pages.dev/",
+								},
+							},
+							{ status: 200 }
+						);
+					}
+				),
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo/deployments/:deploymentId",
+					async () => {
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									id: "123-456-789",
+									latest_stage: {
+										name: "deploy",
+										status: "success",
+									},
+								},
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+
+			await runWrangler(
+				"pages deploy public --project-name=foo --branch=main --commit-hash=abc123"
+			);
+
+			// Verify debug logs indicate not a git repo but show the provided values in summary
+			expect(std.debug).toContain(
+				"pages deploy: Not a git repository or git not available"
+			);
+			// Summary should show the provided flag values
+			expect(std.debug).toContain("pages deploy: Git information summary");
+			expect(std.debug).toContain("branch: main");
+			expect(std.debug).toContain("commitHash: abc123");
+		});
+	});
+
+	describe("deploys using redirected configs", () => {
+		let fooProjectDetailsChecked = false;
+
+		beforeEach(() => {
+			fooProjectDetailsChecked = false;
+			mkdirSync("public");
+			mkdirSync("dist");
+			mkdirSync(".wrangler/deploy", { recursive: true });
+			writeFileSync(
+				".wrangler/deploy/config.json",
+				JSON.stringify({ configPath: "../../dist/wrangler.json" })
+			);
+			writeFileSync(
+				"dist/wrangler.json",
+				JSON.stringify({
+					compatibility_date: "2025-01-01",
+					name: "foo",
+					pages_build_output_dir: "../public",
+				})
+			);
+
+			simulateServer(async () => {});
+
+			msw.use(
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo",
+					async ({ params }) => {
+						expect(params.accountId).toEqual("some-account-id");
+
+						fooProjectDetailsChecked = true;
+
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									production_branch: "main",
+									deployment_configs: {
+										production: {},
+										preview: {},
+									},
+								} as Partial<Project>,
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+		});
+
+		afterEach(() => {
+			expect(fooProjectDetailsChecked).toBe(true);
+		});
+
+		const expectedInfo = dedent`
+			Using redirected Wrangler configuration.
+			 - Configuration being used: "dist/wrangler.json"
+			 - Original user's configuration: "<no user config found>"
+			 - Deploy configuration file: ".wrangler/deploy/config.json"
+		`;
+
+		it("should work without a branch specified (i.e. defaulting to the production environment)", async ({
+			expect,
+		}) => {
+			await runWrangler("pages deploy");
+			expect(std.info).toContain(expectedInfo);
+		});
+
+		it("should work with the main branch (i.e. the production environment)", async ({
+			expect,
+		}) => {
+			await runWrangler("pages deploy --branch main");
+			expect(std.info).toContain(expectedInfo);
+		});
+
+		it("should work with any branch (i.e. the preview environment)", async ({
+			expect,
+		}) => {
+			await runWrangler("pages deploy --branch my-branch");
+			expect(std.info).toContain(expectedInfo);
+		});
+	});
+
+	describe("max file count limit from JWT", () => {
+		beforeEach(() => {
+			// Create 6 files for testing
+			for (let i = 0; i < 6; i++) {
+				writeFileSync(`file${i}.txt`, `content${i}`);
+			}
+
+			msw.use(
+				http.post(
+					"*/pages/assets/check-missing",
+					async ({ request }) => {
+						const body = (await request.json()) as { hashes: string[] };
+						return HttpResponse.json(
+							{ success: true, errors: [], messages: [], result: body.hashes },
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.post("*/pages/assets/upload", async () => {
+					return HttpResponse.json(
+						{ success: true, errors: [], messages: [], result: null },
+						{ status: 200 }
+					);
+				}),
+				http.post(
+					"*/accounts/:accountId/pages/projects/foo/deployments",
+					async ({ params }) => {
+						expect(params.accountId).toEqual("some-account-id");
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									id: "123-456-789",
+									url: "https://abcxyz.foo.pages.dev/",
+								},
+							},
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo/deployments/:deploymentId",
+					async ({ params }) => {
+						expect(params.accountId).toEqual("some-account-id");
+						expect(params.deploymentId).toEqual("123-456-789");
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: { latest_stage: { name: "deploy", status: "success" } },
+							},
+							{ status: 200 }
+						);
+					},
+					{ once: true }
+				),
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo",
+					async ({ params }) => {
+						expect(params.accountId).toEqual("some-account-id");
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: { deployment_configs: { production: {}, preview: {} } },
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+		});
+
+		it("should error when file count exceeds limit from JWT", async ({
+			expect,
+		}) => {
+			// JWT with max_file_count_allowed: 5 (less than the 6 files we created)
+			const jwt =
+				"header." +
+				Buffer.from(JSON.stringify({ max_file_count_allowed: 5 })).toString(
+					"base64"
+				) +
+				".signature";
+			mockGetUploadTokenRequest(expect, jwt, "some-account-id", "foo");
+
+			await expect(
+				runWrangler("pages deploy . --project-name=foo")
+			).rejects.toThrowErrorMatchingInlineSnapshot(
+				`[Error: Error: Pages only supports up to 5 files in a deployment for your current plan. Ensure you have specified your build output directory correctly.]`
+			);
+		});
+
+		it("should respect higher file count limit from JWT", async ({
+			expect,
+		}) => {
+			// JWT with max_file_count_allowed: 10 (more than the 6 files we created)
+			const jwt =
+				"header." +
+				Buffer.from(JSON.stringify({ max_file_count_allowed: 10 })).toString(
+					"base64"
+				) +
+				".signature";
+			mockGetUploadTokenRequest(expect, jwt, "some-account-id", "foo");
+
+			await runWrangler("pages deploy . --project-name=foo");
+
+			expect(std.out).toContain("Success! Uploaded 6 files");
+			expect(std.out).toContain("Deployment complete!");
+		});
+	});
+
+	describe("account id resolution", () => {
+		it("should prefer the CLOUDFLARE_ACCOUNT_ID environment variable over a stale cached account id in pages.json", async ({
+			expect,
+		}) => {
+			vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "env-var-account-id");
+
+			// Seed the Pages config cache with a stale account id, simulating
+			// a previous deploy against a different account.
+			saveToConfigCache<PagesConfigCache>(PAGES_CONFIG_CACHE_FILENAME, {
+				account_id: "stale-cached-account-id",
+				project_name: "foo",
+			});
+
+			writeFileSync("logo.png", "foobar");
+
+			msw.use(
+				http.get(
+					"*/accounts/:accountId/pages/projects/foo",
+					({ params }) => {
+						expect(params.accountId).toEqual("env-var-account-id");
+						return HttpResponse.json(
+							{
+								success: false,
+								errors: [{ code: 10000, message: "Authentication error" }],
+								messages: [],
+								result: null,
+							},
+							{ status: 401 }
+						);
+					},
+					{ once: true }
+				)
+			);
+
+			await expect(
+				runWrangler("pages deploy . --project-name=foo")
+			).rejects.toThrow();
 		});
 	});
 });

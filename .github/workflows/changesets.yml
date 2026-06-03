@@ -5,26 +5,43 @@ on:
     branches:
       - main
 
+permissions:
+  id-token: write
+  contents: read
+  # note: no write permissions are needed since the workflow uses GH_ACCESS_TOKEN instead of GITHUB_TOKEN
+
+env:
+  # This workflow only builds and publishes — it never runs Playwright tests.
+  # Skip the browser download to avoid the postinstall script hanging in CI.
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
 jobs:
   release:
     if: ${{ github.repository_owner == 'cloudflare' }}
     name: Handle Changesets
-    runs-on: ubuntu-22.04
+    runs-on: macos-latest-large
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           # See https://github.com/changesets/action/issues/187
           token: ${{ secrets.GH_ACCESS_TOKEN }}
-          fetch-depth: 0
+          persist-credentials: true
+          # Pull in more history to cover the changeset commits
+          fetch-depth: 500
 
       - name: Install Dependencies
+        # Defense in depth: do not pass Turbo remote cache credentials and
+        # disable the pnpm store cache so release builds always resolve
+        # packages from the registry and rebuild every task from source,
+        # rather than restoring from a (potentially poisoned) cache.
         uses: ./.github/actions/install-dependencies
         with:
-          turbo-api: ${{ secrets.TURBO_API }}
-          turbo-team: ${{ secrets.TURBO_TEAM }}
-          turbo-token: ${{ secrets.TURBO_TOKEN }}
-          turbo-signature: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+          node-version: 24
+          disable-cache: "true"
+
+      - name: Check npm version
+        run: node -r esbuild-register tools/deployments/check-npm-version.ts
 
       - name: Check the changesets
         run: node -r esbuild-register tools/deployments/validate-changesets.ts
@@ -34,24 +51,30 @@ jobs:
         env:
           CI_OS: ${{ runner.os }}
           SOURCEMAPS: "false"
+          ALGOLIA_APP_ID: ${{ secrets.ALGOLIA_APP_ID }}
+          ALGOLIA_PUBLIC_KEY: ${{ secrets.ALGOLIA_PUBLIC_KEY }}
+          SENTRY_DSN: "https://9edbb8417b284aa2bbead9b4c318918b@sentry10.cfdata.org/583"
+          NODE_ENV: "production"
+          # This is the "production" key for sparrow analytics.
+          # Include this here because this step will rebuild Wrangler and needs to have this available
+          SPARROW_SOURCE_KEY: "50598e014ed44c739ec8074fdc16057c"
 
       - name: Create Version PR or Publish to NPM
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1
         with:
           version: node .github/changeset-version.js
           publish: pnpm exec changeset publish
         env:
           GITHUB_TOKEN: ${{ secrets.GH_ACCESS_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
-          ALGOLIA_APP_ID: ${{ secrets.ALGOLIA_APP_ID }}
-          ALGOLIA_PUBLIC_KEY: ${{ secrets.ALGOLIA_PUBLIC_KEY }}
-          SENTRY_DSN: "https://9edbb8417b284aa2bbead9b4c318918b@sentry10.cfdata.org/583"
 
-          NODE_ENV: "production"
-          # This is the "production" key for sparrow analytics.
-          # Include this here because this step will rebuild Wrangler and needs to have this available
-          SPARROW_SOURCE_KEY: "50598e014ed44c739ec8074fdc16057c"
+      # Switch to Node 22 for non-npm package deployments because quick-edit
+      # builds native modules (tree-sitter) that are not compatible with
+      # Node 24's C++20 requirement for V8 headers.
+      - name: Switch to Node 22 for non-npm package deployments
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
 
       - name: Deploy non-NPM Packages
         id: deploy
@@ -67,13 +90,13 @@ jobs:
           WORKERS_SHARED_SENTRY_ACCESS_ID: ${{ secrets.WORKERS_SHARED_SENTRY_ACCESS_ID }}
           WORKERS_SHARED_SENTRY_ACCESS_SECRET: ${{ secrets.WORKERS_SHARED_SENTRY_ACCESS_SECRET }}
           WORKERS_SHARED_SENTRY_AUTH_TOKEN: ${{ secrets.WORKERS_SHARED_SENTRY_AUTH_TOKEN }}
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       - name: Send Alert
         if: always()
         run: node -r esbuild-register tools/deployments/alert-on-error.ts
         env:
           PUBLISH_STATUS: ${{ steps.changesets.outcome }}
+          HAS_CHANGESETS: ${{ steps.changesets.outputs.hasChangesets }}
           DEPLOYMENT_STATUS: ${{ steps.deploy.outputs.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TOKEN: ${{ secrets.STATUS_BOT_SECRET }}

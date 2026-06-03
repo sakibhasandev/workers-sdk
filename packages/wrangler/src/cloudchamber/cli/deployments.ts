@@ -1,18 +1,25 @@
-import { exit } from "process";
-import { cancel, crash, endSection, log, newline } from "@cloudflare/cli";
-import { processArgument } from "@cloudflare/cli/args";
-import { brandColor, dim, yellow } from "@cloudflare/cli/colors";
-import { spinner } from "@cloudflare/cli/interactive";
-import { DeploymentsService } from "../client";
+import assert from "node:assert";
+import { exit } from "node:process";
+import {
+	cancel,
+	endSection,
+	log,
+	newline,
+} from "@cloudflare/cli-shared-helpers";
+import { processArgument } from "@cloudflare/cli-shared-helpers/args";
+import { brandColor, dim, yellow } from "@cloudflare/cli-shared-helpers/colors";
+import { spinner } from "@cloudflare/cli-shared-helpers/interactive";
+import { DeploymentsService } from "@cloudflare/containers-shared";
+import { UserError } from "@cloudflare/workers-utils";
 import { wrap } from "../helpers/wrap";
 import { idToLocationName } from "../locations";
 import { statusToColored } from "./util";
 import type {
 	DeploymentPlacementState,
+	DeploymentV2,
 	Placement,
 	PlacementStatusHealth,
-} from "../client";
-import type { DeploymentV2 } from "../client/models/DeploymentV2";
+} from "@cloudflare/containers-shared";
 
 function ipv6(placement: Placement | undefined) {
 	if (!placement) {
@@ -95,11 +102,11 @@ export async function loadDeployments(
 
 	stop();
 	if (err) {
-		crash(
+		throw new UserError(
 			"There has been an error while loading your deployments: \n " +
-				err.message
+				err.message,
+			{ telemetryMessage: "cloudchamber deployments list failed" }
 		);
-		return [];
 	}
 
 	const deployments = deploymentsResponse.filter((d) =>
@@ -155,8 +162,9 @@ export async function listDeploymentsAndChoose(
 		})),
 		label: "deployment",
 	});
-	// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-	return deployments.find((d) => d.id === deployment)!;
+	const chosenDeployment = deployments.find((d) => d.id === deployment);
+	assert(chosenDeployment);
+	return chosenDeployment;
 }
 
 export async function pickDeployment(deploymentIdPrefix?: string) {

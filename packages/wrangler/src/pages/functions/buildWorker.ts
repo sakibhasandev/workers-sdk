@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
-import { access, cp, lstat, rm } from "node:fs/promises";
+import { access, cp, lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { FatalError, removeDir } from "@cloudflare/workers-utils";
 import { build as esBuild } from "esbuild";
 import { bundleWorker } from "../../deployment-bundle/bundle";
 import { findAdditionalModules } from "../../deployment-bundle/find-additional-modules";
@@ -8,13 +9,11 @@ import {
 	createModuleCollector,
 	noopModuleCollector,
 } from "../../deployment-bundle/module-collection";
-import { FatalError } from "../../errors";
 import { logBuildFailure, logger } from "../../logger";
 import { getBasePath } from "../../paths";
 import { getPagesProjectRoot, getPagesTmpDir } from "../utils";
 import type { BundleResult } from "../../deployment-bundle/bundle";
-import type { Entry } from "../../deployment-bundle/entry";
-import type { CfModule } from "../../deployment-bundle/worker";
+import type { CfModule, Entry } from "@cloudflare/workers-utils";
 import type { Plugin } from "esbuild";
 import type { NodeJSCompatMode } from "miniflare";
 
@@ -23,6 +22,7 @@ export type Options = {
 	outfile?: string;
 	outdir?: string;
 	minify?: boolean;
+	keepNames?: boolean;
 	sourcemap?: boolean;
 	fallbackService?: string;
 	watch?: boolean;
@@ -34,6 +34,7 @@ export type Options = {
 	defineNavigatorUserAgent: boolean;
 	checkFetch: boolean;
 	external?: string[];
+	metafile?: string | boolean;
 };
 
 export function buildWorkerFromFunctions({
@@ -41,6 +42,7 @@ export function buildWorkerFromFunctions({
 	outfile = join(getPagesTmpDir(), `./functionsWorker-${Math.random()}.js`),
 	outdir,
 	minify = false,
+	keepNames = true,
 	sourcemap = false,
 	fallbackService = "ASSETS",
 	watch = false,
@@ -52,10 +54,12 @@ export function buildWorkerFromFunctions({
 	defineNavigatorUserAgent,
 	checkFetch,
 	external,
+	metafile,
 }: Options) {
 	const entry: Entry = {
 		file: resolve(getBasePath(), "templates/pages-template-worker.ts"),
 		projectRoot: functionsDirectory,
+		configPath: undefined,
 		format: "modules",
 		moduleRoot: functionsDirectory,
 		exports: [],
@@ -72,11 +76,12 @@ export function buildWorkerFromFunctions({
 		inject: [routesModule],
 		...(outdir ? { entryName: "index" } : { entryName: undefined }),
 		minify,
+		keepNames,
 		sourcemap,
 		watch,
 		nodejsCompatMode,
-		// TODO: mock AE datasets in Pages functions for dev
-		mockAnalyticsEngineDatasets: [],
+		compatibilityDate: undefined,
+		compatibilityFlags: undefined,
 		define: {
 			__FALLBACK_SERVICE__: JSON.stringify(fallbackService),
 		},
@@ -96,6 +101,7 @@ export function buildWorkerFromFunctions({
 		jsxFragment: undefined,
 		tsconfig: undefined,
 		testScheduled: undefined,
+		metafile,
 	});
 }
 
@@ -107,6 +113,7 @@ export type RawOptions = {
 	bundle?: boolean;
 	externalModules?: string[];
 	minify?: boolean;
+	keepNames?: boolean;
 	sourcemap?: boolean;
 	watch?: boolean;
 	plugins?: Plugin[];
@@ -118,6 +125,7 @@ export type RawOptions = {
 	defineNavigatorUserAgent: boolean;
 	checkFetch: boolean;
 	external?: string[];
+	metafile?: string | boolean;
 };
 
 /**
@@ -135,6 +143,7 @@ export function buildRawWorker({
 	bundle = true,
 	externalModules,
 	minify = false,
+	keepNames = true,
 	sourcemap = false,
 	watch = false,
 	plugins = [],
@@ -145,10 +154,12 @@ export function buildRawWorker({
 	defineNavigatorUserAgent,
 	checkFetch,
 	external,
+	metafile,
 }: RawOptions) {
 	const entry: Entry = {
 		file: workerScriptPath,
 		projectRoot: resolve(directory),
+		configPath: undefined,
 		format: "modules",
 		moduleRoot: resolve(directory),
 		exports: [],
@@ -162,11 +173,12 @@ export function buildRawWorker({
 		moduleCollector,
 		additionalModules,
 		minify,
+		keepNames,
 		sourcemap,
 		watch,
 		nodejsCompatMode,
-		// TODO: mock AE datasets in Pages functions for dev
-		mockAnalyticsEngineDatasets: [],
+		compatibilityDate: undefined,
+		compatibilityFlags: undefined,
 		define: {},
 		alias: {},
 		doBindings: [], // Pages functions don't support internal Durable Objects
@@ -202,6 +214,7 @@ export function buildRawWorker({
 		local,
 		projectRoot: getPagesProjectRoot(),
 		defineNavigatorUserAgent,
+		metafile,
 
 		jsxFactory: undefined,
 		jsxFragment: undefined,
@@ -235,6 +248,7 @@ export async function produceWorkerBundleForWorkerJSDirectory({
 		{
 			file: entrypoint,
 			projectRoot: resolve(workerJSDirectory),
+			configPath: undefined,
 			format: "modules",
 			moduleRoot: resolve(workerJSDirectory),
 			exports: [],
@@ -339,7 +353,7 @@ function blockWorkerJsImports(nodejsCompatMode: NodeJSCompatMode): Plugin {
 	return {
 		name: "block-worker-js-imports",
 		setup(build) {
-			build.onResolve({ filter: /.*/g }, (args) => {
+			build.onResolve({ filter: /.*/ }, (args) => {
 				// If it's the entrypoint, let it be as is
 				if (args.kind === "entry-point") {
 					return {
@@ -362,7 +376,10 @@ function blockWorkerJsImports(nodejsCompatMode: NodeJSCompatMode): Plugin {
 					"_worker.js is not being bundled by Wrangler but it is importing from another file.\n" +
 						"This will throw an error if deployed.\n" +
 						"You should bundle the Worker in a pre-build step, remove the import if it is unused, or ask Wrangler to bundle it by setting `--bundle`.",
-					1
+					{
+						code: 1,
+						telemetryMessage: "pages functions worker imports blocked",
+					}
 				);
 			});
 		},
@@ -400,7 +417,7 @@ function assetsPlugin(buildOutputDirectory: string | undefined): Plugin {
 				// TODO: Consider hashing the contents rather than using a unique identifier every time?
 				identifiers.set(directory, crypto.randomUUID());
 				if (!buildOutputDirectory) {
-					console.warn(
+					logger.warn(
 						"You're attempting to import static assets as part of your Pages Functions, but have not specified a directory in which to put them. You must use 'wrangler pages dev <directory>' rather than 'wrangler pages dev -- <command>' to import static assets in Functions."
 					);
 				}
@@ -419,10 +436,7 @@ function assetsPlugin(buildOutputDirectory: string | undefined): Plugin {
 							"pages-plugins",
 							identifier as string
 						);
-						await rm(staticAssetsOutputDirectory, {
-							force: true,
-							recursive: true,
-						});
+						await removeDir(staticAssetsOutputDirectory);
 						await cp(args.path, staticAssetsOutputDirectory, {
 							force: true,
 							recursive: true,

@@ -4,8 +4,9 @@ import { resolve } from "node:path";
 import {
 	getOutputFileDirectoryFromEnv,
 	getOutputFilePathFromEnv,
-} from "./environment-variables/misc-variables";
+} from "@cloudflare/workers-utils";
 import { ensureDirectoryExistsSync } from "./utils/filesystem";
+import type { AutoConfigSummary } from "./autoconfig/types";
 
 /**
  * Write an entry to the output file.
@@ -68,10 +69,13 @@ interface OutputEntryBase<T extends string> {
 export type OutputEntry =
 	| OutputEntrySession
 	| OutputEntryDeployment
+	| OutputEntryPreview
 	| OutputEntryPagesDeployment
 	| OutputEntryVersionUpload
 	| OutputEntryVersionDeployment
-	| OutputEntryPagesDeploymentDetailed;
+	| OutputEntryPagesDeploymentDetailed
+	| OutputEntryCommandFailed
+	| OutputEntryAutoConfig;
 
 interface OutputEntrySession extends OutputEntryBase<"wrangler-session"> {
 	version: 1;
@@ -99,6 +103,32 @@ interface OutputEntryDeployment extends OutputEntryBase<"deploy"> {
 	wrangler_environment: string | undefined;
 }
 
+interface OutputEntryPreview extends OutputEntryBase<"preview"> {
+	version: 1;
+	/** The name of the Worker. */
+	worker_name: string | null;
+	/** The ID of the Preview resource. */
+	preview_id: string;
+	/** The human-readable name of the Preview resource. */
+	preview_name: string;
+	/** The slug of the Preview resource. */
+	preview_slug: string;
+	/** A list of URLs associated with the Preview resource. */
+	preview_urls: string[] | undefined;
+	/** The ID of the Preview deployment resource. */
+	deployment_id: string;
+	/** A list of URLs associated with the Preview deployment. */
+	deployment_urls: string[] | undefined;
+}
+
+interface OutputEntryAutoConfig extends OutputEntryBase<"autoconfig"> {
+	version: 1;
+	/** The command that triggered autoconfig */
+	command: "setup" | "deploy";
+	/** The summary of the autoconfig process */
+	summary: AutoConfigSummary;
+}
+
 interface OutputEntryPagesDeployment extends OutputEntryBase<"pages-deploy"> {
 	version: 1;
 	/** The name of the Pages project. */
@@ -109,8 +139,7 @@ interface OutputEntryPagesDeployment extends OutputEntryBase<"pages-deploy"> {
 	url: string | undefined;
 }
 
-interface OutputEntryPagesDeploymentDetailed
-	extends OutputEntryBase<"pages-deploy-detailed"> {
+interface OutputEntryPagesDeploymentDetailed extends OutputEntryBase<"pages-deploy-detailed"> {
 	version: 1;
 	/** The name of the Pages project. */
 	pages_project: string | null;
@@ -142,14 +171,15 @@ interface OutputEntryVersionUpload extends OutputEntryBase<"version-upload"> {
 	version_id: string | null;
 	/** The preview URL associated with this version upload */
 	preview_url: string | undefined;
+	/** The ephemeral aliased preview URL associated with this version upload */
+	preview_alias_url: string | undefined;
 	/** set if the worker's name was overridden */
 	worker_name_overridden: boolean;
 	/** wrangler environment used */
 	wrangler_environment: string | undefined;
 }
 
-interface OutputEntryVersionDeployment
-	extends OutputEntryBase<"version-deploy"> {
+interface OutputEntryVersionDeployment extends OutputEntryBase<"version-deploy"> {
 	version: 1;
 	/** The name of the Worker. */
 	worker_name: string | null;
@@ -159,4 +189,12 @@ interface OutputEntryVersionDeployment
 	deployment_id: string;
 	/** The percentage of traffic that goes to each version. */
 	version_traffic: Map<string, number>;
+}
+
+interface OutputEntryCommandFailed extends OutputEntryBase<"command-failed"> {
+	version: 1;
+	/** The code in the error. */
+	code: number | undefined;
+	/** The message in the error. */
+	message: string | undefined;
 }

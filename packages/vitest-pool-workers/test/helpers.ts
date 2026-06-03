@@ -1,30 +1,46 @@
-/* eslint-disable no-empty-pattern */
 import childProcess from "node:child_process";
 import events from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import util from "node:util";
+import { removeDir } from "@cloudflare/workers-utils";
 import { stripAnsi } from "miniflare";
+import treeKill from "tree-kill";
+import dedent from "ts-dedent";
 import { test as baseTest, inject, vi } from "vitest";
 
 const debuglog = util.debuglog("vitest-pool-workers:test");
 
-export const minimalVitestConfig = `
-import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
-export default defineWorkersConfig({
-	test: {
-		testTimeout: 90_000,
-		poolOptions: {
-			workers: {
-				singleWorker: true,
+export const vitestConfig = (
+	cfOptions: Record<string, unknown> = {},
+	testOptions: Record<string, unknown> = {}
+) => dedent /* javascript */ `
+	import { cloudflareTest } from "@cloudflare/vitest-pool-workers"
+
+	import { BaseSequencer } from "vitest/node";
+
+	class DeterministicSequencer extends BaseSequencer {
+		sort(files) {
+			return [...files].sort((a, b) => a.moduleId.localeCompare(b.moduleId));
+		}
+	}
+
+	export default {
+		plugins: [
+			cloudflareTest({
 				miniflare: {
-					compatibilityDate: "2024-01-01",
+					compatibilityDate: "2025-12-02",
 					compatibilityFlags: ["nodejs_compat"],
 				},
-			},
-		},
-	}
-});
+				...${JSON.stringify(cfOptions)}
+			})
+		],
+		test: {
+			sequence: { sequencer: DeterministicSequencer },
+			testTimeout: 90_000,
+			...${JSON.stringify(testOptions)}
+		}
+	};
 `;
 
 export function waitFor<T>(callback: Parameters<typeof vi.waitFor<T>>[0]) {
@@ -73,11 +89,14 @@ function wrap(proc: childProcess.ChildProcess): Process {
 			return stripAnsi(stderr);
 		},
 		get exitCode() {
-			return closePromise.then(([exitCode]) => exitCode ?? -1);
+			return closePromise.then(
+				([exitCode, signal]) => exitCode ?? signal ?? -1
+			);
 		},
 	};
 }
 
+// eslint-disable-next-line jest/expect-expect, jest/no-disabled-tests -- base test fixture definition, not an actual test
 export const test = baseTest.extend<{
 	tmpPath: string;
 	seed: (files: Record<string, string>) => Promise<void>;
@@ -88,12 +107,13 @@ export const test = baseTest.extend<{
 	vitestDev: (options?: { flags?: string[]; maxBuffer?: number }) => Process;
 }>({
 	// Fixture for creating a temporary directory
+	// eslint-disable-next-line no-empty-pattern -- Vitest requires the 1st argument to use object destructuring
 	async tmpPath({}, use) {
 		const tmpPoolInstallationPath = inject("tmpPoolInstallationPath");
 		const tmpPathBase = path.join(tmpPoolInstallationPath, "test-");
 		const tmpPath = await fs.mkdtemp(tmpPathBase);
 		await use(tmpPath);
-		await fs.rm(tmpPath, { recursive: true, maxRetries: 10 });
+		await removeDir(tmpPath);
 	},
 	// Fixture for seeding data in the temporary directory
 	async seed({ tmpPath }, use) {
@@ -104,6 +124,7 @@ export const test = baseTest.extend<{
 		const tmpPoolInstallationPath = inject("tmpPoolInstallationPath");
 
 		await use(async ({ flags = [], maxBuffer } = {}) => {
+			// eslint-disable-next-line workers-sdk/no-unsafe-command-execution -- test helper
 			const proc = childProcess.exec(
 				`pnpm exec vitest run --root="${tmpPath}" ` + flags.join(" "),
 				{
@@ -120,9 +141,23 @@ export const test = baseTest.extend<{
 	// Fixture for a starting long-running `vitest dev` process
 	async vitestDev({ tmpPath }, use) {
 		const tmpPoolInstallationPath = inject("tmpPoolInstallationPath");
-		const processes: childProcess.ChildProcess[] = [];
+
+		// In case this process stops unexpectedly, kill all child processes
+		const processes = new Set<childProcess.ChildProcess>();
+		const killAllProcesses = () => {
+			for (const proc of processes) {
+				if (proc.pid) {
+					proc.stdout?.destroy();
+					proc.stderr?.destroy();
+					proc.stdin?.destroy();
+					treeKill(proc.pid, "SIGKILL");
+				}
+			}
+		};
+		process.on("exit", killAllProcesses);
 
 		await use(({ flags = [], maxBuffer } = {}) => {
+			// eslint-disable-next-line workers-sdk/no-unsafe-command-execution -- test helper
 			const proc = childProcess.exec(
 				`pnpm exec vitest dev --root="${tmpPath}" ` + flags.join(" "),
 				{
@@ -131,14 +166,17 @@ export const test = baseTest.extend<{
 					maxBuffer,
 				}
 			);
-			processes.push(proc);
+			processes.add(proc);
+			proc.on("exit", () => {
+				if (proc) {
+					processes.delete(proc);
+				}
+			});
 			return wrap(proc);
 		});
 
-		// Kill all processes after the test
-		for (const proc of processes) {
-			proc.kill();
-		}
+		killAllProcesses();
+		process.off("exit", killAllProcesses);
 	},
 });
 
@@ -154,5 +192,10 @@ function getNoCIEnv(): typeof process.env {
 	const env = { ...process.env };
 	env.CI = undefined;
 	env.GITHUB_ACTIONS = undefined;
+	// Suppress Node.js deprecation warnings in spawned processes to prevent
+	// them from appearing in stderr (which breaks tests that assert stderr is empty)
+	env.NODE_OPTIONS = [env.NODE_OPTIONS, "--no-deprecation"]
+		.filter(Boolean)
+		.join(" ");
 	return env;
 }

@@ -1,5 +1,37 @@
 # edge-preview-authenticated-proxy
 
+## 0.3.1
+
+### Patch Changes
+
+- [#12753](https://github.com/cloudflare/workers-sdk/pull/12753) [`ea8b1a4`](https://github.com/cloudflare/workers-sdk/commit/ea8b1a4619b663598f03d72760090f5e67827d05) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Replace deprecated `promjs` library with `MetricsRegistry` from `@cloudflare/workers-utils/prometheus-metrics`
+
+  The `promjs` library has been unmaintained since 2022 and has a broken `package.json` requiring workarounds. It has been replaced with a lightweight `MetricsRegistry` class in `@cloudflare/workers-utils/prometheus-metrics` that produces byte-identical Prometheus text exposition format output.
+
+- [#13021](https://github.com/cloudflare/workers-sdk/pull/13021) [`973dfdd`](https://github.com/cloudflare/workers-sdk/commit/973dfddd2d247c269e07fa503470357f612abf0e) Thanks [@penalosa](https://github.com/penalosa)! - Restore the `/exchange` preview session endpoint.
+
+## 0.3.0
+
+### Minor Changes
+
+- [#12771](https://github.com/cloudflare/workers-sdk/pull/12771) [`b8c33f5`](https://github.com/cloudflare/workers-sdk/commit/b8c33f5509a202cf4d4ebe5bd38c5705dffd9346) Thanks [@penalosa](https://github.com/penalosa)! - Remove prewarm, inspector_websocket, and exchange proxy from preview flow
+
+  The preview session exchange endpoint (`/exchange`) has been removed from the edge-preview-authenticated-proxy — it has been unused since the dash started fetching the exchange URL directly (DEVX-979). The `prewarm` parameter is no longer required or accepted by the `.update-preview-token` endpoint.
+
+  The playground preview worker now treats `exchange_url` as optional, falling back to the initial token from the edge-preview API when exchange is unavailable. Inspector websocket proxying and prewarm have been removed in favour of using `tail_url` for live logs.
+
+## 0.2.5
+
+### Patch Changes
+
+- [#11217](https://github.com/cloudflare/workers-sdk/pull/11217) [`9ed1542`](https://github.com/cloudflare/workers-sdk/commit/9ed1542e854be65f7c03ed9596ec36767ce8aa36) Thanks [@penalosa](https://github.com/penalosa)! - Use toucan-js v4
+
+## 0.2.4
+
+### Patch Changes
+
+- [#9033](https://github.com/cloudflare/workers-sdk/pull/9033) [`2c50115`](https://github.com/cloudflare/workers-sdk/commit/2c501151d3d1a563681cdb300a298b83862b60e2) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - chore: convert wrangler.toml files into wrangler.jsonc ones
+
 ## 0.2.3
 
 ### Patch Changes

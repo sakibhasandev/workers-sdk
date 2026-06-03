@@ -1,12 +1,13 @@
-import assert from "node:assert";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import dedent from "ts-dedent";
+import { afterEach, assert, describe, it, test, vi } from "vitest";
 import { bundleWorker } from "../deployment-bundle/bundle";
 import { noopModuleCollector } from "../deployment-bundle/module-collection";
 import { isNavigatorDefined } from "../navigator-user-agent";
 import { mockConsoleMethods } from "./helpers/mock-console";
-import { runInTempDir } from "./helpers/run-in-tmp";
+import type { BundleOptions } from "../deployment-bundle/bundle";
 
 /*
  * This file contains inline comments with the word "javascript"
@@ -23,47 +24,47 @@ async function seedFs(files: Record<string, string>): Promise<void> {
 }
 
 describe("isNavigatorDefined", () => {
-	test("default", () => {
+	test("default", ({ expect }) => {
 		expect(isNavigatorDefined(undefined)).toBe(false);
 	});
 
-	test("modern date", () => {
+	test("modern date", ({ expect }) => {
 		expect(isNavigatorDefined("2024-01-01")).toBe(true);
 	});
 
-	test("old date", () => {
+	test("old date", ({ expect }) => {
 		expect(isNavigatorDefined("2000-01-01")).toBe(false);
 	});
 
-	test("switch date", () => {
+	test("switch date", ({ expect }) => {
 		expect(isNavigatorDefined("2022-03-21")).toBe(true);
 	});
 
-	test("before date", () => {
+	test("before date", ({ expect }) => {
 		expect(isNavigatorDefined("2022-03-20")).toBe(false);
 	});
 
-	test("old date, but with flag", () => {
+	test("old date, but with flag", ({ expect }) => {
 		expect(isNavigatorDefined("2000-01-01", ["global_navigator"])).toBe(true);
 	});
 
-	test("old date, with disable flag", () => {
+	test("old date, with disable flag", ({ expect }) => {
 		expect(isNavigatorDefined("2000-01-01", ["no_global_navigator"])).toBe(
 			false
 		);
 	});
 
-	test("new date, but with disable flag", () => {
+	test("new date, but with disable flag", ({ expect }) => {
 		expect(isNavigatorDefined("2024-01-01", ["no_global_navigator"])).toBe(
 			false
 		);
 	});
 
-	test("new date, with enable flag", () => {
+	test("new date, with enable flag", ({ expect }) => {
 		expect(isNavigatorDefined("2024-01-01", ["global_navigator"])).toBe(true);
 	});
 
-	test("errors with disable and enable flags specified", () => {
+	test("errors with disable and enable flags specified", ({ expect }) => {
 		try {
 			isNavigatorDefined("2024-01-01", [
 				"no_global_navigator",
@@ -82,10 +83,29 @@ describe("isNavigatorDefined", () => {
 describe("defineNavigatorUserAgent is respected", () => {
 	runInTempDir();
 	const std = mockConsoleMethods();
+	const sharedBundleOptions = {
+		bundle: true,
+		additionalModules: [],
+		moduleCollector: noopModuleCollector,
+		doBindings: [],
+		workflowBindings: [],
+		define: {},
+		alias: {},
+		checkFetch: false,
+		targetConsumer: "deploy",
+		local: true,
+		projectRoot: process.cwd(),
+	} satisfies Partial<BundleOptions>;
 
-	it("defineNavigatorUserAgent = false, navigator preserved", async () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it("preserves `navigator` when `defineNavigatorUserAgent` is `false`", async ({
+		expect,
+	}) => {
 		await seedFs({
-			"src/index.js": dedent/* javascript */ `
+			"src/index.js": dedent /* javascript */ `
 			function randomBytes(length) {
 				if (navigator.userAgent !== "Cloudflare-Workers") {
 					return new Uint8Array(require("node:crypto").randomBytes(length));
@@ -105,6 +125,7 @@ describe("defineNavigatorUserAgent is respected", () => {
 			{
 				file: path.resolve("src/index.js"),
 				projectRoot: process.cwd(),
+				configPath: undefined,
 				format: "modules",
 				moduleRoot: path.dirname(path.resolve("src/index.js")),
 				exports: [],
@@ -112,42 +133,33 @@ describe("defineNavigatorUserAgent is respected", () => {
 			path.resolve("dist"),
 			// @ts-expect-error Ignore the requirement for passing undefined values
 			{
-				bundle: true,
-				additionalModules: [],
-				moduleCollector: noopModuleCollector,
-				mockAnalyticsEngineDatasets: [],
-				doBindings: [],
-				workflowBindings: [],
-				define: {},
-				alias: {},
-				checkFetch: false,
-				targetConsumer: "deploy",
-				local: true,
-				projectRoot: process.cwd(),
+				...sharedBundleOptions,
 				defineNavigatorUserAgent: false,
 			}
 		);
 
 		// Build time warning that the dynamic import of `require("node:crypto")` may not be safe
 		expect(std.warn).toMatchInlineSnapshot(`
-		"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe package \\"node:crypto\\" wasn't found on the file system but is built into node.[0m
+			"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThe package "node:crypto" wasn't found on the file system but is built into node.[0m
 
-		  Your Worker may throw errors at runtime unless you enable the \\"nodejs_compat\\" compatibility flag.
-		  Refer to [4mhttps://developers.cloudflare.com/workers/runtime-apis/nodejs/[0m for more details. Imported
-		  from:
-		   - src/index.js
+			  Your Worker may throw errors at runtime unless you enable the "nodejs_compat" compatibility flag.
+			  Refer to [4mhttps://developers.cloudflare.com/workers/runtime-apis/nodejs/[0m for more details. Imported
+			  from:
+			   - src/index.js
 
-		"
-	`);
+			"
+		`);
 		const fileContents = await readFile("dist/index.js", "utf8");
 
 		// navigator.userAgent should have been preserved as-is
 		expect(fileContents).toContain("navigator.userAgent");
 	});
 
-	it("defineNavigatorUserAgent = true, navigator treeshaken", async () => {
+	it("tree shakes `navigator` when `defineNavigatorUserAgent` is `true`", async ({
+		expect,
+	}) => {
 		await seedFs({
-			"src/index.js": dedent/* javascript */ `
+			"src/index.js": dedent /* javascript */ `
 			function randomBytes(length) {
 				if (navigator.userAgent !== "Cloudflare-Workers") {
 					return new Uint8Array(require("node:crypto").randomBytes(length));
@@ -167,6 +179,7 @@ describe("defineNavigatorUserAgent is respected", () => {
 			{
 				file: path.resolve("src/index.js"),
 				projectRoot: process.cwd(),
+				configPath: undefined,
 				format: "modules",
 				moduleRoot: path.dirname(path.resolve("src/index.js")),
 				exports: [],
@@ -174,18 +187,55 @@ describe("defineNavigatorUserAgent is respected", () => {
 			path.resolve("dist"),
 			// @ts-expect-error Ignore the requirement for passing undefined values
 			{
-				bundle: true,
-				additionalModules: [],
-				moduleCollector: noopModuleCollector,
-				doBindings: [],
-				workflowBindings: [],
-				define: {},
-				alias: {},
-				mockAnalyticsEngineDatasets: [],
-				checkFetch: false,
-				targetConsumer: "deploy",
-				local: true,
+				...sharedBundleOptions,
+				defineNavigatorUserAgent: true,
+			}
+		);
+
+		// Build time warning is suppressed, because esbuild treeshakes the relevant code path
+		expect(std.warn).toMatchInlineSnapshot(`""`);
+
+		const fileContents = await readFile("dist/index.js", "utf8");
+
+		// navigator.userAgent should have been defined, and so should not be present in the bundle
+		expect(fileContents).not.toContain("navigator.userAgent");
+	});
+
+	it("tree shakes `navigator` when `defineNavigatorUserAgent` is `true` and `process.env.NODE_ENV` is `undefined`", async ({
+		expect,
+	}) => {
+		await seedFs({
+			"src/index.js": dedent /* javascript */ `
+			function randomBytes(length) {
+				if (navigator.userAgent !== "Cloudflare-Workers") {
+					return new Uint8Array(require("node:crypto").randomBytes(length));
+				} else {
+					return crypto.getRandomValues(new Uint8Array(length));
+				}
+			}
+			export default {
+				async fetch(request, env) {
+					return new Response(randomBytes(10))
+				},
+			};
+		`,
+		});
+
+		vi.stubEnv("NODE_ENV", undefined);
+
+		await bundleWorker(
+			{
+				file: path.resolve("src/index.js"),
 				projectRoot: process.cwd(),
+				configPath: undefined,
+				format: "modules",
+				moduleRoot: path.dirname(path.resolve("src/index.js")),
+				exports: [],
+			},
+			path.resolve("dist"),
+			// @ts-expect-error Ignore the requirement for passing undefined values
+			{
+				...sharedBundleOptions,
 				defineNavigatorUserAgent: true,
 			}
 		);

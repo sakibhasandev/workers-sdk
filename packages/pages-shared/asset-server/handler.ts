@@ -114,6 +114,7 @@ type FullHandlerContext<AssetEntry, ContentNegotiation, Asset> = {
 	metadata: Metadata;
 	xServerEnvHeader?: string;
 	xDeploymentIdHeader?: boolean;
+	xWebAnalyticsHeader?: boolean;
 	logError: (err: Error) => void;
 	setMetrics?: (metrics: HandlerMetrics) => void;
 	findAssetEntryForPath: FindAssetEntryForPath<AssetEntry>;
@@ -162,6 +163,7 @@ export async function generateHandler<
 	metadata,
 	xServerEnvHeader,
 	xDeploymentIdHeader,
+	xWebAnalyticsHeader,
 	logError,
 	setMetrics,
 	findAssetEntryForPath,
@@ -286,7 +288,7 @@ export async function generateHandler<
 
 		try {
 			pathname = globalThis.decodeURIComponent(pathname);
-		} catch (err) {}
+		} catch {}
 
 		if (pathname.endsWith("/")) {
 			if ((assetEntry = await findAssetEntryForPath(`${pathname}index.html`))) {
@@ -402,8 +404,21 @@ export async function generateHandler<
 						(async () => {
 							try {
 								const links: { href: string; rel: string; as?: string }[] = [];
+								let baseHref: string | undefined;
 
 								const transformedResponse = new HTMLRewriter()
+									.on("base[href]", {
+										element(element) {
+											// HTML spec: only the first <base href> defines the base URL
+											if (baseHref !== undefined) {
+												return;
+											}
+											const href = element.getAttribute("href");
+											if (href !== null) {
+												baseHref = href;
+											}
+										},
+									})
 									.on(
 										"link[rel~=preconnect],link[rel~=preload],link[rel~=modulepreload]",
 										{
@@ -433,7 +448,20 @@ export async function generateHandler<
 								await transformedResponse.text();
 
 								links.forEach(({ href, rel, as }) => {
-									let link = `<${href}>; rel="${rel}"`;
+									let resolvedHref = href;
+									if (baseHref !== undefined) {
+										try {
+											// Resolve href against the base, then against the request URL,
+											// following WHATWG URL semantics for relative paths and `..` segments.
+											resolvedHref = new URL(
+												href,
+												new URL(baseHref, request.url)
+											).href;
+										} catch {
+											// Unparseable href — leave it as-is
+										}
+									}
+									let link = `<${resolvedHref}>; rel="${rel}"`;
 									if (as) {
 										link += `; as=${as}`;
 									}
@@ -451,7 +479,7 @@ export async function generateHandler<
 									earlyHintsCacheKey,
 									new Response(null, { headers: earlyHintsHeaders })
 								);
-							} catch (err) {
+							} catch {
 								// Nbd if we fail here in the deferred 'waitUntil' work. We're probably trying to parse a malformed page or something.
 								// Totally fine to skip over any errors.
 								// If we need to debug something, you can uncomment the following:
@@ -547,7 +575,7 @@ export async function generateHandler<
 		let content: ContentNegotiation;
 		try {
 			content = negotiateContent(request, servingAssetEntry);
-		} catch (err) {
+		} catch {
 			return new NotAcceptableResponse();
 		}
 
@@ -642,6 +670,9 @@ export async function generateHandler<
 				isHTMLContentType(asset.contentType) &&
 				metadata.analytics?.version === ANALYTICS_VERSION
 			) {
+				if (xWebAnalyticsHeader) {
+					response.headers.set("x-cf-pages-analytics", "1");
+				}
 				return new HTMLRewriter()
 					.on("body", {
 						element(e) {
@@ -736,7 +767,7 @@ export async function generateHandler<
 				let content: ContentNegotiation;
 				try {
 					content = negotiateContent(request, assetEntry);
-				} catch (err) {
+				} catch {
 					return new NotAcceptableResponse();
 				}
 

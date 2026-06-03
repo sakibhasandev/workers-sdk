@@ -6,15 +6,15 @@
 		"node_modules",
 		"dist",
 		"scripts/snippets/*",
-		"e2e-tests/fixtures/*",
+		"e2e/tests/frameworks/fixtures/*",
 		// exclude all template files other than those are directly imported into the program,
 		// e.g. the c3.ts files.
 		"templates*"
 	],
 	"compilerOptions": {
 		"target": "ESNext",
-		"module": "CommonJS",
-		"moduleResolution": "node",
+		"module": "preserve",
+		"moduleResolution": "bundler",
 		"allowJs": true,
 		"strict": true,
 		"esModuleInterop": true,

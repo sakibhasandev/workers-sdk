@@ -1,6 +1,6 @@
 import path from "node:path";
-import { findUpSync } from "find-up";
-import { getWranglerTmpDir } from "../paths";
+import { getWranglerTmpDir } from "@cloudflare/workers-utils";
+import * as find from "empathic/find";
 import type { BundleResult } from "../deployment-bundle/bundle";
 
 export const RUNNING_BUILDERS: BundleResult[] = [];
@@ -19,7 +19,7 @@ export function isUrl(maybeUrl?: string): maybeUrl is string {
 	try {
 		new URL(maybeUrl);
 		return true;
-	} catch (e) {
+	} catch {
 		return false;
 	}
 }
@@ -47,7 +47,7 @@ export function getPagesProjectRoot(): string {
 	if (projectRootCache !== undefined && projectRootCacheCwd === cwd) {
 		return projectRootCache;
 	}
-	const packagePath = findUpSync("package.json");
+	const packagePath = find.file("package.json");
 	projectRootCache = packagePath ? path.dirname(packagePath) : process.cwd();
 	projectRootCacheCwd = cwd;
 	return projectRootCache;
@@ -76,21 +76,23 @@ export function getPagesTmpDir(): string {
 	return tmpDirCache;
 }
 
-/**
- * Creates a basic debounced function that delays invoking `fn` until after
- * `delayMs` milliseconds have elapsed since the last time the debounced
- * function was invoked.
- */
-export function debounce(fn: () => void, delayMs = 100) {
-	let crrTimeoutId: NodeJS.Timeout | undefined;
+export function truncateUtf8Bytes(str: string, maxBytes: number): string {
+	const bytes = Buffer.byteLength(str, "utf8");
+	if (bytes <= maxBytes) {
+		return str;
+	}
 
-	return () => {
-		if (crrTimeoutId) {
-			clearTimeout(crrTimeoutId);
+	const chars: string[] = [];
+	let byteCount = 0;
+
+	for (const char of str) {
+		const charBytes = Buffer.byteLength(char, "utf8");
+		if (byteCount + charBytes > maxBytes) {
+			break;
 		}
+		chars.push(char);
+		byteCount += charBytes;
+	}
 
-		crrTimeoutId = setTimeout(() => {
-			fn();
-		}, delayMs);
-	};
+	return chars.join("");
 }

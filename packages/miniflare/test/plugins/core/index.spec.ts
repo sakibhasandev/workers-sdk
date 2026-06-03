@@ -1,20 +1,20 @@
-import childProcess from "child_process";
-import { once } from "events";
-import fs from "fs/promises";
-import https from "https";
-import { AddressInfo } from "net";
-import path from "path";
-import { text } from "stream/consumers";
-import tls from "tls";
-import test from "ava";
+import childProcess from "node:child_process";
+import { once } from "node:events";
+import fs from "node:fs/promises";
+import https from "node:https";
+import path from "node:path";
+import { text } from "node:stream/consumers";
+import tls from "node:tls";
 import stoppable from "stoppable";
+import { onTestFinished, test } from "vitest";
 import which from "which";
 import { useTmp } from "../../test-shared";
+import type { AddressInfo } from "node:net";
 
 const opensslInstalled = which.sync("openssl", { nothrow: true });
 const opensslTest = opensslInstalled ? test : test.skip;
-opensslTest("NODE_EXTRA_CA_CERTS: loads certificates", async (t) => {
-	const tmp = await useTmp(t);
+opensslTest("NODE_EXTRA_CA_CERTS: loads certificates", async ({ expect }) => {
+	const tmp = await useTmp();
 
 	// Generate self-signed certificate
 	childProcess.execSync(
@@ -34,7 +34,7 @@ opensslTest("NODE_EXTRA_CA_CERTS: loads certificates", async (t) => {
 	const stoppableServer = stoppable(server, /* grace */ 0);
 	const url = await new Promise<string>((resolve) => {
 		server.listen(0, () => {
-			t.teardown(() => {
+			onTestFinished(() => {
 				return new Promise((resolve, reject) =>
 					stoppableServer.stop((err) => (err ? reject(err) : resolve()))
 				);
@@ -48,7 +48,12 @@ opensslTest("NODE_EXTRA_CA_CERTS: loads certificates", async (t) => {
 	// (see https://github.com/cloudflare/miniflare/pull/587/files#r1271579671)
 	const caCertsPath = path.join(tmp, "bundle.pem");
 	const caCerts = [...tls.rootCertificates, cert];
-	await fs.writeFile(caCertsPath, caCerts.join("\n"));
+	await fs.writeFile(
+		caCertsPath,
+		["## This is a comment which should be ignored\n"].concat(
+			caCerts.join("\n")
+		)
+	);
 
 	// Start Miniflare with NODE_EXTRA_CA_CERTS environment variable
 	// (cannot use sync process methods here as that would block HTTPS server)
@@ -60,7 +65,6 @@ opensslTest("NODE_EXTRA_CA_CERTS: loads certificates", async (t) => {
 			`
       const { Miniflare } = require(${JSON.stringify(miniflarePath)});
       const mf = new Miniflare({
-        verbose: true,
         modules: true,
         script: \`export default {
           fetch() {
@@ -86,6 +90,6 @@ opensslTest("NODE_EXTRA_CA_CERTS: loads certificates", async (t) => {
 	const exitPromise = once(result, "exit");
 	const resultText = await text(result.stdout);
 	await exitPromise;
-	t.is(result.exitCode, 0);
-	t.is(resultText.trim(), responseBody);
+	expect(result.exitCode).toBe(0);
+	expect(resultText.trim()).toBe(responseBody);
 });

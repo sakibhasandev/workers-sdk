@@ -1,7 +1,9 @@
-import type { Endpoints } from "@octokit/types";
+import dedent from "ts-dedent";
 import type {
-	PullRequestOpenedEvent,
-	PullRequestReadyForReviewEvent,
+	CheckRunCompletedEvent,
+	IssueCommentEvent,
+	IssuesEvent,
+	Schema,
 	WebhookEvent,
 } from "@octokit/webhooks-types";
 
@@ -17,52 +19,137 @@ async function getBotMessage(ai: Ai, prompt: string) {
 				role: "user",
 				content: prompt,
 			},
-		] as RoleScopedChatInput[],
+		],
+	} satisfies ChatCompletionsMessagesInput;
+	const message = (await ai.run("@cf/google/gemma-4-26b-a4b-it", chat)) as {
+		choices?: { message: { content: string } }[];
 	};
-	const message = await ai.run("@cf/meta/llama-2-7b-chat-int8", chat);
-	if (!("response" in message)) {
+	const content = message.choices?.[0]?.message.content;
+	if (!content) {
 		return "I'm feeling a bit poorly 🥲—try asking me for a message later!";
 	}
-	return message.response;
+	return content;
 }
 
-type PRList = Endpoints["GET /repos/{owner}/{repo}/pulls"]["response"]["data"];
-async function getPrs(pat: string) {
-	const workersSdk = await fetch(
-		"https://api.github.com/repos/cloudflare/workers-sdk/pulls?state=open&per_page=100",
-		{
-			headers: {
-				"User-Agent": "Cloudflare ANT Status bot",
-				Authorization: `Bearer ${pat}`,
-			},
-		}
-	).then((r) => r.json<PRList>());
-	const wranglerAction = await fetch(
-		"https://api.github.com/repos/cloudflare/wrangler-action/pulls?state=open&per_page=100",
-		{
-			headers: {
-				"User-Agent": "Cloudflare ANT Status bot",
-				Authorization: `Bearer ${pat}`,
-			},
-		}
-	).then((r) => r.json<PRList>());
+async function isWranglerTeamMember(
+	apiToken: string,
+	username: string
+): Promise<boolean> {
+	try {
+		const response = await fetch(
+			`https://api.github.com/orgs/cloudflare/teams/wrangler/memberships/${username}`,
+			{
+				headers: {
+					"User-Agent": "Cloudflare ANT Status bot",
+					Authorization: `Bearer ${apiToken}`,
+					Accept: "application/vnd.github+json",
+				},
+			}
+		);
 
-	return [...workersSdk, ...wranglerAction];
+		return response.status === 200;
+	} catch (error) {
+		// If there's an error checking membership, default to false
+		console.error("Error checking team membership:", error);
+		return false;
+	}
 }
 
-async function getVersionPackagesPR(pat: string) {
-	const versionPackages = await fetch(
-		"https://api.github.com/repos/cloudflare/workers-sdk/pulls?state=open&per_page=100&head=cloudflare:changeset-release/main",
-		{
-			headers: {
-				"User-Agent": "Cloudflare ANT Status bot",
-				Authorization: `Bearer ${pat}`,
-			},
-		}
-	).then((r) => r.json<PRList>());
+async function checkForSecurityIssue(
+	ai: Ai,
+	apiToken: string,
+	message: Schema
+): Promise<null | {
+	type: "issue" | "pr";
+	issueEvent: IssuesEvent | IssueCommentEvent;
+	reasoning: string;
+}> {
+	const result = isIssueOrPREvent(message);
+	if (!result) {
+		return null;
+	}
 
-	return versionPackages[0];
+	if (await isWranglerTeamMember(apiToken, result.event.issue.user.login)) {
+		return null;
+	}
+
+	// Ignore dependabot updates
+	if (result.event.issue.user.login === "dependabot[bot]") {
+		return null;
+	}
+
+	// Ignore our own bot's PRs (e.g. Version Packages)
+	if (result.event.issue.user.login === "workers-devprod") {
+		return null;
+	}
+
+	const systemRole = dedent`
+		## System Role:
+		You are an expert Security Triage Analyst and a software developer with deep knowledge of Common Weakness Enumeration (CWE) and security best practices. Your task is to analyze a GitHub Issue and determine the likelihood that it is reporting a genuine security vulnerability or exploit (not just a functional bug).
+	`;
+	const prompt = dedent`
+		## Task
+		Analyze the provided GitHub Issue details (Title, Body, Comments, Labels) and classify it into one of two categories: "SECURITY VULNERABILITY" or "GENERAL BUG/FEATURE".
+
+		## Analysis Guidelines
+		Focus your analysis on identifying language, context, and details indicative of a security report. Key indicators include, but are not limited to:
+		- Impact: Does the issue describe a potential compromise of Confidentiality, Integrity, or Availability (CIA)? (e.g., unauthorized access, data loss, denial of service).
+		- Vulnerability Types: Mentions of common exploit classes (e.g., XSS, SQL Injection, Buffer Overflow, RCE, CSRF, insecure deserialization, broken access control, hardcoded secrets).
+		- Proof of Concept (PoC): Contains exploit steps, malicious input, stack traces, specific functions used to bypass security controls, or references to attack vectors.
+		- Terminology: Use of words like "exploit," "attack," "unauthorized," "bypass," "inject," "tainted," "secret," "leak," "data breach," or "DoS/DDoS."
+		- User/Privilege Context: Descriptions of an action an unprivileged user can take to affect privileged resources or other users.
+
+		## GitHub Issue Details:
+		Issue Title: ${result.event.issue.title}
+		Issue Body: ${result.event.issue.body || ""}
+		Changed Comment: ${"comment" in result.event ? result.event.comment.body : "N/A"}
+
+		Look for keywords and patterns that suggest this is a security report, such as:
+		- Vulnerability, exploit, security flaw, CVE
+		- Authentication bypass, privilege escalation
+		- XSS, SQL injection, CSRF, RCE
+		- Unauthorized access, data exposure
+		- Security disclosure, responsible disclosure
+
+		## Output Format
+		Provide your response in the following structured Markdown format:
+
+		\`\`\`
+		## Triage Summary
+		Classification: [SECURITY VULNERABILITY or GENERAL BUG/FEATURE]
+		Confidence Level: [Low, Medium, or High]
+
+		## Rationale
+		[Explain in 2-3 concise sentences *why* you chose the classification. Highlight the specific keywords, behavior, or described impact that led to your decision.]
+
+		## Key Security Indicators Found
+		* [List specific keywords, code snippets, or user actions from the issue that suggest a vulnerability.]
+		* [Example: Describes using a special character in a username to execute a script (XSS).]
+		* [Example: Mentions an unauthenticated API endpoint that returns sensitive user data.]
+		\`\`\`
+	`;
+
+	const { response } = await ai.run(
+		"@cf/mistralai/mistral-small-3.1-24b-instruct",
+		{
+			messages: [
+				{ role: "system", content: systemRole },
+				{ role: "user", content: prompt },
+			],
+		}
+	);
+
+	if (!response?.includes("SECURITY VULNERABILITY")) {
+		return null;
+	} else {
+		return {
+			type: result.type,
+			issueEvent: result.event,
+			reasoning: response,
+		};
+	}
 }
+
 type ProjectGQLResponse = {
 	data: {
 		organization: {
@@ -72,11 +159,11 @@ type ProjectGQLResponse = {
 		};
 	};
 };
-async function getProjectId(pat: string) {
+async function getProjectId(apiToken: string) {
 	const data = await fetch("https://api.github.com/graphql", {
 		headers: {
 			"User-Agent": "Cloudflare ANT Status bot",
-			Authorization: `Bearer ${pat}`,
+			Authorization: `Bearer ${apiToken}`,
 		},
 		method: "POST",
 		body: JSON.stringify({
@@ -95,11 +182,11 @@ type PRGQLResponse = {
 		};
 	};
 };
-async function getPRId(pat: string, repo: string, number: string) {
+async function getPRId(apiToken: string, repo: string, number: string) {
 	const data = await fetch("https://api.github.com/graphql", {
 		headers: {
 			"User-Agent": "Cloudflare ANT Status bot",
-			Authorization: `Bearer ${pat}`,
+			Authorization: `Bearer ${apiToken}`,
 		},
 		method: "POST",
 		body: JSON.stringify({
@@ -116,13 +203,13 @@ async function getPRId(pat: string, repo: string, number: string) {
 	return data.data.repository.pullRequest.id;
 }
 
-async function addPRToProject(pat: string, repo: string, number: string) {
-	const projectId = await getProjectId(pat);
-	const prId = await getPRId(pat, repo, number);
+async function addPRToProject(apiToken: string, repo: string, number: string) {
+	const projectId = await getProjectId(apiToken);
+	const prId = await getPRId(apiToken, repo, number);
 	return await fetch("https://api.github.com/graphql", {
 		headers: {
 			"User-Agent": "Cloudflare ANT Status bot",
-			Authorization: `Bearer ${pat}`,
+			Authorization: `Bearer ${apiToken}`,
 		},
 		method: "POST",
 		body: JSON.stringify({
@@ -139,6 +226,7 @@ async function addPRToProject(pat: string, repo: string, number: string) {
 		}),
 	});
 }
+
 function getThreadID(date?: string | Date, label = "-pull-requests") {
 	// Apply an offset so we rollover days at around 10am UTC
 	return (
@@ -172,202 +260,144 @@ async function sendMessage(
 	console.log(await response.json());
 }
 
-const ONE_DAY = 1000 * 60 * 60 * 24;
-
-async function sendStartThreadMessage(pat: string, webhookUrl: string, ai: Ai) {
-	const message = await getBotMessage(
-		ai,
-		"Write a very short unique positive uplifting message to encourage team members in their work today. Make it fun and quirky!"
-	);
-
-	const prs = (await getPrs(pat))
-		.filter((pr) => !pr.draft)
-		.filter((pr) => getThreadID(pr.created_at) !== getThreadID())
-		.filter((pr) => pr.title !== "Version Packages")
-		.filter(
-			(pr) =>
-				pr.user &&
-				[
-					"penalosa",
-					"lrapoport-cf",
-					"petebacondarwin",
-					"CarmenPopoviciu",
-					"edmundhung",
-					"emily-shen",
-					"dario-piotrowicz",
-					"jculvey",
-					"vicb",
-					"jamesopstad",
-				].includes(pr.user.login)
-		)
-		.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
-	await sendMessage(webhookUrl, {
-		cardsV2: [
-			{
-				cardId: "unique-card-id",
-				card: {
-					header: {
-						title: "Beep boop! 👋 PR review thread! 👀 🧵👇",
-					},
-					sections: [
-						{
-							collapsible: false,
-							widgets: [
-								{
-									textParagraph: {
-										text: message,
-									},
-								},
-							],
-						},
-						{
-							collapsible: true,
-							uncollapsibleWidgetsCount: 3,
-							widgets: prs.flatMap((pr) => {
-								const created = new Date(pr.created_at);
-								const createdDaysAgo = Math.round(
-									(Date.now() - created.getTime()) / ONE_DAY
-								);
-								let emoji;
-								let exclaimations = "";
-								if (createdDaysAgo >= 7) {
-									emoji = "🔴";
-									exclaimations = "!!!";
-								} else if (createdDaysAgo >= 5) {
-									emoji = "🟠";
-									exclaimations = "!";
-								} else if (createdDaysAgo >= 3) {
-									emoji = "🟡";
-								} else {
-									emoji = "🟢";
-								}
-								let createdDaysAgoText = "";
-								if (createdDaysAgo >= 3) {
-									createdDaysAgoText = ` <i>(created ${createdDaysAgo} days ago${exclaimations})</i>`;
-								}
-
-								return [
-									{
-										columns: {
-											columnItems: [
-												{
-													horizontalSizeStyle: "FILL_AVAILABLE_SPACE",
-													horizontalAlignment: "START",
-													verticalAlignment: "CENTER",
-													widgets: [
-														{
-															textParagraph: {
-																text: `${emoji} <b>#${pr.number}:</b> ${pr.title}${createdDaysAgoText}`,
-															},
-														},
-													],
-												},
-												{
-													horizontalSizeStyle: "FILL_MINIMUM_SPACE",
-													horizontalAlignment: "START",
-													verticalAlignment: "TOP",
-													widgets: [
-														{
-															buttonList: {
-																buttons: [
-																	{
-																		text: "Open Pull Request",
-																		onClick: {
-																			openLink: {
-																				url: pr.html_url,
-																			},
-																		},
-																	},
-																],
-															},
-														},
-													],
-												},
-											],
-										},
-									},
-								];
-							}),
-						},
-					],
-				},
-			},
-		],
-	});
-}
-
-function isPullRequestOpenedEvent(
+function isIssueOrPREvent(
 	message: WebhookEvent
-): message is PullRequestOpenedEvent {
-	return (
-		"pull_request" in message &&
-		message.action === "opened" &&
-		!message.pull_request.draft
-	);
-}
-
-function isPullRequestReadyForReviewEvent(
-	message: WebhookEvent
-): message is PullRequestReadyForReviewEvent {
-	return "action" in message && message.action === "ready_for_review";
-}
-
-function sendReviewMessage(webhookUrl: string, message: WebhookEvent) {
+): { type: "issue" | "pr"; event: IssuesEvent | IssueCommentEvent } | null {
 	if (
-		(isPullRequestOpenedEvent(message) ||
-			isPullRequestReadyForReviewEvent(message)) &&
-		message.pull_request.requested_teams.find((t) => t.name === "wrangler")
+		"issue" in message &&
+		(message.action === "opened" ||
+			message.action === "reopened" ||
+			message.action === "edited")
 	) {
-		return sendMessage(webhookUrl, {
-			cardsV2: [
-				{
-					cardId: "unique-card-id",
-					card: {
-						header: {
-							title: message.pull_request.title,
-							subtitle: message.pull_request.user.login,
-							imageUrl: message.pull_request.user.avatar_url,
-							imageType: "CIRCLE",
-							imageAltText: "Avatar",
-						},
-						sections: [
-							{
-								collapsible: true,
-								uncollapsibleWidgetsCount: 1,
-								widgets: [
-									{
-										buttonList: {
-											buttons: [
-												{
-													text: "Open Pull Request",
-													onClick: {
-														openLink: {
-															url: message.pull_request.html_url,
-														},
-													},
-												},
-											],
-										},
-									},
-									{
-										textParagraph: {
-											text: message.pull_request.body,
-										},
-									},
-								],
-							},
-						],
-					},
-				},
-			],
-		});
+		const isPR = "pull_request" in message.issue;
+		return {
+			type: isPR ? "pr" : "issue",
+			event: message as IssuesEvent | IssueCommentEvent,
+		};
 	}
+	return null;
 }
 
-async function sendUpcomingReleaseMessage(pat: string, webhookUrl: string) {
-	const releasePr = await getVersionPackagesPR(pat);
+// Repository advisory event type (not yet in @octokit/webhooks-types)
+interface RepositoryAdvisoryEvent {
+	action: "reported" | "published";
+	repository_advisory: {
+		ghsa_id: string;
+		html_url: string;
+		summary: string;
+		description: string;
+	};
+}
 
-	await sendMessage(
+function isRepositoryAdvisoryEvent(
+	message: WebhookEvent
+): RepositoryAdvisoryEvent | null {
+	if (
+		"repository_advisory" in message &&
+		"action" in message &&
+		message.action === "reported"
+	) {
+		return message as RepositoryAdvisoryEvent;
+	}
+	return null;
+}
+
+/**
+ * Returns the issue event if a new issue was opened with the `api` label, or
+ * if the `api` label was just added to an existing issue. Returns null
+ * otherwise.
+ */
+function isApiLabeledIssueEvent(message: WebhookEvent): IssuesEvent | null {
+	if (!("issue" in message) || !("action" in message)) {
+		return null;
+	}
+	if ("pull_request" in message.issue) {
+		return null;
+	}
+
+	const event = message as IssuesEvent;
+
+	if (event.action === "opened") {
+		const hasApiLabel = event.issue.labels?.some(
+			(label) => label.name === "api"
+		);
+		return hasApiLabel ? event : null;
+	}
+
+	if (event.action === "labeled" && event.label?.name === "api") {
+		return event;
+	}
+
+	return null;
+}
+
+function isCheckRunCompleted(
+	message: WebhookEvent
+): message is CheckRunCompletedEvent {
+	return (
+		"action" in message &&
+		message.action === "completed" &&
+		"check_run" in message
+	);
+}
+
+/**
+ * Returns information about a failed Version Packages PR check run, or null if the event is not relevant.
+ */
+function isVersionPackagesPRCheckRun(message: WebhookEvent): {
+	checkRun: CheckRunCompletedEvent["check_run"];
+	prNumber: number;
+	owner: string;
+	repo: string;
+} | null {
+	if (!isCheckRunCompleted(message)) {
+		return null;
+	}
+
+	const checkRun = message.check_run;
+
+	// Only process failures and timeouts (not cancelled)
+	if (
+		checkRun.conclusion !== "failure" &&
+		checkRun.conclusion !== "timed_out"
+	) {
+		return null;
+	}
+
+	// Check if this is from the changeset-release/main branch
+	if (checkRun.check_suite.head_branch !== "changeset-release/main") {
+		return null;
+	}
+
+	// Get the PR number from pull_requests array
+	const pr = checkRun.pull_requests[0];
+	if (!pr) {
+		return null;
+	}
+
+	return {
+		checkRun,
+		prNumber: pr.number,
+		owner: message.repository.owner.login,
+		repo: message.repository.name,
+	};
+}
+
+async function sendSecurityAlert(
+	webhookUrl: string,
+	{
+		type,
+		issueEvent,
+		reasoning,
+	}: {
+		type: "issue" | "pr";
+		issueEvent: IssuesEvent | IssueCommentEvent;
+		reasoning: string;
+	}
+) {
+	const itemType = type === "pr" ? "PR" : "Issue";
+
+	return sendMessage(
 		webhookUrl,
 		{
 			cardsV2: [
@@ -375,39 +405,31 @@ async function sendUpcomingReleaseMessage(pat: string, webhookUrl: string) {
 					cardId: "unique-card-id",
 					card: {
 						header: {
-							title: "🎉 workers-sdk release!",
+							title: `🚨 Potential Security ${itemType} Detected`,
+							subtitle: `${itemType} #${issueEvent.issue.number} in ${issueEvent.repository.full_name}`,
+							imageUrl: issueEvent.issue.user.avatar_url,
+							imageType: "CIRCLE",
+							imageAltText: "Reporter Avatar",
 						},
 						sections: [
 							{
+								collapsible: false,
 								widgets: [
 									{
 										textParagraph: {
-											text: "There's an upcoming workers-sdk release today. The `main` branch will be locked shortly before to allow the release to be checked. Review the release PR linked below for the full details, and let the ANT team know (by responding in this thread) if for any reason you'd like us to delay this release.",
+											text: `<b>Title:</b> ${issueEvent.issue.title}\n\n<b>Reporter:</b> ${issueEvent.issue.user.login}`,
 										},
 									},
 									{
-										columns: {
-											columnItems: [
+										buttonList: {
+											buttons: [
 												{
-													horizontalSizeStyle: "FILL_MINIMUM_SPACE",
-													horizontalAlignment: "START",
-													verticalAlignment: "TOP",
-													widgets: [
-														{
-															buttonList: {
-																buttons: [
-																	{
-																		text: "Open Pull Request",
-																		onClick: {
-																			openLink: {
-																				url: releasePr.html_url,
-																			},
-																		},
-																	},
-																],
-															},
+													text: `View ${itemType}`,
+													onClick: {
+														openLink: {
+															url: issueEvent.issue.html_url,
 														},
-													],
+													},
 												},
 											],
 										},
@@ -419,19 +441,62 @@ async function sendUpcomingReleaseMessage(pat: string, webhookUrl: string) {
 								uncollapsibleWidgetsCount: 0,
 								widgets: [
 									{
-										columns: {
-											columnItems: [
+										textParagraph: {
+											text: reasoning,
+										},
+									},
+								],
+							},
+						],
+					},
+				},
+			],
+		},
+		"-security-alert-" + issueEvent.issue.number
+	);
+}
+
+async function sendRepositoryAdvisoryAlert(
+	webhookUrl: string,
+	advisoryEvent: RepositoryAdvisoryEvent
+) {
+	const advisory = advisoryEvent.repository_advisory;
+
+	return sendMessage(
+		webhookUrl,
+		{
+			cardsV2: [
+				{
+					cardId: "unique-card-id",
+					card: {
+						header: {
+							title: `🔐 Repository Security Advisory Reported`,
+							subtitle: advisory.summary,
+						},
+						sections: [
+							{
+								collapsible: true,
+								widgets: [
+									{
+										textParagraph: {
+											text: advisory.description,
+										},
+									},
+								],
+							},
+							{
+								collapsible: false,
+								widgets: [
+									{
+										buttonList: {
+											buttons: [
 												{
-													horizontalSizeStyle: "FILL_AVAILABLE_SPACE",
-													horizontalAlignment: "START",
-													verticalAlignment: "CENTER",
-													widgets: [
-														{
-															textParagraph: {
-																text: releasePr.body,
-															},
+													text: "View Advisory",
+													onClick: {
+														openLink: {
+															url: advisory.html_url,
 														},
-													],
+													},
 												},
 											],
 										},
@@ -443,14 +508,139 @@ async function sendUpcomingReleaseMessage(pat: string, webhookUrl: string) {
 				},
 			],
 		},
-		"release-notification"
+		"-repository-advisory-" + advisory.ghsa_id
 	);
-	await sendMessage(
+}
+
+async function sendApiIssueAlert(webhookUrl: string, event: IssuesEvent) {
+	return sendMessage(
 		webhookUrl,
 		{
-			text: "cc <users/103802752659756021218>",
+			cardsV2: [
+				{
+					cardId: "api-issue-" + event.issue.number,
+					card: {
+						header: {
+							title: `🏷️ New api-labeled issue`,
+							subtitle: `#${event.issue.number} in ${event.repository.full_name}`,
+							imageUrl: event.issue.user.avatar_url,
+							imageType: "CIRCLE",
+							imageAltText: "Reporter Avatar",
+						},
+						sections: [
+							{
+								collapsible: false,
+								widgets: [
+									{
+										textParagraph: {
+											text: `<b>Title:</b> ${event.issue.title}\n\n<b>Reporter:</b> ${event.issue.user.login}`,
+										},
+									},
+									{
+										buttonList: {
+											buttons: [
+												{
+													text: "View Issue",
+													onClick: {
+														openLink: {
+															url: event.issue.html_url,
+														},
+													},
+												},
+											],
+										},
+									},
+								],
+							},
+						],
+					},
+				},
+			],
 		},
-		"release-notification"
+		"-api-issue-" + event.issue.number
+	);
+}
+
+/**
+ * Formats a duration given start and end timestamps as a string in "Mins Secs" format.
+ */
+function formatDuration(startedAt: string, completedAt: string): string {
+	const start = new Date(startedAt).getTime();
+	const end = new Date(completedAt).getTime();
+	const durationMs = end - start;
+	const minutes = Math.floor(durationMs / 60000);
+	const seconds = Math.floor((durationMs % 60000) / 1000);
+	return `${minutes}m ${seconds}s`;
+}
+
+async function sendVersionPackagesCIFailureAlert(
+	webhookUrl: string,
+	{
+		checkRun,
+		prNumber,
+		owner,
+		repo,
+	}: {
+		checkRun: CheckRunCompletedEvent["check_run"];
+		prNumber: number;
+		owner: string;
+		repo: string;
+	}
+) {
+	const conclusionEmoji = checkRun.conclusion === "timed_out" ? "⏱️" : "❌";
+	const conclusionText =
+		checkRun.conclusion === "timed_out" ? "Timed out" : "Failed";
+
+	return sendMessage(
+		webhookUrl,
+		{
+			cardsV2: [
+				{
+					cardId: `vp-ci-failure-${checkRun.id}`,
+					card: {
+						header: {
+							title: `${conclusionEmoji} CI Check ${conclusionText} on Version Packages PR`,
+							subtitle: `PR #${prNumber} in ${owner}/${repo}`,
+						},
+						sections: [
+							{
+								collapsible: false,
+								widgets: [
+									{
+										textParagraph: {
+											text: `<b>Check:</b> ${checkRun.name}\n<b>Conclusion:</b> ${conclusionText}\n<b>Duration:</b> ${formatDuration(checkRun.started_at, checkRun.completed_at)}`,
+										},
+									},
+									{
+										buttonList: {
+											buttons: [
+												{
+													text: "View Check Run",
+													onClick: {
+														openLink: {
+															url: checkRun.html_url,
+														},
+													},
+												},
+												{
+													text: "View PR",
+													onClick: {
+														openLink: {
+															url: `https://github.com/${owner}/${repo}/pull/${prNumber}`,
+														},
+													},
+												},
+											],
+										},
+									},
+								],
+							},
+						],
+					},
+				},
+			],
+		},
+		`-vp-ci-failure-pr-${prNumber}`
 	);
 }
 
@@ -612,9 +802,40 @@ export default {
 				crypto.randomUUID()
 			);
 		}
+
 		if (url.pathname === "/github") {
 			const body = await request.json<WebhookEvent>();
-			await sendReviewMessage(env.PROD_WEBHOOK, body);
+
+			const maybeSecurityIssue = await checkForSecurityIssue(
+				env.AI,
+				env.GITHUB_PAT,
+				body
+			);
+			// Flags suspicious issues/PRs for review
+			if (maybeSecurityIssue) {
+				await sendSecurityAlert(env.ALERTS_WEBHOOK, maybeSecurityIssue);
+			}
+			// Notifies when a repository advisory is reported to workers-sdk
+			const maybeRepositoryAdvisory = isRepositoryAdvisoryEvent(body);
+			if (maybeRepositoryAdvisory) {
+				await sendRepositoryAdvisoryAlert(
+					env.ALERTS_WEBHOOK,
+					maybeRepositoryAdvisory
+				);
+			}
+			// Notifies when any CI check fails on the Version Packages PR
+			const maybeVersionPackagesFailure = isVersionPackagesPRCheckRun(body);
+			if (maybeVersionPackagesFailure) {
+				await sendVersionPackagesCIFailureAlert(
+					env.ALERTS_WEBHOOK,
+					maybeVersionPackagesFailure
+				);
+			}
+			// Notifies when an issue is opened with the `api` label, or the `api` label is added to an existing issue
+			const maybeApiIssue = isApiLabeledIssueEvent(body);
+			if (maybeApiIssue) {
+				await sendApiIssueAlert(env.API_ISSUES_WEBHOOK, maybeApiIssue);
+			}
 		}
 
 		if (url.pathname.startsWith("/pr-project") && request.method === "POST") {
@@ -638,15 +859,6 @@ export default {
 	},
 
 	async scheduled(controller, env): Promise<void> {
-		if (controller.cron === "0 10 * * MON-FRI") {
-			await sendStartThreadMessage(env.GITHUB_PAT, env.PROD_WEBHOOK, env.AI);
-		}
-		if (controller.cron === "0 10 * * TUE,THU") {
-			await sendUpcomingReleaseMessage(
-				env.GITHUB_PAT,
-				env.PROD_WRANGLER_CONTRIBUTORS_WEBHOOK
-			);
-		}
 		if (controller.cron === "0 12 * * MON,WED,FRI") {
 			await sendUpcomingMeetingMessage(env.PROD_TEAM_ONLY_WEBHOOK, env.AI);
 		}

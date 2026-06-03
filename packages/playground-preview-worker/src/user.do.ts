@@ -1,18 +1,10 @@
 import assert from "node:assert";
-import { Buffer } from "node:buffer";
 import z from "zod";
 import { BadUpload, ServiceWorkerNotSupported, WorkerTimeout } from "./errors";
 import { constructMiddleware } from "./inject-middleware";
 import { doUpload, setupTokens } from "./realish";
 import { handleException, setupSentry } from "./sentry";
 import type { RealishPreviewConfig, UploadResult } from "./realish";
-
-const encoder = new TextEncoder();
-
-async function hash(text: string) {
-	const digest = await crypto.subtle.digest("SHA-256", encoder.encode(text));
-	return Buffer.from(digest).toString("hex");
-}
 
 function switchRemote(url: URL, remote: string) {
 	const workerUrl = new URL(url);
@@ -39,12 +31,13 @@ type UploadedMetadata = z.infer<typeof UploadedMetadata>;
  *  - Maintains a Realish preview session on behalf of the user
  *  - Handles worker uploads, inflating them with the relevant Realish preview authentication for the upload
  *  - Proxies inspector connections to the current inspector URL for the Realish preview session
+ *  - Proxies tail connections to the current live logs URL for the Realish preview session
  *  - Forwards requests to the running previewed user worker
  */
 export class UserSession {
 	config: RealishPreviewConfig | undefined;
 	previewToken: string | undefined;
-	inspectorUrl: string | undefined;
+	tailUrl: string | undefined;
 	workerName!: string;
 	constructor(
 		private state: DurableObjectState,
@@ -61,7 +54,7 @@ export class UserSession {
 			this.workerName = workerName;
 
 			this.previewToken = await this.state.storage.get<string>("previewToken");
-			this.inspectorUrl = await this.state.storage.get<string>("inspectorUrl");
+			this.tailUrl = await this.state.storage.get<string>("tailUrl");
 		});
 	}
 	async refreshTokens() {
@@ -87,7 +80,7 @@ export class UserSession {
 				name,
 				worker
 			);
-		} catch (e) {
+		} catch {
 			// Try to recover _once_ from failure. This captures expired tokens, but means that genuine failures won't cause
 			// a request loop and will return an error to the user
 			await this.refreshTokens();
@@ -100,36 +93,14 @@ export class UserSession {
 			);
 		}
 
-		const inspector = new URL(
-			this.config.uploadConfigToken.inspector_websocket
-		);
-		inspector.searchParams.append(
-			"cf_workers_preview_token",
-			this.config.uploadConfigToken.token
-		);
-		inspector.protocol = "https:";
-		// Fire and forget
-		void fetch(this.config.uploadConfigToken.prewarm, {
-			method: "POST",
-			headers: {
-				"cf-workers-preview-token": uploadResult.result.preview_token,
-			},
-		});
 		this.previewToken = uploadResult.result.preview_token;
-		this.inspectorUrl = inspector.href;
+		this.tailUrl = uploadResult.result.tail_url;
 
 		await this.state.storage.put("previewToken", this.previewToken);
-		await this.state.storage.put("inspectorUrl", this.inspectorUrl);
+		await this.state.storage.put("tailUrl", this.tailUrl);
 	}
 
 	async handleRequest(request: Request) {
-		const url = new URL(request.url);
-
-		// This is an inspector request. Forward to the correct inspector URL
-		if (request.headers.get("Upgrade") && url.pathname === "/api/inspector") {
-			assert(this.inspectorUrl !== undefined);
-			return fetch(this.inspectorUrl, request);
-		}
 		// This is a request to run the user-worker. Forward, adding the correct authentication headers
 		if (request.headers.has("cf-run-user-worker")) {
 			assert(this.previewToken !== undefined);
@@ -237,14 +208,10 @@ export class UserSession {
 
 		await this.uploadWorker(this.workerName, worker);
 
-		assert(this.inspectorUrl !== undefined);
+		assert(this.tailUrl !== undefined);
 
 		return Response.json({
-			// Include a hash of the inspector URL so as to ensure the client will reconnect
-			// when the inspector URL has changed (because of an updated preview session)
-			inspector: `/api/inspector?user=${userSession}&h=${await hash(
-				this.inspectorUrl
-			)}`,
+			tail: this.tailUrl,
 			preview: userSession,
 		});
 	}

@@ -1,62 +1,57 @@
 {
 	"name": "@cloudflare/kv-asset-handler",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"description": "Routes requests to KV assets",
 	"keywords": [
-		"kv",
+		"assets",
 		"cloudflare",
+		"kv",
 		"workers",
-		"wrangler",
-		"assets"
+		"wrangler"
 	],
 	"homepage": "https://github.com/cloudflare/workers-sdk#readme",
 	"bugs": {
 		"url": "https://github.com/cloudflare/workers-sdk/issues"
 	},
+	"license": "MIT OR Apache-2.0",
+	"author": "wrangler@cloudflare.com",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/cloudflare/workers-sdk.git",
 		"directory": "packages/kv-asset-handler"
 	},
-	"license": "MIT OR Apache-2.0",
-	"author": "wrangler@cloudflare.com",
-	"main": "dist/index.js",
-	"types": "dist/index.d.ts",
 	"files": [
 		"src",
-		"dist",
-		"!src/test",
-		"!dist/test"
+		"dist"
 	],
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"publishConfig": {
+		"access": "public"
+	},
 	"scripts": {
-		"build": "tsc -d",
-		"check:lint": "eslint . --max-warnings=0",
+		"build": "tsup",
 		"check:type": "tsc",
 		"prepack": "npm run build",
 		"pretest": "npm run build",
-		"test": "ava dist/test/*.js --verbose",
-		"test:ci": "npm run build && ava dist/test/*.js --verbose"
-	},
-	"dependencies": {
-		"mime": "^3.0.0"
+		"test": "vitest",
+		"test:ci": "vitest run"
 	},
 	"devDependencies": {
-		"@ava/typescript": "^4.1.0",
-		"@cloudflare/workers-types": "^4.20250409.0",
+		"@cloudflare/vitest-pool-workers": "catalog:default",
+		"@cloudflare/workers-types": "catalog:default",
 		"@types/mime": "^3.0.4",
 		"@types/node": "catalog:default",
-		"@types/service-worker-mock": "^2.0.1",
-		"ava": "^6.0.1",
-		"service-worker-mock": "^2.0.5"
+		"mime": "^3.0.0",
+		"tsup": "8.3.0",
+		"vitest": "catalog:default"
 	},
 	"engines": {
-		"node": ">=18.0.0"
+		"node": ">=22.0.0"
 	},
 	"volta": {
 		"extends": "../../package.json"
-	},
-	"publishConfig": {
-		"access": "public"
 	},
 	"workers-sdk": {
 		"prerelease": true

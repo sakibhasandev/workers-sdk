@@ -1,24 +1,24 @@
 import { setTimeout } from "node:timers/promises";
-import { HeadBucketCommand, S3Client } from "@aws-sdk/client-s3";
-import prettyBytes from "pretty-bytes";
-import { getCloudflareApiEnvironmentFromEnv } from "../environment-variables/misc-variables";
-import { FatalError } from "../errors";
+import {
+	HeadBucketCommand,
+	ListObjectsV2Command,
+	S3Client,
+} from "@aws-sdk/client-s3";
+import {
+	APIError,
+	FatalError,
+	getCloudflareApiEnvironmentFromEnv,
+} from "@cloudflare/workers-utils";
+import { createNamespace } from "../core/create-command";
 import { logger } from "../logger";
-import { APIError } from "../parse";
-import formatLabelledValues from "../utils/render-labelled-values";
-import { addCreateOptions, createPipelineHandler } from "./cli/create";
-import { addDeleteOptions, deletePipelineHandler } from "./cli/delete";
-import { addGetOptions, getPipelineHandler } from "./cli/get";
-import { listPipelinesHandler } from "./cli/list";
-import { addUpdateOptions, updatePipelineHandler } from "./cli/update";
 import { generateR2ServiceToken, getR2Bucket } from "./client";
-import type { CommonYargsArgv } from "../yargs-types";
-import type { Pipeline } from "./client";
+import type { ComplianceConfig } from "@cloudflare/workers-utils";
 
 export const BYTES_PER_MB = 1000 * 1000;
 
-// flag to skip delays for tests
+// flags to skip delays/validation for tests
 let __testSkipDelaysFlag = false;
+let __testSkipCredentialValidationFlag = false;
 
 /**
  * Verify the credentials used by the S3Client can access a R2 bucket by performing the
@@ -52,23 +52,59 @@ async function verifyBucketAccess(r2: S3Client, bucketName: string) {
 	}
 }
 
+export interface AuthorizeR2BucketOptions {
+	/** Suppress log messages (for callers that handle their own output) */
+	quiet?: boolean;
+}
+
+export async function verifyR2Credentials(
+	accountId: string,
+	bucketName: string,
+	accessKeyId: string,
+	secretAccessKey: string
+): Promise<void> {
+	if (__testSkipCredentialValidationFlag) {
+		return;
+	}
+
+	const endpoint = getAccountR2Endpoint(accountId);
+	const r2 = new S3Client({
+		region: "auto",
+		credentials: {
+			accessKeyId,
+			secretAccessKey,
+		},
+		endpoint,
+	});
+
+	await r2.send(new ListObjectsV2Command({ Bucket: bucketName, MaxKeys: 1 }));
+}
+
 export async function authorizeR2Bucket(
+	complianceConfig: ComplianceConfig,
 	pipelineName: string,
 	accountId: string,
-	bucketName: string
+	bucketName: string,
+	options: AuthorizeR2BucketOptions = {}
 ) {
+	const { quiet = false } = options;
+
 	try {
-		await getR2Bucket(accountId, bucketName);
+		await getR2Bucket(complianceConfig, accountId, bucketName);
 	} catch (err) {
 		if (err instanceof APIError) {
 			if (err.code == 10006) {
-				throw new FatalError(`The R2 bucket [${bucketName}] doesn't exist`);
+				throw new FatalError(`The R2 bucket [${bucketName}] doesn't exist`, {
+					telemetryMessage: "pipelines r2 authorization missing bucket",
+				});
 			}
 		}
 		throw err;
 	}
 
-	logger.log(`🌀 Authorizing R2 bucket "${bucketName}"`);
+	if (!quiet) {
+		logger.log(`🌀 Authorizing R2 bucket "${bucketName}"`);
+	}
 
 	const serviceToken = await generateR2ServiceToken(
 		accountId,
@@ -93,7 +129,9 @@ export async function authorizeR2Bucket(
 	});
 
 	// Wait for token to settle/propagate, retry up to 10 times, with 2s waits in-between errors
-	logger.log(`🌀 Checking access to R2 bucket "${bucketName}"`);
+	if (!quiet) {
+		logger.log(`🌀 Checking access to R2 bucket "${bucketName}"`);
+	}
 	await verifyBucketAccess(r2, bucketName);
 
 	return serviceToken;
@@ -121,114 +159,20 @@ export function parseTransform(spec: string) {
 	};
 }
 
-export function pipelines(pipelineYargs: CommonYargsArgv) {
-	return pipelineYargs
-		.command(
-			"create <pipeline>",
-			"Create a new pipeline",
-			addCreateOptions,
-			createPipelineHandler
-		)
-		.command(
-			"list",
-			"List all pipelines",
-			(yargs) => yargs,
-			listPipelinesHandler
-		)
-		.command(
-			"get <pipeline>",
-			"Get a pipeline's configuration",
-			addGetOptions,
-			getPipelineHandler
-		)
-		.command(
-			"update <pipeline>",
-			"Update a pipeline",
-			addUpdateOptions,
-			updatePipelineHandler
-		)
-		.command(
-			"delete <pipeline>",
-			"Delete a pipeline",
-			addDeleteOptions,
-			deletePipelineHandler
-		);
-}
+export const pipelinesNamespace = createNamespace({
+	metadata: {
+		description: "🚰 Manage Cloudflare Pipelines",
+		owner: "Product: Pipelines",
+		status: "open beta",
+		category: "Storage & databases",
+	},
+});
 
-// Test exception to remove delays
+// Test helpers to skip delays/validation
 export function __testSkipDelays() {
 	__testSkipDelaysFlag = true;
 }
 
-/*
-
- */
-export function formatPipelinePretty(pipeline: Pipeline) {
-	let buffer = "";
-
-	const formatTypeLabels: Record<string, string> = {
-		json: "JSON",
-	};
-
-	buffer += `${formatLabelledValues({
-		Id: pipeline.id,
-		Name: pipeline.name,
-	})}\n`;
-
-	buffer += "Sources:\n";
-	const httpSource = pipeline.source.find((s) => s.type === "http");
-	if (httpSource) {
-		const httpInfo = {
-			Endpoint: pipeline.endpoint,
-			Authentication: httpSource.authentication === true ? "on" : "off",
-			...(httpSource?.cors?.origins && {
-				"CORS Origins": httpSource.cors.origins.join(", "),
-			}),
-			Format: formatTypeLabels[httpSource.format],
-		};
-		buffer += "  HTTP:\n";
-		buffer += `${formatLabelledValues(httpInfo, { indentationCount: 4 })}\n`;
-	}
-
-	const bindingSource = pipeline.source.find((s) => s.type === "binding");
-	if (bindingSource) {
-		const bindingInfo = {
-			Format: formatTypeLabels[bindingSource.format],
-		};
-		buffer += "  Worker:\n";
-		buffer += `${formatLabelledValues(bindingInfo, { indentationCount: 4 })}\n`;
-	}
-
-	const destinationInfo = {
-		Type: pipeline.destination.type.toUpperCase(),
-		Bucket: pipeline.destination.path.bucket,
-		Format: "newline-delimited JSON", // TODO: Make dynamic once we support more output formats
-		...(pipeline.destination.path.prefix && {
-			Prefix: pipeline.destination.path.prefix,
-		}),
-		...(pipeline.destination.compression.type && {
-			Compression: pipeline.destination.compression.type.toUpperCase(),
-		}),
-	};
-	buffer += "Destination:\n";
-	buffer += `${formatLabelledValues(destinationInfo, { indentationCount: 2 })}\n`;
-
-	const batchHints = {
-		...(pipeline.destination.batch.max_bytes && {
-			"Max bytes": prettyBytes(pipeline.destination.batch.max_bytes),
-		}),
-		...(pipeline.destination.batch.max_duration_s && {
-			"Max duration": `${pipeline.destination.batch.max_duration_s?.toLocaleString()} seconds`,
-		}),
-		...(pipeline.destination.batch.max_rows && {
-			"Max records": pipeline.destination.batch.max_rows?.toLocaleString(),
-		}),
-	};
-
-	if (Object.keys(batchHints).length > 0) {
-		buffer += "  Batch hints:\n";
-		buffer += `${formatLabelledValues(batchHints, { indentationCount: 4 })}\n`;
-	}
-
-	return buffer;
+export function __testSkipCredentialValidation() {
+	__testSkipCredentialValidationFlag = true;
 }

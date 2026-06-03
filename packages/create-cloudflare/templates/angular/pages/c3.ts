@@ -1,9 +1,8 @@
 import { resolve } from "node:path";
-import { logRaw } from "@cloudflare/cli";
-import { brandColor, dim } from "@cloudflare/cli/colors";
-import { spinner } from "@cloudflare/cli/interactive";
+import { logRaw } from "@cloudflare/cli-shared-helpers";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import { spinner } from "@cloudflare/cli-shared-helpers/interactive";
 import { runFrameworkGenerator } from "frameworks/index";
-import { compatDateFlag } from "helpers/compatDate";
 import { readFile, readJSON, writeFile } from "helpers/files";
 import { detectPackageManager } from "helpers/packageManagers";
 import { installPackages } from "helpers/packages";
@@ -13,11 +12,7 @@ import type { C3Context, PackageJson } from "types";
 const { npm } = detectPackageManager();
 
 const generate = async (ctx: C3Context) => {
-	await runFrameworkGenerator(ctx, [
-		ctx.project.name,
-		"--ssr",
-		"--server-routing" /** Dev Preview API */,
-	]);
+	await runFrameworkGenerator(ctx, [ctx.project.name, "--ssr"]);
 	logRaw("");
 };
 
@@ -46,7 +41,7 @@ async function updateAppCode() {
 		"import { provideHttpClient, withFetch } from '@angular/common/http';\n" +
 		appConfig.replace(
 			"providers: [",
-			"providers: [provideHttpClient(withFetch()), ",
+			"providers: [provideHttpClient(withFetch()), "
 		);
 	writeFile(resolve(appConfigPath), newAppConfig);
 	s.stop(`${brandColor(`updated`)} ${dim(appConfigPath)}`);
@@ -56,7 +51,7 @@ async function updateAppCode() {
 	const appRoutes = readFile(resolve(appServerRoutesPath));
 	const newAppRoutes = appRoutes.replace(
 		"RenderMode.Prerender",
-		"RenderMode.Server",
+		"RenderMode.Server"
 	);
 	writeFile(resolve(appServerRoutesPath), newAppRoutes);
 	s.stop(`${brandColor(`updated`)} ${dim(appServerRoutesPath)}`);
@@ -107,10 +102,11 @@ const config: TemplateConfig = {
 	configure,
 	transformPackageJson: async () => ({
 		scripts: {
-			start: `${npm} run build && wrangler pages dev dist/cloudflare ${await compatDateFlag()}`,
+			start: `${npm} run build && wrangler pages dev`,
 			build: `ng build && ${npm} run process`,
 			process: "node ./tools/copy-files.mjs",
-			deploy: `${npm} run build && wrangler pages deploy dist/cloudflare`,
+			deploy: `${npm} run build && wrangler pages deploy`,
+			"cf-typegen": `wrangler types`,
 		},
 	}),
 };

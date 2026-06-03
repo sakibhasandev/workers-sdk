@@ -1,5 +1,188 @@
 # @cloudflare/workers-shared
 
+## 0.19.6
+
+### Patch Changes
+
+- [#13855](https://github.com/cloudflare/workers-sdk/pull/13855) [`dba84c2`](https://github.com/cloudflare/workers-sdk/commit/dba84c225f418a3046ed736649044fe0b747aec0) Thanks [@courtney-sims](https://github.com/courtney-sims)! - Temporarily hardcode asset worker cohort to "ent" for latency testing
+
+  Disables the `lookupCohort` RPC call and cohort-based version routing in the outer entrypoint while keeping all the glue code (analytics, bindings, types) in place for re-enablement.
+
+## 0.19.5
+
+### Patch Changes
+
+- [#13740](https://github.com/cloudflare/workers-sdk/pull/13740) [`6d2a573`](https://github.com/cloudflare/workers-sdk/commit/6d2a5736c6682882ba48aa3e272d9114bc821c47) Thanks [@courtney-sims](https://github.com/courtney-sims)! - During deployment, routes requests to new versions of asset-worker based on customer account plan.
+
+- [#12276](https://github.com/cloudflare/workers-sdk/pull/12276) [`926bad5`](https://github.com/cloudflare/workers-sdk/commit/926bad5c75882e2dabb700f60f0da6ba3c4298f5) Thanks [@penalosa](https://github.com/penalosa)! - Warn when `_headers` rules contain multiple wildcards or wildcard combined with `:splat`
+
+  Rules containing multiple wildcards (e.g. `https://*.workers.dev/*`) or combining a wildcard with a `:splat` placeholder (e.g. `https://*.pages.dev/:splat`) are now rejected during parsing. Previously this would fail silently during dev.
+
+## 0.19.4
+
+### Patch Changes
+
+- [#13363](https://github.com/cloudflare/workers-sdk/pull/13363) [`6457fb3`](https://github.com/cloudflare/workers-sdk/commit/6457fb38c7fbce39c396562bc3324b945114c672) Thanks [@courtney-sims](https://github.com/courtney-sims)! - Prepares router-worker for a more gradual rollout by refactoring and separating out the invocation from the business logic. In the future, this will provide space for us to route requests to new versions of router-worker based on their plan, but should make no functional difference today.
+
+## 0.19.3
+
+### Patch Changes
+
+- [#13668](https://github.com/cloudflare/workers-sdk/pull/13668) [`ef24ff2`](https://github.com/cloudflare/workers-sdk/commit/ef24ff28d905ca3706a272653c52a342de3c4339) Thanks [@for-the-kidz](https://github.com/for-the-kidz)! - Fix `TypeError: rules is not iterable` in the router-worker when `static_routing` is configured without `user_worker` rules
+
+  The router-worker's static-routing include-rule evaluation passed `config.static_routing.user_worker` directly to the matcher, which iterates with `for...of`. When `static_routing` was set but `user_worker` was omitted, the matcher threw `TypeError: rules is not iterable` and failed the request. The adjacent `asset_worker` branch already falls back to `[]` in this case; the `user_worker` branch now does the same.
+
+## 0.19.2
+
+### Patch Changes
+
+- [#13354](https://github.com/cloudflare/workers-sdk/pull/13354) [`854d66c`](https://github.com/cloudflare/workers-sdk/commit/854d66c30428cb3fe9ad8629089d9307c33d8b61) Thanks [@courtney-sims](https://github.com/courtney-sims)! - Prepares asset-worker for a more gradual rollout by refactoring and separating out the invocation from the business logic. In the future, this will provide space for us to route requests to new versions of asset-worker based on their plan, but should make no functional difference today.
+
+## 0.19.1
+
+### Patch Changes
+
+- [#12752](https://github.com/cloudflare/workers-sdk/pull/12752) [`00a4356`](https://github.com/cloudflare/workers-sdk/commit/00a43568d9dc3152befa278cdb61b4c7e89b42fa) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - fix: Normalize backslash characters in `/cdn-cgi` paths
+
+  Requests containing backslash characters in `/cdn-cgi` paths are now redirected to their normalized equivalents with forward slashes. This ensures consistent URL handling across different browsers and HTTP clients.
+
+## 0.19.0
+
+### Minor Changes
+
+- [#12467](https://github.com/cloudflare/workers-sdk/pull/12467) [`7036310`](https://github.com/cloudflare/workers-sdk/commit/7036310b2d30a0ef794f6bd1a77e92c7ca0774fb) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Add support for inline comments in `_redirects` files
+
+  You can now add inline comments to redirect rules using the `#` character:
+
+  ```
+  /old-page /new-page 301 # Moved during site redesign
+  /blog/* /articles/:splat # Blog URL migration
+  ```
+
+  This improves the maintainability of `_redirects` files by allowing documentation of complex redirect rules directly alongside the rules themselves. Full-line comments (lines starting with `#`) continue to work as before. URL fragments (e.g., `/page#section`) are preserved correctly.
+
+## 0.18.11
+
+### Patch Changes
+
+- [#12416](https://github.com/cloudflare/workers-sdk/pull/12416) [`38ad241`](https://github.com/cloudflare/workers-sdk/commit/38ad2416ca2bb357857038991401cf07fd3820e1) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - Revert reduced cache TTL. Restore 60-second TTL for KV asset fetches.
+
+## 0.18.10
+
+### Patch Changes
+
+- [#11920](https://github.com/cloudflare/workers-sdk/pull/11920) [`09a8829`](https://github.com/cloudflare/workers-sdk/commit/09a8829d0bf5dbb5f94f5ad4d6d7aaacb940241e) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - The asset-worker now uses a shorter 10-second TTL for cached assets, down from 60 seconds. This ensures that asset updates are reflected more quickly during development and deployment, reducing the window where stale assets might be served.
+
+## 0.18.9
+
+### Patch Changes
+
+- [#11448](https://github.com/cloudflare/workers-sdk/pull/11448) [`2b4813b`](https://github.com/cloudflare/workers-sdk/commit/2b4813b18076817bb739491246313c32b403651f) Thanks [@edmundhung](https://github.com/edmundhung)! - Builds package with esbuild `v0.27.0`
+
+## 0.18.8
+
+### Patch Changes
+
+- [#10500](https://github.com/cloudflare/workers-sdk/pull/10500) [`19b1881`](https://github.com/cloudflare/workers-sdk/commit/19b1881edc1428c5b2d3beb905006238c5b33dba) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - Block /\_image routes with href query param using double slash.
+
+## 0.18.7
+
+### Patch Changes
+
+- [#10462](https://github.com/cloudflare/workers-sdk/pull/10462) [`c4e164c`](https://github.com/cloudflare/workers-sdk/commit/c4e164c13a830a4c6426c318061a0f13b4281c67) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - Update mime dependency to 4.X so that javascript files will have content types of `text/javascript` instead of `application/javascript`. This will affect the content-types computed by Asset Worker within Workers Static Assets.
+
+## 0.18.6
+
+### Patch Changes
+
+- [#10402](https://github.com/cloudflare/workers-sdk/pull/10402) [`8fd6dc0`](https://github.com/cloudflare/workers-sdk/commit/8fd6dc0f4de1c9c215fdbd44aa2644096bee7bd0) Thanks [@danielrs](https://github.com/danielrs)! - Sanitize double-slashes in asset-worker relative redirects.
+
+  Without sanitizing, some relative redirect patterns were being treated as external redirects.
+
+## 0.18.5
+
+### Patch Changes
+
+- [#10007](https://github.com/cloudflare/workers-sdk/pull/10007) [`d82c8e8`](https://github.com/cloudflare/workers-sdk/commit/d82c8e807d4f22cafe9ae3e9db5477ebe35c819b) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - Bugfix: Removes unnecessary cloning of the request. This is no longer needed. We were also seeing failures in runtime for large files due to this.
+
+- [#10008](https://github.com/cloudflare/workers-sdk/pull/10008) [`ca00d74`](https://github.com/cloudflare/workers-sdk/commit/ca00d741fbf4729785fbc5ec28110c873ee231dd) Thanks [@vicb](https://github.com/vicb)! - block responses with multiple Content Type values
+
+## 0.18.4
+
+### Patch Changes
+
+- [#9935](https://github.com/cloudflare/workers-sdk/pull/9935) [`2765b88`](https://github.com/cloudflare/workers-sdk/commit/2765b88bbd2d6c84afbc17953f731fddd6ffab2d) Thanks [@vicb](https://github.com/vicb)! - allow plain text with charset
+
+## 0.18.3
+
+### Patch Changes
+
+- [#9908](https://github.com/cloudflare/workers-sdk/pull/9908) [`ab75fd8`](https://github.com/cloudflare/workers-sdk/commit/ab75fd8303084fba48ee5131e4ccf19510aed831) Thanks [@GregBrimble](https://github.com/GregBrimble)! - perf: graduate asset-server binary search experiment to 100%
+
+  The improved iterative binary search implementation has been graduated from a 50% experiment to the default implementation. This provides better performance for asset manifest lookups by replacing the recursive binary search with an iterative approach.
+
+## 0.18.2
+
+### Patch Changes
+
+- [#9892](https://github.com/cloudflare/workers-sdk/pull/9892) [`78e259a`](https://github.com/cloudflare/workers-sdk/commit/78e259ac75795887c1bac7ebcb6f4cc636dc39e9) Thanks [@GregBrimble](https://github.com/GregBrimble)! - perf: increase binary search experiment sample rate to 50%
+
+- [#9884](https://github.com/cloudflare/workers-sdk/pull/9884) [`a60e9da`](https://github.com/cloudflare/workers-sdk/commit/a60e9daf63d0d4918c134a45512e861d399c96c3) Thanks [@matthewdavidrodgers](https://github.com/matthewdavidrodgers)! - Adds metrics for time-to-dispatch to Router Worker
+
+## 0.18.1
+
+### Patch Changes
+
+- [#9824](https://github.com/cloudflare/workers-sdk/pull/9824) [`8104705`](https://github.com/cloudflare/workers-sdk/commit/810470555f49c358b1ebc3f679183d1f8ea89028) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Allow "plain text" images when blocking vulnerable non-image responses
+
+- [#9785](https://github.com/cloudflare/workers-sdk/pull/9785) [`07416ba`](https://github.com/cloudflare/workers-sdk/commit/07416ba644ef019f7cdccc7b3ed67f92abf03438) Thanks [@matthewdavidrodgers](https://github.com/matthewdavidrodgers)! - Handle next apps hosted at a path other than the root when blocking vulnerable non-image requests
+
+## 0.18.0
+
+### Minor Changes
+
+- [#9661](https://github.com/cloudflare/workers-sdk/pull/9661) [`e216a76`](https://github.com/cloudflare/workers-sdk/commit/e216a76fba20acf06faad2d9b310a189fe3ccb08) Thanks [@matthewdavidrodgers](https://github.com/matthewdavidrodgers)! - Limit free tier requests in the Router worker
+
+### Patch Changes
+
+- [#9635](https://github.com/cloudflare/workers-sdk/pull/9635) [`b066cf8`](https://github.com/cloudflare/workers-sdk/commit/b066cf836a5fc8436068be42bf74100c4bcd58ea) Thanks [@matthewdavidrodgers](https://github.com/matthewdavidrodgers)! - Block possibly vulnerable requests to the router worker
+
+## 0.17.6
+
+### Patch Changes
+
+- [#9416](https://github.com/cloudflare/workers-sdk/pull/9416) [`3383021`](https://github.com/cloudflare/workers-sdk/commit/33830214ff76ec4738b3e998370eca7568240e12) Thanks [@matthewdavidrodgers](https://github.com/matthewdavidrodgers)! - Adds support for static routing to Workers Assets
+
+  Implements the proposal noted here https://github.com/cloudflare/workers-sdk/discussions/9143
+
+  In brief: when static routing is present for a Worker with assets, routing via those static rules takes precedence. When a request is evaluated in the Router Worker, the request path is first compared to the `"asset_worker"` rules (which are to be specified via "negative" rules, e.g. `"!/api/assets"`). If any match, the request is forwarded directly to the Asset Worker. If instead any `"user_worker"` rules match, the request is forwarded directly to the User Worker. If neither match (or static routing was not provided), the existing behavior takes over.
+
+  As part of this explicit routing, when static routing is present, the check against `Sec-Fetch-Mode: navigate` (to determine if this should serve an asset or go to the User Worker for not_found_handling) is disabled. Routing can be controlled by setting routing rules via `assets.run_worker_first` in your Wrangler configuration file.
+
+## 0.17.5
+
+### Patch Changes
+
+- [#9050](https://github.com/cloudflare/workers-sdk/pull/9050) [`1be5644`](https://github.com/cloudflare/workers-sdk/commit/1be56441dec5e8faea3b6c007c1a347bab1a4029) Thanks [@WalshyDev](https://github.com/WalshyDev)! - Adds tracing to \_headers & \_redirects in Workers Assets allowing Cloudflare employees to better debug customer issues regarding these features.
+
+## 0.17.4
+
+### Patch Changes
+
+- [#9033](https://github.com/cloudflare/workers-sdk/pull/9033) [`2c50115`](https://github.com/cloudflare/workers-sdk/commit/2c501151d3d1a563681cdb300a298b83862b60e2) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - chore: convert wrangler.toml files into wrangler.jsonc ones
+
+## 0.17.3
+
+### Patch Changes
+
+- [#9043](https://github.com/cloudflare/workers-sdk/pull/9043) [`7744f1a`](https://github.com/cloudflare/workers-sdk/commit/7744f1a3039e01f593b6e578588e07d1139d1d93) Thanks [@WalshyDev](https://github.com/WalshyDev)! - Adds tracing into asset-worker unstable methods so we can better measure/debug these.
+
+## 0.17.2
+
+### Patch Changes
+
+- [#8887](https://github.com/cloudflare/workers-sdk/pull/8887) [`511be3d`](https://github.com/cloudflare/workers-sdk/commit/511be3d17559e482fedf559cb61158e329c11d24) Thanks [@GregBrimble](https://github.com/GregBrimble)! - Add log message when `Sec-Fetch-Mode: navigate` is responsible for assets routing decision in `wrangler dev`
+
 ## 0.17.1
 
 ### Patch Changes

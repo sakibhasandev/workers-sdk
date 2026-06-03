@@ -4,8 +4,8 @@
 // we do not allow the optional "options"
 // So the syntax is space-separated: keytype, base64-encoded key, comment
 
-import { exit } from "process";
-import { crash } from "@cloudflare/cli";
+import { exit } from "node:process";
+import { UserError } from "@cloudflare/workers-utils";
 import { logger } from "../../logger";
 
 export function validateSSHKey(line: string) {
@@ -51,9 +51,11 @@ export function validatePublicSSHKeyCLI(
 ) {
 	const bail = (reason: string) => {
 		if (!json) {
-			crash(reason);
+			throw new UserError(reason, {
+				telemetryMessage: "cloudchamber ssh public key invalid",
+			});
 		} else {
-			logger.log(JSON.stringify({ error: reason }, null, 4));
+			logger.json({ error: reason });
 			exit(1);
 		}
 	};

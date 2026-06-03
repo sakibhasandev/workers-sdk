@@ -1,5 +1,5 @@
 {
-	"name": "@vite-plugin-cloudflare-e2e/no-wrangler-config-for-auxiliary-worker",
+	"name": "@cloudflare/vite-plugin-e2e-no-wrangler-config-for-auxiliary-worker",
 	"version": "0.0.0",
 	"private": true,
 	"type": "module",
@@ -8,6 +8,7 @@
 	},
 	"devDependencies": {
 		"@cloudflare/vite-plugin": "*",
-		"vite": "^6.1.0"
+		"vite": "^8.0.0",
+		"wrangler": "*"
 	}
 }

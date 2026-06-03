@@ -1,5 +1,4 @@
 import { fetchResult } from "../cfetch";
-import type { Observability, TailConsumer } from "../config/environment";
 import type {
 	ApiDeployment,
 	ApiVersion,
@@ -7,19 +6,27 @@ import type {
 	VersionCache,
 	VersionId,
 } from "./types";
+import type {
+	ComplianceConfig,
+	Observability,
+	StreamingTailConsumer,
+	TailConsumer,
+} from "@cloudflare/workers-utils";
 
 export async function fetchVersion(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	versionId: VersionId,
 	versionCache?: VersionCache
-) {
+): Promise<ApiVersion> {
 	const cachedVersion = versionCache?.get(versionId);
 	if (cachedVersion) {
 		return cachedVersion;
 	}
 
 	const version = await fetchResult<ApiVersion>(
+		complianceConfig,
 		`/accounts/${accountId}/workers/scripts/${workerName}/versions/${versionId}`
 	);
 
@@ -29,6 +36,7 @@ export async function fetchVersion(
 }
 
 export async function fetchVersions(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	versionCache: VersionCache | undefined,
@@ -36,31 +44,47 @@ export async function fetchVersions(
 ) {
 	return Promise.all(
 		versionIds.map((versionId) =>
-			fetchVersion(accountId, workerName, versionId, versionCache)
+			fetchVersion(
+				complianceConfig,
+				accountId,
+				workerName,
+				versionId,
+				versionCache
+			)
 		)
 	);
 }
 
 export async function fetchLatestDeployments(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string
 ): Promise<ApiDeployment[]> {
 	const { deployments } = await fetchResult<{
 		deployments: ApiDeployment[];
-	}>(`/accounts/${accountId}/workers/scripts/${workerName}/deployments`);
+	}>(
+		complianceConfig,
+		`/accounts/${accountId}/workers/scripts/${workerName}/deployments`
+	);
 
 	return deployments;
 }
 export async function fetchLatestDeployment(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string
 ): Promise<ApiDeployment | undefined> {
-	const deployments = await fetchLatestDeployments(accountId, workerName);
+	const deployments = await fetchLatestDeployments(
+		complianceConfig,
+		accountId,
+		workerName
+	);
 
 	return deployments.at(0);
 }
 
 export async function fetchDeploymentVersions(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	deployment: ApiDeployment | undefined,
@@ -75,6 +99,7 @@ export async function fetchDeploymentVersions(
 	);
 
 	const versions = await fetchVersions(
+		complianceConfig,
 		accountId,
 		workerName,
 		versionCache,
@@ -85,11 +110,15 @@ export async function fetchDeploymentVersions(
 }
 
 export async function fetchDeployableVersions(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	versionCache: VersionCache
 ): Promise<ApiVersion[]> {
-	const { items: versions } = await fetchResult<{ items: ApiVersion[] }>(
+	const { items: versions } = await fetchResult<{
+		items: ApiVersion[];
+	}>(
+		complianceConfig,
 		`/accounts/${accountId}/workers/scripts/${workerName}/versions?deployable=true`
 	);
 
@@ -101,6 +130,7 @@ export async function fetchDeployableVersions(
 }
 
 export async function createDeployment(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	versionTraffic: Map<VersionId, Percentage>,
@@ -108,7 +138,9 @@ export async function createDeployment(
 	force?: boolean
 ) {
 	return await fetchResult<{ id: string }>(
+		complianceConfig,
 		`/accounts/${accountId}/workers/scripts/${workerName}/deployments${force ? "?force=true" : ""}`,
+
 		{
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -127,16 +159,20 @@ export async function createDeployment(
 
 export type NonVersionedScriptSettings = {
 	logpush: boolean;
+	tags: string[] | null;
 	tail_consumers: TailConsumer[];
+	streaming_tail_consumers: StreamingTailConsumer[];
 	observability: Observability;
 };
 
 export async function patchNonVersionedScriptSettings(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	settings: Partial<NonVersionedScriptSettings>
 ) {
 	const res = await fetchResult<typeof settings>(
+		complianceConfig,
 		`/accounts/${accountId}/workers/scripts/${workerName}/script-settings`,
 		{
 			method: "PATCH",

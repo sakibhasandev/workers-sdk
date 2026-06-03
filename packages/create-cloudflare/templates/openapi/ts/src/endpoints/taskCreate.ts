@@ -1,6 +1,6 @@
-import { Bool, OpenAPIRoute } from "chanfana";
+import { OpenAPIRoute } from "chanfana";
 import { z } from "zod";
-import { Task } from "../types";
+import { type AppContext, Task } from "../types";
 
 export class TaskCreate extends OpenAPIRoute {
 	schema = {
@@ -16,17 +16,13 @@ export class TaskCreate extends OpenAPIRoute {
 			},
 		},
 		responses: {
-			"200": {
+			"201": {
 				description: "Returns the created task",
 				content: {
 					"application/json": {
 						schema: z.object({
-							series: z.object({
-								success: Bool(),
-								result: z.object({
-									task: Task,
-								}),
-							}),
+							success: z.boolean(),
+							task: Task,
 						}),
 					},
 				},
@@ -34,7 +30,7 @@ export class TaskCreate extends OpenAPIRoute {
 		},
 	};
 
-	async handle(c) {
+	async handle(c: AppContext) {
 		// Get validated data
 		const data = await this.getValidatedData<typeof this.schema>();
 
@@ -44,15 +40,18 @@ export class TaskCreate extends OpenAPIRoute {
 		// Implement your own object insertion here
 
 		// return the new task
-		return {
-			success: true,
-			task: {
-				name: taskToCreate.name,
-				slug: taskToCreate.slug,
-				description: taskToCreate.description,
-				completed: taskToCreate.completed,
-				due_date: taskToCreate.due_date,
+		return c.json(
+			{
+				success: true,
+				task: {
+					name: taskToCreate.name,
+					slug: taskToCreate.slug,
+					description: taskToCreate.description,
+					completed: taskToCreate.completed,
+					due_date: taskToCreate.due_date,
+				},
 			},
-		};
+			201,
+		);
 	}
 }

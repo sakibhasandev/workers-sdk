@@ -1,6 +1,9 @@
-// /* eslint-disable no-shadow */
 import { mkdirSync, writeFileSync } from "node:fs";
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
+import ci from "ci-info";
 import { http, HttpResponse } from "msw";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import { maxFileCountAllowedFromClaims } from "../../pages/upload";
 import { endEventLoop } from "../helpers/end-event-loop";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
@@ -8,7 +11,6 @@ import { mockGetUploadTokenRequest } from "../helpers/mock-get-pages-upload-toke
 import { mockSetTimeout } from "../helpers/mock-set-timeout";
 import { msw } from "../helpers/msw";
 import { normalizeProgressSteps } from "../helpers/normalize-progress";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
 import type { UploadPayloadFile } from "../../pages/types";
 import type { StrictRequest } from "msw";
@@ -22,7 +24,7 @@ describe("pages project upload", () => {
 	mockSetTimeout();
 
 	beforeEach(() => {
-		vi.stubEnv("CI", "true");
+		vi.mocked(ci).isCI = true;
 		vi.stubEnv("CF_PAGES_UPLOAD_JWT", "<<funfetti-auth-jwt>>");
 	});
 
@@ -34,7 +36,9 @@ describe("pages project upload", () => {
 		msw.restoreHandlers();
 	});
 
-	it("should upload a directory of files with a provided JWT", async () => {
+	it("should upload a directory of files with a provided JWT", async ({
+		expect,
+	}) => {
 		writeFileSync("logo.png", "foobar");
 
 		msw.use(
@@ -95,13 +99,16 @@ describe("pages project upload", () => {
 		await runWrangler("pages project upload .");
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-		"✨ Success! Uploaded 1 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 1 files (TIMINGS)
 
-		✨ Upload complete!"
-	`);
+			✨ Upload complete!"
+		`);
 	});
 
-	it("should avoid uploading some files", async () => {
+	it("should avoid uploading some files", async ({ expect }) => {
 		mkdirSync("some_dir/node_modules", { recursive: true });
 		mkdirSync("some_dir/functions", { recursive: true });
 
@@ -118,6 +125,9 @@ describe("pages project upload", () => {
 		writeFileSync("some_dir/node_modules/some_package", "nodefile");
 		mkdirSync("functions");
 		writeFileSync("functions/foo.js", "func");
+		// .wrangler directory should be ignored (contains local cache/state)
+		mkdirSync(".wrangler/cache", { recursive: true });
+		writeFileSync(".wrangler/cache/some-cache-file", "cachefile");
 
 		// Accumulate multiple requests then assert afterwards
 		const requests: StrictRequest<UploadPayloadFile[]>[] = [];
@@ -219,13 +229,16 @@ describe("pages project upload", () => {
 		});
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-		"✨ Success! Uploaded 3 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 3 files (TIMINGS)
 
-		✨ Upload complete!"
-	`);
+			✨ Upload complete!"
+		`);
 	});
 
-	it("should retry uploads", async () => {
+	it("should retry uploads", async ({ expect }) => {
 		writeFileSync("logo.txt", "foobar");
 
 		// Accumulate multiple requests then assert afterwards
@@ -313,13 +326,16 @@ describe("pages project upload", () => {
 		}
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-		"✨ Success! Uploaded 1 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 1 files (TIMINGS)
 
-		✨ Upload complete!"
-	`);
+			✨ Upload complete!"
+		`);
 	});
 
-	it("should retry uploads after gateway failures", async () => {
+	it("should retry uploads after gateway failures", async ({ expect }) => {
 		writeFileSync("logo.txt", "foobar");
 
 		// Accumulate multiple requests then assert afterwards
@@ -394,19 +410,25 @@ describe("pages project upload", () => {
 		}
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-		"✨ Success! Uploaded 1 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 1 files (TIMINGS)
 
-		✨ Upload complete!"
-	`);
+			✨ Upload complete!"
+		`);
 	});
 
-	it("should try to use multiple buckets (up to the max concurrency)", async () => {
+	it("should try to use multiple buckets (up to the max concurrency)", async ({
+		expect,
+	}) => {
 		writeFileSync("logo.txt", "foobar");
 		writeFileSync("logo.png", "foobar");
 		writeFileSync("logo.html", "foobar");
 		writeFileSync("logo.js", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -507,13 +529,16 @@ describe("pages project upload", () => {
 		);
 
 		expect(normalizeProgressSteps(std.out)).toMatchInlineSnapshot(`
-		"✨ Success! Uploaded 4 files (TIMINGS)
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Success! Uploaded 4 files (TIMINGS)
 
-		✨ Upload complete!"
-	`);
+			✨ Upload complete!"
+		`);
 	});
 
-	it("should handle a very large number of assets", async () => {
+	it("should handle a very large number of assets", async ({ expect }) => {
 		const assets = new Set<string>();
 		// Create a large number of asset files to upload
 		for (let i = 0; i < 10_019; i++) {
@@ -524,6 +549,7 @@ describe("pages project upload", () => {
 		}
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -574,13 +600,16 @@ describe("pages project upload", () => {
 		expect(uploadedAssets).toEqual(assets);
 	}, 60_000);
 
-	it("should not error when directory names contain periods and houses a extensionless file", async () => {
+	it("should not error when directory names contain periods and houses a extensionless file", async ({
+		expect,
+	}) => {
 		mkdirSync(".well-known");
 		// Note: same content as previous test, but since it's a different extension,
 		// it hashes to a different value
 		writeFileSync(".well-known/foobar", "foobar");
 
 		mockGetUploadTokenRequest(
+			expect,
 			"<<funfetti-auth-jwt>>",
 			"some-account-id",
 			"foo"
@@ -647,5 +676,60 @@ describe("pages project upload", () => {
 		await runWrangler("pages project upload .");
 
 		expect(std.err).toMatchInlineSnapshot(`""`);
+	});
+});
+
+describe("maxFileCountAllowedFromClaims", () => {
+	it("should return the value from max_file_count_allowed claim when present", ({
+		expect,
+	}) => {
+		// JWT payload: {"max_file_count_allowed": 100000}
+		const jwt =
+			"header." +
+			Buffer.from(JSON.stringify({ max_file_count_allowed: 100000 })).toString(
+				"base64"
+			) +
+			".signature";
+		expect(maxFileCountAllowedFromClaims(jwt)).toBe(100000);
+	});
+
+	it("should return default value when max_file_count_allowed is not a number", ({
+		expect,
+	}) => {
+		// JWT payload: {"max_file_count_allowed": "invalid"}
+		const jwt =
+			"header." +
+			Buffer.from(
+				JSON.stringify({ max_file_count_allowed: "invalid" })
+			).toString("base64") +
+			".signature";
+		expect(maxFileCountAllowedFromClaims(jwt)).toBe(20000);
+	});
+
+	it("should return default value when JWT does not have max_file_count_allowed claim", ({
+		expect,
+	}) => {
+		// JWT payload: {}
+		const jwt =
+			"header." +
+			Buffer.from(JSON.stringify({})).toString("base64") +
+			".signature";
+		expect(maxFileCountAllowedFromClaims(jwt)).toBe(20000);
+	});
+
+	it("should return default value for test tokens without parsing", ({
+		expect,
+	}) => {
+		expect(maxFileCountAllowedFromClaims("<<funfetti-auth-jwt>>")).toBe(20000);
+		expect(maxFileCountAllowedFromClaims("<<funfetti-auth-jwt2>>")).toBe(20000);
+		expect(maxFileCountAllowedFromClaims("<<aus-completion-token>>")).toBe(
+			20000
+		);
+	});
+
+	it("should throw error for invalid JWT format", ({ expect }) => {
+		expect(() => maxFileCountAllowedFromClaims("invalid-jwt")).toThrow(
+			"Invalid token:"
+		);
 	});
 });

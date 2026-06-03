@@ -90,6 +90,9 @@ web_modules/
 # Optional eslint cache
 .eslintcache
 
+# Optional prettier cache
+.prettiercache
+
 # Optional stylelint cache
 .stylelintcache
 
@@ -107,13 +110,6 @@ web_modules/
 
 # Yarn Integrity file
 .yarn-integrity
-
-# dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
@@ -178,8 +174,8 @@ dist
 wrangler-dist/
 miniflare-dist
 packages/wrangler/wrangler.toml
+packages/wrangler/Dockerfile
 packages/wrangler/src/cloudchamber/internal
-packages/prerelease-registry/_worker.bundle
 packages/wranglerjs-compat-webpack-plugin/lib
 .wrangler-1-cache
 emitted-types/
@@ -228,11 +224,17 @@ dist/**
 .next/**
 .turbo
 
-# Runtime dependencies report
-runtime-versions.md
-
 /worker-rust/target/
 
 .e2e-test-report/
 
-.dev.vars
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
+.node-cache/
+
+AGENTS.local.md
+.opencode/plans/
+.agents/skills
+.opencode/package-lock.json

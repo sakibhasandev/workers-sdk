@@ -1,21 +1,21 @@
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 import SCRIPT_CACHE_OBJECT from "worker:cache/cache";
 import SCRIPT_CACHE_ENTRY from "worker:cache/cache-entry";
 import SCRIPT_CACHE_ENTRY_NOOP from "worker:cache/cache-entry-noop";
 import { z } from "zod";
-import {
-	Service,
-	Worker,
-	Worker_Binding_DurableObjectNamespaceDesignator,
-} from "../../runtime";
 import { CacheBindings, SharedBindings } from "../../workers";
 import {
 	getMiniflareObjectBindings,
 	getPersistPath,
 	PersistenceSchema,
-	Plugin,
 	SERVICE_LOOPBACK,
 } from "../shared";
+import type {
+	Service,
+	Worker,
+	Worker_Binding_DurableObjectNamespaceDesignator,
+} from "../../runtime";
+import type { Plugin } from "../shared";
 
 export const CacheOptionsSchema = z.object({
 	cache: z.boolean().optional(),
@@ -56,6 +56,7 @@ export const CACHE_PLUGIN: Plugin<
 		options,
 		workerIndex,
 		tmpPath,
+		defaultPersistRoot,
 		unsafeStickyBlobs,
 	}) {
 		const cache = options.cache ?? true;
@@ -100,7 +101,12 @@ export const CACHE_PLUGIN: Plugin<
 			const uniqueKey = `miniflare-${CACHE_OBJECT_CLASS_NAME}`;
 
 			const persist = sharedOptions.cachePersist;
-			const persistPath = getPersistPath(CACHE_PLUGIN_NAME, tmpPath, persist);
+			const persistPath = getPersistPath(
+				CACHE_PLUGIN_NAME,
+				tmpPath,
+				defaultPersistRoot,
+				persist
+			);
 			await fs.mkdir(persistPath, { recursive: true });
 			const storageService: Service = {
 				name: CACHE_STORAGE_SERVICE_NAME,
@@ -148,6 +154,6 @@ export const CACHE_PLUGIN: Plugin<
 		return services;
 	},
 	getPersistPath({ cachePersist }, tmpPath) {
-		return getPersistPath(CACHE_PLUGIN_NAME, tmpPath, cachePersist);
+		return getPersistPath(CACHE_PLUGIN_NAME, tmpPath, undefined, cachePersist);
 	},
 };

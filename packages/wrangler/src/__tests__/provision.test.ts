@@ -1,4 +1,12 @@
+import { rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import {
+	runInTempDir,
+	writeRedirectedWranglerConfig,
+	writeWranglerConfig,
+} from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { clearDialogs, mockPrompt, mockSelect } from "./helpers/mock-dialogs";
@@ -8,6 +16,7 @@ import {
 	mockListKVNamespacesRequest,
 } from "./helpers/mock-kv";
 import { mockUploadWorkerRequest } from "./helpers/mock-upload-worker";
+import { mockGetSettings } from "./helpers/mock-worker-settings";
 import { mockSubDomainRequest } from "./helpers/mock-workers-subdomain";
 import {
 	createFetchResult,
@@ -15,14 +24,16 @@ import {
 	mswSuccessDeploymentScriptMetadata,
 } from "./helpers/msw";
 import { mswListNewDeploymentsLatestFull } from "./helpers/msw/handlers/versions";
-import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
 import { writeWorkerSource } from "./helpers/write-worker-source";
-import { writeWranglerConfig } from "./helpers/write-wrangler-config";
 import type { DatabaseInfo } from "../d1/types";
-import type { Settings } from "../deployment-bundle/bindings";
+import type { ExpectStatic } from "vitest";
 
-describe("--x-provision", () => {
+vi.mock("../utils/fetch-secrets", () => ({
+	fetchSecrets: async () => [],
+}));
+
+describe("resource provisioning", () => {
 	const std = mockConsoleMethods();
 	mockAccountId();
 	mockApiToken();
@@ -48,7 +59,9 @@ describe("--x-provision", () => {
 		clearDialogs();
 	});
 
-	it("should inherit KV, R2 and D1 bindings if they could be found from the settings", async () => {
+	it("should inherit KV, R2 and D1 bindings if they could be found from the settings", async ({
+		expect,
+	}) => {
 		mockGetSettings({
 			result: {
 				bindings: [
@@ -87,30 +100,34 @@ describe("--x-provision", () => {
 			],
 		});
 
-		await runWrangler("deploy --x-provision --x-auto-create=false");
+		await runWrangler("deploy --x-auto-create=false");
 		expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
-				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- KV Namespaces:
-				  - KV
-				- D1 Databases:
-				  - D1
-				- R2 Buckets:
-				  - R2
-				Uploaded test-name (TIMINGS)
-				Deployed test-name triggers (TIMINGS)
-				  https://test-name.test-sub-domain.workers.dev
-				Current Version ID: Galaxy-Class"
-			`);
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Total Upload: xx KiB / gzip: xx KiB
+			Worker Startup Time: 100 ms
+			Your Worker has access to the following bindings:
+			Binding                 Resource
+			env.KV (inherited)      KV Namespace
+			env.D1 (inherited)      D1 Database
+			env.R2 (inherited)      R2 Bucket
+
+			Uploaded test-name (TIMINGS)
+			Deployed test-name triggers (TIMINGS)
+			  https://test-name.test-sub-domain.workers.dev
+			Current Version ID: Galaxy-Class"
+		`);
 		expect(std.err).toMatchInlineSnapshot(`""`);
 		expect(std.warn).toMatchInlineSnapshot(`""`);
 	});
 
 	describe("provisions KV, R2 and D1 bindings if not found in worker settings", () => {
-		it("can provision KV, R2 and D1 bindings with existing resources", async () => {
+		it("can provision KV, R2 and D1 bindings with existing resources", async ({
+			expect,
+		}) => {
 			mockGetSettings();
-			mockListKVNamespacesRequest({
+			mockListKVNamespacesRequest(expect, {
 				title: "test-kv",
 				id: "existing-kv-id",
 			});
@@ -171,18 +188,20 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 
-				The following bindings need to be provisioned:
-				- KV Namespaces:
-				  - KV
-				- D1 Databases:
-				  - D1
-				- R2 Buckets:
-				  - R2
+				Experimental: The following bindings need to be provisioned:
+				Binding        Resource
+				env.KV         KV Namespace
+				env.D1         D1 Database
+				env.R2         R2 Bucket
+
 
 				Provisioning KV (KV Namespace)...
 				✨ KV provisioned 🎉
@@ -193,16 +212,16 @@ describe("--x-provision", () => {
 				Provisioning R2 (R2 Bucket)...
 				✨ R2 provisioned 🎉
 
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
 				🎉 All resources provisioned, continuing with deployment...
 
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- KV Namespaces:
-				  - KV: existing-kv-id
-				- D1 Databases:
-				  - D1: existing-d1-id
-				- R2 Buckets:
-				  - R2: existing-bucket-name
+				Your Worker has access to the following bindings:
+				Binding                            Resource
+				env.KV (existing-kv-id)            KV Namespace
+				env.D1 (existing-d1-id)            D1 Database
+				env.R2 (existing-bucket-name)      R2 Bucket
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -212,7 +231,9 @@ describe("--x-provision", () => {
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 		});
 
-		it("can provision KV, R2 and D1 bindings with existing resources, and lets you search when there are too many to list", async () => {
+		it("can provision KV, R2 and D1 bindings with existing resources, and lets you search when there are too many to list", async ({
+			expect,
+		}) => {
 			mockGetSettings();
 			msw.use(
 				http.get(
@@ -290,18 +311,20 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 
-				The following bindings need to be provisioned:
-				- KV Namespaces:
-				  - KV
-				- D1 Databases:
-				  - D1
-				- R2 Buckets:
-				  - R2
+				Experimental: The following bindings need to be provisioned:
+				Binding        Resource
+				env.KV         KV Namespace
+				env.D1         D1 Database
+				env.R2         R2 Bucket
+
 
 				Provisioning KV (KV Namespace)...
 				✨ KV provisioned 🎉
@@ -312,16 +335,16 @@ describe("--x-provision", () => {
 				Provisioning R2 (R2 Bucket)...
 				✨ R2 provisioned 🎉
 
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
 				🎉 All resources provisioned, continuing with deployment...
 
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- KV Namespaces:
-				  - KV: existing-kv-id-1
-				- D1 Databases:
-				  - D1: existing-d1-id-1
-				- R2 Buckets:
-				  - R2: existing-bucket-1
+				Your Worker has access to the following bindings:
+				Binding                         Resource
+				env.KV (existing-kv-id-1)       KV Namespace
+				env.D1 (existing-d1-id-1)       D1 Database
+				env.R2 (existing-bucket-1)      R2 Bucket
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -331,9 +354,11 @@ describe("--x-provision", () => {
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 		});
 
-		it("can provision KV, R2 and D1 bindings with new resources", async () => {
+		it("can provision KV, R2 and D1 bindings with new resources", async ({
+			expect,
+		}) => {
 			mockGetSettings();
-			mockListKVNamespacesRequest({
+			mockListKVNamespacesRequest(expect, {
 				title: "test-kv",
 				id: "existing-kv-id",
 			});
@@ -369,7 +394,7 @@ describe("--x-provision", () => {
 				text: "Enter a name for your new KV Namespace",
 				result: "new-kv",
 			});
-			mockCreateKVNamespace({
+			mockCreateKVNamespace(expect, {
 				assertTitle: "new-kv",
 				resultId: "new-kv-id",
 			});
@@ -382,7 +407,7 @@ describe("--x-provision", () => {
 				text: "Enter a name for your new D1 Database",
 				result: "new-d1",
 			});
-			mockCreateD1Database({
+			mockCreateD1Database(expect, {
 				assertName: "new-d1",
 				resultId: "new-d1-id",
 			});
@@ -395,7 +420,7 @@ describe("--x-provision", () => {
 				text: "Enter a name for your new R2 Bucket",
 				result: "new-r2",
 			});
-			mockCreateR2Bucket({
+			mockCreateR2Bucket(expect, {
 				assertBucketName: "new-r2",
 			});
 
@@ -419,41 +444,206 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Total Upload: xx KiB / gzip: xx KiB
 
-				The following bindings need to be provisioned:
-				- KV Namespaces:
-				  - KV
-				- D1 Databases:
-				  - D1
-				- R2 Buckets:
-				  - R2
+			Experimental: The following bindings need to be provisioned:
+			Binding        Resource
+			env.KV         KV Namespace
+			env.D1         D1 Database
+			env.R2         R2 Bucket
+
+
+			Provisioning KV (KV Namespace)...
+			🌀 Creating new KV Namespace "new-kv"...
+			✨ KV provisioned 🎉
+
+			Provisioning D1 (D1 Database)...
+			🌀 Creating new D1 Database "new-d1"...
+			✨ D1 provisioned 🎉
+
+			Provisioning R2 (R2 Bucket)...
+			🌀 Creating new R2 Bucket "new-r2"...
+			✨ R2 provisioned 🎉
+
+			Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
+			🎉 All resources provisioned, continuing with deployment...
+
+			Worker Startup Time: 100 ms
+			Your Worker has access to the following bindings:
+			Binding                 Resource
+			env.KV (new-kv-id)      KV Namespace
+			env.D1 (new-d1-id)      D1 Database
+			env.R2 (new-r2)         R2 Bucket
+
+			Uploaded test-name (TIMINGS)
+			Deployed test-name triggers (TIMINGS)
+			  https://test-name.test-sub-domain.workers.dev
+			Current Version ID: Galaxy-Class"
+		`);
+			expect(std.err).toMatchInlineSnapshot(`""`);
+			expect(std.warn).toMatchInlineSnapshot(`""`);
+
+			// IDs should be written back to the config file
+			expect(await readFile("wrangler.toml", "utf-8")).toMatchInlineSnapshot(`
+				"compatibility_date = "2022-01-12"
+				name = "test-name"
+				main = "index.js"
+
+				[[kv_namespaces]]
+				binding = "KV"
+				id = "new-kv-id"
+
+				[[r2_buckets]]
+				binding = "R2"
+				bucket_name = "new-r2"
+
+				[[d1_databases]]
+				binding = "D1"
+				database_id = "new-d1-id"
+				"
+			`);
+		});
+
+		it("can provision KV, R2 and D1 bindings with new resources w/ redirected config", async ({
+			expect,
+		}) => {
+			writeRedirectedWranglerConfig({
+				main: "../index.js",
+				compatibility_flags: ["nodejs_compat"],
+				kv_namespaces: [{ binding: "KV" }],
+				r2_buckets: [{ binding: "R2" }],
+				d1_databases: [{ binding: "D1" }],
+			});
+			mockGetSettings();
+			mockListKVNamespacesRequest(expect, {
+				title: "test-kv",
+				id: "existing-kv-id",
+			});
+			msw.use(
+				http.get("*/accounts/:accountId/d1/database", async () => {
+					return HttpResponse.json(
+						createFetchResult([
+							{
+								name: "db-name",
+								uuid: "existing-d1-id",
+							},
+						])
+					);
+				}),
+				http.get("*/accounts/:accountId/r2/buckets", async () => {
+					return HttpResponse.json(
+						createFetchResult({
+							buckets: [
+								{
+									name: "existing-bucket-name",
+								},
+							],
+						})
+					);
+				})
+			);
+
+			mockSelect({
+				text: "Would you like to connect an existing KV Namespace or create a new one?",
+				result: "__WRANGLER_INTERNAL_NEW",
+			});
+			mockPrompt({
+				text: "Enter a name for your new KV Namespace",
+				result: "new-kv",
+			});
+			mockCreateKVNamespace(expect, {
+				assertTitle: "new-kv",
+				resultId: "new-kv-id",
+			});
+
+			mockSelect({
+				text: "Would you like to connect an existing D1 Database or create a new one?",
+				result: "__WRANGLER_INTERNAL_NEW",
+			});
+			mockPrompt({
+				text: "Enter a name for your new D1 Database",
+				result: "new-d1",
+			});
+			mockCreateD1Database(expect, {
+				assertName: "new-d1",
+				resultId: "new-d1-id",
+			});
+
+			mockSelect({
+				text: "Would you like to connect an existing R2 Bucket or create a new one?",
+				result: "__WRANGLER_INTERNAL_NEW",
+			});
+			mockPrompt({
+				text: "Enter a name for your new R2 Bucket",
+				result: "new-r2",
+			});
+			mockCreateR2Bucket(expect, {
+				assertBucketName: "new-r2",
+			});
+
+			mockUploadWorkerRequest({
+				expectedBindings: [
+					{
+						name: "KV",
+						type: "kv_namespace",
+						namespace_id: "new-kv-id",
+					},
+					{
+						name: "R2",
+						type: "r2_bucket",
+						bucket_name: "new-r2",
+					},
+					{
+						name: "D1",
+						type: "d1",
+						id: "new-d1-id",
+					},
+				],
+			});
+
+			await runWrangler("deploy --x-auto-create=false");
+
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
+
+				Experimental: The following bindings need to be provisioned:
+				Binding        Resource
+				env.KV         KV Namespace
+				env.D1         D1 Database
+				env.R2         R2 Bucket
+
 
 				Provisioning KV (KV Namespace)...
-				🌀 Creating new KV Namespace \\"new-kv\\"...
+				🌀 Creating new KV Namespace "new-kv"...
 				✨ KV provisioned 🎉
 
 				Provisioning D1 (D1 Database)...
-				🌀 Creating new D1 Database \\"new-d1\\"...
+				🌀 Creating new D1 Database "new-d1"...
 				✨ D1 provisioned 🎉
 
 				Provisioning R2 (R2 Bucket)...
-				🌀 Creating new R2 Bucket \\"new-r2\\"...
+				🌀 Creating new R2 Bucket "new-r2"...
 				✨ R2 provisioned 🎉
 
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
 				🎉 All resources provisioned, continuing with deployment...
 
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- KV Namespaces:
-				  - KV: new-kv-id
-				- D1 Databases:
-				  - D1: new-d1-id
-				- R2 Buckets:
-				  - R2: new-r2
+				Your Worker has access to the following bindings:
+				Binding                 Resource
+				env.KV (new-kv-id)      KV Namespace
+				env.D1 (new-d1-id)      D1 Database
+				env.R2 (new-r2)         R2 Bucket
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -461,9 +651,189 @@ describe("--x-provision", () => {
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 			expect(std.warn).toMatchInlineSnapshot(`""`);
+
+			// IDs should be written back to the user config file
+			expect(await readFile("wrangler.toml", "utf-8")).toMatchInlineSnapshot(`
+				"compatibility_date = "2022-01-12"
+				name = "test-name"
+				main = "index.js"
+
+				[[kv_namespaces]]
+				binding = "KV"
+				id = "new-kv-id"
+
+				[[r2_buckets]]
+				binding = "R2"
+				bucket_name = "new-r2"
+
+				[[d1_databases]]
+				binding = "D1"
+				database_id = "new-d1-id"
+				"
+			`);
+
+			rmSync(".wrangler/deploy/config.json");
 		});
 
-		it("can prefill d1 database name from config file if provided", async () => {
+		it("can inject additional bindings in redirected config that aren't written back to disk", async ({
+			expect,
+		}) => {
+			writeRedirectedWranglerConfig({
+				main: "../index.js",
+				compatibility_flags: ["nodejs_compat"],
+				kv_namespaces: [{ binding: "KV" }, { binding: "PLATFORM_KV" }],
+				r2_buckets: [{ binding: "R2" }],
+				d1_databases: [{ binding: "D1" }],
+			});
+			mockGetSettings();
+			mockListKVNamespacesRequest(expect, {
+				title: "test-kv",
+				id: "existing-kv-id",
+			});
+			msw.use(
+				http.get("*/accounts/:accountId/d1/database", async () => {
+					return HttpResponse.json(
+						createFetchResult([
+							{
+								name: "db-name",
+								uuid: "existing-d1-id",
+							},
+						])
+					);
+				}),
+				http.get("*/accounts/:accountId/r2/buckets", async () => {
+					return HttpResponse.json(
+						createFetchResult({
+							buckets: [
+								{
+									name: "existing-bucket-name",
+								},
+							],
+						})
+					);
+				})
+			);
+			mockCreateKVNamespace(expect, {
+				assertTitle: "test-name-platform-kv",
+				resultId: "test-name-platform-kv-id",
+			});
+
+			mockCreateKVNamespace(expect, {
+				assertTitle: "test-name-kv",
+				resultId: "test-name-kv-id",
+			});
+
+			mockCreateD1Database(expect, {
+				assertName: "test-name-d1",
+				resultId: "test-name-d1-id",
+			});
+
+			mockCreateR2Bucket(expect, {
+				assertBucketName: "test-name-r2",
+			});
+
+			mockUploadWorkerRequest({
+				expectedBindings: [
+					{
+						name: "KV",
+						type: "kv_namespace",
+						namespace_id: "test-name-kv-id",
+					},
+					{
+						name: "PLATFORM_KV",
+						type: "kv_namespace",
+						namespace_id: "test-name-platform-kv-id",
+					},
+					{
+						name: "R2",
+						type: "r2_bucket",
+						bucket_name: "test-name-r2",
+					},
+					{
+						name: "D1",
+						type: "d1",
+						id: "test-name-d1-id",
+					},
+				],
+			});
+
+			await runWrangler("deploy");
+
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
+
+				Experimental: The following bindings need to be provisioned:
+				Binding                 Resource
+				env.KV                  KV Namespace
+				env.PLATFORM_KV         KV Namespace
+				env.D1                  D1 Database
+				env.R2                  R2 Bucket
+
+
+				Provisioning KV (KV Namespace)...
+				🌀 Creating new KV Namespace "test-name-kv"...
+				✨ KV provisioned 🎉
+
+				Provisioning PLATFORM_KV (KV Namespace)...
+				🌀 Creating new KV Namespace "test-name-platform-kv"...
+				✨ PLATFORM_KV provisioned 🎉
+
+				Provisioning D1 (D1 Database)...
+				🌀 Creating new D1 Database "test-name-d1"...
+				✨ D1 provisioned 🎉
+
+				Provisioning R2 (R2 Bucket)...
+				🌀 Creating new R2 Bucket "test-name-r2"...
+				✨ R2 provisioned 🎉
+
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
+				🎉 All resources provisioned, continuing with deployment...
+
+				Worker Startup Time: 100 ms
+				Your Worker has access to the following bindings:
+				Binding                                         Resource
+				env.KV (test-name-kv-id)                        KV Namespace
+				env.PLATFORM_KV (test-name-platform-kv-id)      KV Namespace
+				env.D1 (test-name-d1-id)                        D1 Database
+				env.R2 (test-name-r2)                           R2 Bucket
+
+				Uploaded test-name (TIMINGS)
+				Deployed test-name triggers (TIMINGS)
+				  https://test-name.test-sub-domain.workers.dev
+				Current Version ID: Galaxy-Class"
+			`);
+			expect(std.err).toMatchInlineSnapshot(`""`);
+			expect(std.warn).toMatchInlineSnapshot(`""`);
+
+			// IDs should be written back to the user config file, except the injected PLATFORM_KV one
+			expect(await readFile("wrangler.toml", "utf-8")).toMatchInlineSnapshot(`
+				"compatibility_date = "2022-01-12"
+				name = "test-name"
+				main = "index.js"
+
+				[[kv_namespaces]]
+				binding = "KV"
+				id = "test-name-kv-id"
+
+				[[r2_buckets]]
+				binding = "R2"
+				bucket_name = "test-name-r2"
+
+				[[d1_databases]]
+				binding = "D1"
+				database_id = "test-name-d1-id"
+				"
+			`);
+
+			rmSync(".wrangler/deploy/config.json");
+		});
+
+		it("can prefill d1 database name from config file if provided", async ({
+			expect,
+		}) => {
 			writeWranglerConfig({
 				main: "index.js",
 				d1_databases: [{ binding: "D1", database_name: "prefilled-d1-name" }],
@@ -481,10 +851,10 @@ describe("--x-provision", () => {
 					);
 				})
 			);
-			mockGetD1Database("prefilled-d1-name", {}, true);
+			mockGetD1Database(expect, "prefilled-d1-name", {}, true);
 
 			// no name prompt
-			mockCreateD1Database({
+			mockCreateD1Database(expect, {
 				assertName: "prefilled-d1-name",
 				resultId: "new-d1-id",
 			});
@@ -499,26 +869,32 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 
-				The following bindings need to be provisioned:
-				- D1 Databases:
-				  - D1
+				Experimental: The following bindings need to be provisioned:
+				Binding        Resource
+				env.D1         D1 Database
+
 
 				Provisioning D1 (D1 Database)...
 				Resource name found in config: prefilled-d1-name
-				🌀 Creating new D1 Database \\"prefilled-d1-name\\"...
+				🌀 Creating new D1 Database "prefilled-d1-name"...
 				✨ D1 provisioned 🎉
 
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
 				🎉 All resources provisioned, continuing with deployment...
 
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- D1 Databases:
-				  - D1: prefilled-d1-name (new-d1-id)
+				Your Worker has access to the following bindings:
+				Binding                         Resource
+				env.D1 (prefilled-d1-name)      D1 Database
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -528,7 +904,9 @@ describe("--x-provision", () => {
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 		});
 
-		it("can inherit d1 binding when the database name is provided", async () => {
+		it("can inherit d1 binding when the database name is provided", async ({
+			expect,
+		}) => {
 			writeWranglerConfig({
 				main: "index.js",
 				d1_databases: [{ binding: "D1", database_name: "prefilled-d1-name" }],
@@ -544,7 +922,7 @@ describe("--x-provision", () => {
 					],
 				},
 			});
-			mockGetD1Database("d1-id", { name: "prefilled-d1-name" });
+			mockGetD1Database(expect, "d1-id", { name: "prefilled-d1-name" });
 			mockUploadWorkerRequest({
 				expectedBindings: [
 					{
@@ -554,13 +932,17 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- D1 Databases:
-				  - D1: prefilled-d1-name
+				Your Worker has access to the following bindings:
+				Binding                 Resource
+				env.D1 (inherited)      D1 Database
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -568,7 +950,9 @@ describe("--x-provision", () => {
 			`);
 		});
 
-		it("will not inherit d1 binding when the database name is provided but has changed", async () => {
+		it("will not inherit d1 binding when the database name is provided but has changed", async ({
+			expect,
+		}) => {
 			// first deploy used old-d1-name/old-d1-id
 			// now we provide a different database_name that doesn't match
 			writeWranglerConfig({
@@ -598,12 +982,12 @@ describe("--x-provision", () => {
 					);
 				})
 			);
-			mockGetD1Database("new-d1-name", {}, true);
+			mockGetD1Database(expect, "new-d1-name", {}, true);
 
-			mockGetD1Database("old-d1-id", { name: "old-d1-name" });
+			mockGetD1Database(expect, "old-d1-id", { name: "old-d1-name" });
 
 			// no name prompt
-			mockCreateD1Database({
+			mockCreateD1Database(expect, {
 				assertName: "new-d1-name",
 				resultId: "new-d1-id",
 			});
@@ -618,26 +1002,32 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 
-				The following bindings need to be provisioned:
-				- D1 Databases:
-				  - D1
+				Experimental: The following bindings need to be provisioned:
+				Binding        Resource
+				env.D1         D1 Database
+
 
 				Provisioning D1 (D1 Database)...
 				Resource name found in config: new-d1-name
-				🌀 Creating new D1 Database \\"new-d1-name\\"...
+				🌀 Creating new D1 Database "new-d1-name"...
 				✨ D1 provisioned 🎉
 
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
 				🎉 All resources provisioned, continuing with deployment...
 
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- D1 Databases:
-				  - D1: new-d1-name (new-d1-id)
+				Your Worker has access to the following bindings:
+				Binding                   Resource
+				env.D1 (new-d1-name)      D1 Database
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -647,7 +1037,9 @@ describe("--x-provision", () => {
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 		});
 
-		it("can prefill r2 bucket name from config file if provided", async () => {
+		it("can prefill r2 bucket name from config file if provided", async ({
+			expect,
+		}) => {
 			writeWranglerConfig({
 				main: "index.js",
 				r2_buckets: [
@@ -673,9 +1065,9 @@ describe("--x-provision", () => {
 					);
 				})
 			);
-			mockGetR2Bucket("prefilled-r2-name", true);
+			mockGetR2Bucket(expect, "prefilled-r2-name", true);
 			// no name prompt
-			mockCreateR2Bucket({
+			mockCreateR2Bucket(expect, {
 				assertBucketName: "prefilled-r2-name",
 				assertJurisdiction: "eu",
 			});
@@ -691,26 +1083,32 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 
-				The following bindings need to be provisioned:
-				- R2 Buckets:
-				  - BUCKET
+				Experimental: The following bindings need to be provisioned:
+				Binding            Resource
+				env.BUCKET         R2 Bucket
+
 
 				Provisioning BUCKET (R2 Bucket)...
 				Resource name found in config: prefilled-r2-name
-				🌀 Creating new R2 Bucket \\"prefilled-r2-name\\"...
+				🌀 Creating new R2 Bucket "prefilled-r2-name"...
 				✨ BUCKET provisioned 🎉
 
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
 				🎉 All resources provisioned, continuing with deployment...
 
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- R2 Buckets:
-				  - BUCKET: prefilled-r2-name (eu)
+				Your Worker has access to the following bindings:
+				Binding                                  Resource
+				env.BUCKET (prefilled-r2-name (eu))      R2 Bucket
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -720,7 +1118,9 @@ describe("--x-provision", () => {
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 		});
 
-		it("won't prompt to provision if an r2 bucket name belongs to an existing bucket", async () => {
+		it("won't prompt to provision if an r2 bucket name belongs to an existing bucket", async ({
+			expect,
+		}) => {
 			writeWranglerConfig({
 				main: "index.js",
 				r2_buckets: [
@@ -745,7 +1145,7 @@ describe("--x-provision", () => {
 					);
 				})
 			);
-			mockGetR2Bucket("existing-bucket-name", false);
+			mockGetR2Bucket(expect, "existing-bucket-name", false);
 			mockUploadWorkerRequest({
 				expectedBindings: [
 					{
@@ -757,14 +1157,18 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision --x-auto-create=false");
+			await runWrangler("deploy --x-auto-create=false");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- R2 Buckets:
-				  - BUCKET: existing-bucket-name (eu)
+				Your Worker has access to the following bindings:
+				Binding                                     Resource
+				env.BUCKET (existing-bucket-name (eu))      R2 Bucket
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -774,7 +1178,9 @@ describe("--x-provision", () => {
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 		});
 
-		it("won't prompt to provision if a D1 database name belongs to an existing database", async () => {
+		it("won't prompt to provision if a D1 database name belongs to an existing database", async ({
+			expect,
+		}) => {
 			writeWranglerConfig({
 				main: "index.js",
 				d1_databases: [
@@ -786,7 +1192,7 @@ describe("--x-provision", () => {
 			});
 			mockGetSettings();
 
-			mockGetD1Database("existing-db-name", {
+			mockGetD1Database(expect, "existing-db-name", {
 				name: "existing-db-name",
 				uuid: "existing-d1-id",
 			});
@@ -801,14 +1207,18 @@ describe("--x-provision", () => {
 				],
 			});
 
-			await runWrangler("deploy --x-provision");
+			await runWrangler("deploy");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- D1 Databases:
-				  - DB_NAME: existing-db-name (existing-d1-id)
+				Your Worker has access to the following bindings:
+				Binding                             Resource
+				env.DB_NAME (existing-db-name)      D1 Database
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -819,7 +1229,7 @@ describe("--x-provision", () => {
 		});
 
 		// because buckets with the same name can exist in different jurisdictions
-		it("will provision if the jurisdiction changes", async () => {
+		it("will provision if the jurisdiction changes", async ({ expect }) => {
 			writeWranglerConfig({
 				main: "index.js",
 				r2_buckets: [
@@ -857,7 +1267,7 @@ describe("--x-provision", () => {
 				})
 			);
 			// since the jurisdiction doesn't match, it should return not found
-			mockGetR2Bucket("existing-bucket-name", true);
+			mockGetR2Bucket(expect, "existing-bucket-name", true);
 			mockUploadWorkerRequest({
 				expectedBindings: [
 					{
@@ -868,31 +1278,37 @@ describe("--x-provision", () => {
 					},
 				],
 			});
-			mockCreateR2Bucket({
+			mockCreateR2Bucket(expect, {
 				assertJurisdiction: "eu",
 				assertBucketName: "existing-bucket-name",
 			});
 
-			await runWrangler("deploy --x-provision");
+			await runWrangler("deploy");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"Total Upload: xx KiB / gzip: xx KiB
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Total Upload: xx KiB / gzip: xx KiB
 
-				The following bindings need to be provisioned:
-				- R2 Buckets:
-				  - BUCKET
+				Experimental: The following bindings need to be provisioned:
+				Binding            Resource
+				env.BUCKET         R2 Bucket
+
 
 				Provisioning BUCKET (R2 Bucket)...
 				Resource name found in config: existing-bucket-name
-				🌀 Creating new R2 Bucket \\"existing-bucket-name\\"...
+				🌀 Creating new R2 Bucket "existing-bucket-name"...
 				✨ BUCKET provisioned 🎉
 
+				Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work.
 				🎉 All resources provisioned, continuing with deployment...
 
 				Worker Startup Time: 100 ms
-				Your worker has access to the following bindings:
-				- R2 Buckets:
-				  - BUCKET: existing-bucket-name (eu)
+				Your Worker has access to the following bindings:
+				Binding                                     Resource
+				env.BUCKET (existing-bucket-name (eu))      R2 Bucket
+
 				Uploaded test-name (TIMINGS)
 				Deployed test-name triggers (TIMINGS)
 				  https://test-name.test-sub-domain.workers.dev
@@ -903,56 +1319,101 @@ describe("--x-provision", () => {
 		});
 	});
 
-	it("should error if used with a service environment", async () => {
+	describe("provisions agent_memory bindings", () => {
+		beforeEach(() => {
+			writeWranglerConfig({
+				main: "index.js",
+				agent_memory: [{ binding: "MEMORY", namespace: "my-agent-namespace" }],
+			});
+		});
+
+		it("should inherit agent_memory binding if found in the deployed settings", async ({
+			expect,
+		}) => {
+			mockGetSettings({
+				result: {
+					bindings: [
+						{
+							type: "agent_memory",
+							name: "MEMORY",
+							namespace: "my-agent-namespace",
+						},
+					],
+				},
+			});
+			mockUploadWorkerRequest({
+				expectedBindings: [
+					{
+						name: "MEMORY",
+						type: "inherit",
+					},
+				],
+			});
+
+			await runWrangler("deploy");
+			expect(std.out).toContain("env.MEMORY (inherited)");
+			expect(std.err).toMatchInlineSnapshot(`""`);
+		});
+
+		it("should connect to existing agent_memory namespace if it already exists", async ({
+			expect,
+		}) => {
+			mockGetSettings();
+			mockGetAgentMemoryNamespace(expect, "my-agent-namespace", false);
+			mockUploadWorkerRequest({
+				expectedBindings: [
+					{
+						name: "MEMORY",
+						type: "agent_memory",
+						namespace: "my-agent-namespace",
+					},
+				],
+			});
+
+			await runWrangler("deploy");
+			expect(std.out).toContain("env.MEMORY");
+			expect(std.err).toMatchInlineSnapshot(`""`);
+		});
+
+		it("should create agent_memory namespace if it does not exist", async ({
+			expect,
+		}) => {
+			mockGetSettings();
+			mockGetAgentMemoryNamespace(expect, "my-agent-namespace", true);
+			mockCreateAgentMemoryNamespace(expect, {
+				assertName: "my-agent-namespace",
+			});
+			mockUploadWorkerRequest({
+				expectedBindings: [
+					{
+						name: "MEMORY",
+						type: "agent_memory",
+						namespace: "my-agent-namespace",
+					},
+				],
+			});
+
+			await runWrangler("deploy");
+			expect(std.out).toContain("env.MEMORY");
+			expect(std.err).toMatchInlineSnapshot(`""`);
+		});
+	});
+
+	it("should error if used with a service environment", async ({ expect }) => {
 		writeWorkerSource();
 		writeWranglerConfig({
 			main: "index.js",
 			legacy_env: false,
 			kv_namespaces: [{ binding: "KV" }],
 		});
-		await expect(
-			runWrangler("deploy --x-provision --x-auto-create=false")
-		).rejects.toThrow(
+		await expect(runWrangler("deploy --x-auto-create=false")).rejects.toThrow(
 			"Provisioning resources is not supported with a service environment"
 		);
 	});
 });
 
-function mockGetSettings(
-	options: {
-		result?: Settings;
-		assertAccountId?: string;
-		assertScriptName?: string;
-	} = {}
-) {
-	msw.use(
-		http.get(
-			"*/accounts/:accountId/workers/scripts/:scriptName/settings",
-			async ({ params }) => {
-				if (options.assertAccountId) {
-					expect(params.accountId).toEqual(options.assertAccountId);
-				}
-
-				if (options.assertScriptName) {
-					expect(params.scriptName).toEqual(options.assertScriptName);
-				}
-
-				if (!options.result) {
-					return new Response(null, { status: 404 });
-				}
-
-				return HttpResponse.json({
-					success: true,
-					errors: [],
-					messages: [],
-					result: options.result,
-				});
-			}
-		)
-	);
-}
-
 function mockCreateD1Database(
+	expect: ExpectStatic,
 	options: {
 		resultId?: string;
 		assertName?: string;
@@ -977,6 +1438,7 @@ function mockCreateD1Database(
 }
 
 function mockCreateR2Bucket(
+	expect: ExpectStatic,
 	options: {
 		assertBucketName?: string;
 		assertJurisdiction?: string;
@@ -1002,7 +1464,11 @@ function mockCreateR2Bucket(
 	);
 }
 
-function mockGetR2Bucket(bucketName: string, missing: boolean = false) {
+function mockGetR2Bucket(
+	expect: ExpectStatic,
+	bucketName: string,
+	missing: boolean = false
+) {
 	msw.use(
 		http.get(
 			"*/accounts/:accountId/r2/buckets/:bucketName",
@@ -1024,6 +1490,7 @@ function mockGetR2Bucket(bucketName: string, missing: boolean = false) {
 }
 
 function mockGetD1Database(
+	expect: ExpectStatic,
 	databaseIdOrName: string,
 	databaseInfo: Partial<DatabaseInfo>,
 	missing: boolean = false
@@ -1041,6 +1508,60 @@ function mockGetD1Database(
 					);
 				}
 				return HttpResponse.json(createFetchResult(databaseInfo));
+			},
+			{ once: true }
+		)
+	);
+}
+
+function mockGetAgentMemoryNamespace(
+	expect: ExpectStatic,
+	namespaceName: string,
+	missing: boolean = false
+) {
+	msw.use(
+		http.get(
+			"*/accounts/:accountId/agent-memory/namespaces/:namespaceName",
+			async ({ params }) => {
+				expect(params.namespaceName).toEqual(namespaceName);
+				if (missing) {
+					return HttpResponse.json(
+						createFetchResult(null, false, [
+							{ code: 10006, message: "namespace not found" },
+						]),
+						{ status: 404 }
+					);
+				}
+				return HttpResponse.json(
+					createFetchResult({
+						id: "agent-memory-namespace-id",
+						name: namespaceName,
+					})
+				);
+			},
+			{ once: true }
+		)
+	);
+}
+
+function mockCreateAgentMemoryNamespace(
+	expect: ExpectStatic,
+	options: { assertName?: string } = {}
+) {
+	msw.use(
+		http.post(
+			"*/accounts/:accountId/agent-memory/namespaces",
+			async ({ request }) => {
+				if (options.assertName) {
+					const requestBody = await request.json();
+					expect(requestBody).toEqual({ name: options.assertName });
+				}
+				return HttpResponse.json(
+					createFetchResult({
+						id: "new-agent-memory-namespace-id",
+						name: options.assertName ?? "test-namespace",
+					})
+				);
 			},
 			{ once: true }
 		)

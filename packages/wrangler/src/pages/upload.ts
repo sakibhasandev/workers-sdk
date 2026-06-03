@@ -1,14 +1,21 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { spinner } from "@cloudflare/cli/interactive";
+import { spinner } from "@cloudflare/cli-shared-helpers/interactive";
+import {
+	APIError,
+	COMPLIANCE_REGION_CONFIG_PUBLIC,
+	FatalError,
+	formatTime,
+	UserError,
+} from "@cloudflare/workers-utils";
 import PQueue from "p-queue";
 import { fetchResult } from "../cfetch";
-import { FatalError } from "../errors";
+import { createCommand } from "../core/create-command";
 import isInteractive from "../is-interactive";
 import { logger } from "../logger";
-import { APIError } from "../parse";
 import {
 	BULK_UPLOAD_CONCURRENCY,
+	MAX_ASSET_COUNT_DEFAULT,
 	MAX_BUCKET_FILE_COUNT,
 	MAX_BUCKET_SIZE,
 	MAX_CHECK_MISSING_ATTEMPTS,
@@ -17,62 +24,71 @@ import {
 } from "./constants";
 import { ApiErrorCodes } from "./errors";
 import { validate } from "./validate";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../yargs-types";
 import type { UploadPayloadFile } from "./types";
 import type { FileContainer } from "./validate";
 
-type UploadArgs = StrictYargsOptionsToInterface<typeof Options>;
-
-export function Options(yargs: CommonYargsArgv) {
-	return yargs
-		.positional("directory", {
+export const pagesProjectUploadCommand = createCommand({
+	metadata: {
+		description: "Upload files to a project",
+		status: "stable",
+		owner: "Workers: Authoring and Testing",
+		hidden: true,
+	},
+	behaviour: {
+		provideConfig: false,
+	},
+	args: {
+		directory: {
 			type: "string",
 			demandOption: true,
 			description: "The directory of static files to upload",
-		})
-		.options({
-			"output-manifest-path": {
-				type: "string",
-				description: "The name of the project you want to deploy to",
-			},
-			"skip-caching": {
-				type: "boolean",
-				description: "Skip asset caching which speeds up builds",
-			},
+		},
+		"output-manifest-path": {
+			type: "string",
+			description: "The name of the project you want to deploy to",
+		},
+		"skip-caching": {
+			type: "boolean",
+			description: "Skip asset caching which speeds up builds",
+		},
+	},
+	positionalArgs: ["directory"],
+	async handler({ directory, outputManifestPath, skipCaching }) {
+		if (!directory) {
+			throw new UserError(
+				"Missing directory. Provide the path to your build output directory as a positional argument.",
+				{ telemetryMessage: "pages upload missing directory" }
+			);
+		}
+
+		if (!process.env.CF_PAGES_UPLOAD_JWT) {
+			throw new FatalError("No JWT given.", {
+				code: 1,
+				telemetryMessage: "pages upload missing jwt",
+			});
+		}
+
+		const fileMap = await validate({
+			directory,
+			fileCountLimit: maxFileCountAllowedFromClaims(
+				process.env.CF_PAGES_UPLOAD_JWT
+			),
 		});
-}
 
-export const Handler = async ({
-	directory,
-	outputManifestPath,
-	skipCaching,
-}: UploadArgs) => {
-	if (!directory) {
-		throw new FatalError("Must specify a directory.", 1);
-	}
+		const manifest = await upload({
+			fileMap,
+			jwt: process.env.CF_PAGES_UPLOAD_JWT,
+			skipCaching: skipCaching ?? false,
+		});
 
-	if (!process.env.CF_PAGES_UPLOAD_JWT) {
-		throw new FatalError("No JWT given.", 1);
-	}
+		if (outputManifestPath) {
+			await mkdir(dirname(outputManifestPath), { recursive: true });
+			await writeFile(outputManifestPath, JSON.stringify(manifest));
+		}
 
-	const fileMap = await validate({ directory });
-
-	const manifest = await upload({
-		fileMap,
-		jwt: process.env.CF_PAGES_UPLOAD_JWT,
-		skipCaching: skipCaching ?? false,
-	});
-
-	if (outputManifestPath) {
-		await mkdir(dirname(outputManifestPath), { recursive: true });
-		await writeFile(outputManifestPath, JSON.stringify(manifest));
-	}
-
-	logger.log(`✨ Upload complete!`);
-};
+		logger.log(`✨ Upload complete!`);
+	},
+});
 
 export const upload = async (
 	args:
@@ -94,6 +110,7 @@ export const upload = async (
 		} else {
 			return (
 				await fetchResult<{ jwt: string }>(
+					COMPLIANCE_REGION_CONFIG_PUBLIC,
 					`/accounts/${args.accountId}/pages/projects/${args.projectName}/upload-token`
 				)
 			).jwt;
@@ -114,16 +131,20 @@ export const upload = async (
 		}
 
 		try {
-			return await fetchResult<string[]>(`/pages/assets/check-missing`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${jwt}`,
-				},
-				body: JSON.stringify({
-					hashes: files.map(({ hash }) => hash),
-				}),
-			});
+			return await fetchResult<string[]>(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
+				`/pages/assets/check-missing`,
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${jwt}`,
+					},
+					body: JSON.stringify({
+						hashes: files.map(({ hash }) => hash),
+					}),
+				}
+			);
 		} catch (e) {
 			if (attempts < MAX_CHECK_MISSING_ATTEMPTS) {
 				// Exponential backoff, 1 second first time, then 2 second, then 4 second etc.
@@ -217,14 +238,18 @@ export const upload = async (
 
 			try {
 				logger.debug("POST /pages/assets/upload");
-				const res = await fetchResult(`/pages/assets/upload`, {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						Authorization: `Bearer ${jwt}`,
-					},
-					body: JSON.stringify(payload),
-				});
+				const res = await fetchResult(
+					COMPLIANCE_REGION_CONFIG_PUBLIC,
+					`/pages/assets/upload`,
+					{
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+							Authorization: `Bearer ${jwt}`,
+						},
+						body: JSON.stringify(payload),
+					}
+				);
 				logger.debug("result:", res);
 			} catch (e) {
 				if (attempts < MAX_UPLOAD_ATTEMPTS) {
@@ -278,7 +303,10 @@ export const upload = async (
 								`Failed to upload files. Please try again. Error: ${JSON.stringify(
 									error
 								)})`,
-								error.code || 1
+								{
+									code: error.code || 1,
+									telemetryMessage: "pages upload files failed",
+								}
 							)
 						);
 					}
@@ -305,16 +333,20 @@ export const upload = async (
 
 	const doUpsertHashes = async (): Promise<void> => {
 		try {
-			return await fetchResult(`/pages/assets/upsert-hashes`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${jwt}`,
-				},
-				body: JSON.stringify({
-					hashes: files.map(({ hash }) => hash),
-				}),
-			});
+			return await fetchResult(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
+				`/pages/assets/upsert-hashes`,
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${jwt}`,
+					},
+					body: JSON.stringify({
+						hashes: files.map(({ hash }) => hash),
+					}),
+				}
+			);
 		} catch (e) {
 			await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
 
@@ -326,16 +358,20 @@ export const upload = async (
 				jwt = await fetchJwt();
 			}
 
-			return await fetchResult(`/pages/assets/upsert-hashes`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${jwt}`,
-				},
-				body: JSON.stringify({
-					hashes: files.map(({ hash }) => hash),
-				}),
-			});
+			return await fetchResult(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
+				`/pages/assets/upsert-hashes`,
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${jwt}`,
+					},
+					body: JSON.stringify({
+						hashes: files.map(({ hash }) => hash),
+					}),
+				}
+			);
 		}
 	};
 
@@ -381,9 +417,37 @@ export const isJwtExpired = (token: string): boolean | undefined => {
 	}
 };
 
-function formatTime(duration: number) {
-	return `(${(duration / 1000).toFixed(2)} sec)`;
-}
+export const maxFileCountAllowedFromClaims = (token: string): number => {
+	// During testing we don't use valid JWTs, so don't try and parse them
+	if (
+		typeof vitest !== "undefined" &&
+		(token === "<<funfetti-auth-jwt>>" ||
+			token === "<<funfetti-auth-jwt2>>" ||
+			token === "<<aus-completion-token>>")
+	) {
+		return MAX_ASSET_COUNT_DEFAULT;
+	}
+	try {
+		// Not validating the JWT here, which ordinarily would be a big red flag.
+		// However, if the JWT is invalid, no uploads (calls to /pages/assets/upload)
+		// will succeed.
+		const decodedJwt = JSON.parse(
+			Buffer.from(token.split(".")[1], "base64").toString()
+		);
+
+		const maxFileCountAllowed = decodedJwt["max_file_count_allowed"];
+		if (typeof maxFileCountAllowed == "number") {
+			return maxFileCountAllowed;
+		}
+
+		return MAX_ASSET_COUNT_DEFAULT;
+	} catch (e) {
+		if (e instanceof Error) {
+			throw new Error(`Invalid token: ${e.message}`);
+		}
+		return MAX_ASSET_COUNT_DEFAULT;
+	}
+};
 
 function renderProgress(done: number, total: number) {
 	const s = spinner();

@@ -1,24 +1,25 @@
-import { existsSync } from "fs";
+import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import TOML from "@iarna/toml";
+import {
+	COMPLIANCE_REGION_CONFIG_PUBLIC,
+	FatalError,
+	getTodaysCompatDate,
+	UserError,
+} from "@cloudflare/workers-utils";
 import chalk from "chalk";
-import { supportedCompatibilityDate } from "miniflare";
+import TOML from "smol-toml";
 import { fetchResult } from "../cfetch";
 import { getConfigCache } from "../config-cache";
+import { createCommand } from "../core/create-command";
 import { confirm } from "../dialogs";
-import { FatalError } from "../errors";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
 import { requireAuth } from "../user";
-import { printWranglerBanner } from "../wrangler-banner";
+import { getCloudflareAccountIdFromEnv } from "../user/auth-variables";
 import { PAGES_CONFIG_CACHE_FILENAME } from "./constants";
-import type { RawEnvironment } from "../config";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../yargs-types";
 import type { PagesConfigCache } from "./types";
 import type { Project } from "@cloudflare/types";
+import type { RawEnvironment } from "@cloudflare/workers-utils";
 
 // TODO: fix the Project definition
 type DeploymentConfig = Project["deployment_configs"]["production"];
@@ -74,12 +75,11 @@ async function toEnvironment(
 ): Promise<RawEnvironment> {
 	const configObj = {} as RawEnvironment;
 	configObj.compatibility_date =
-		deploymentConfig.compatibility_date ??
-		new Date().toISOString().substring(0, 10);
+		deploymentConfig.compatibility_date ?? getTodaysCompatDate();
 
 	// Find the latest supported compatibility date and use that
 	if (deploymentConfig.always_use_latest_compatibility_date) {
-		configObj.compatibility_date = supportedCompatibilityDate;
+		configObj.compatibility_date = getTodaysCompatDate();
 	}
 
 	if (deploymentConfig.compatibility_flags?.length) {
@@ -128,6 +128,7 @@ async function toEnvironment(
 				class: string;
 				environment?: string;
 			}>(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
 				`/accounts/${accountId}/workers/durable_objects/namespaces/${ns.namespace_id}`
 			);
 			configObj.durable_objects.bindings.push({
@@ -196,7 +197,7 @@ async function toEnvironment(
 	return configObj;
 }
 async function writeWranglerToml(toml: RawEnvironment) {
-	let tomlString = TOML.stringify(toml as TOML.JsonMap);
+	let tomlString = TOML.stringify(toml);
 
 	// Remove indentation from the start of lines, as this isn't common across TOML examples, and causes user confusion
 	tomlString = tomlString
@@ -263,6 +264,7 @@ function simplifyEnvironments(
 
 async function downloadProject(accountId: string, projectName: string) {
 	const project = await fetchResult<PagesProject>(
+		COMPLIANCE_REGION_CONFIG_PUBLIC,
 		`/accounts/${accountId}/pages/projects/${projectName}`
 	);
 	logger.debug(JSON.stringify(project, null, 2));
@@ -289,51 +291,66 @@ async function downloadProject(accountId: string, projectName: string) {
 	};
 }
 
-type DownloadConfigArgs = StrictYargsOptionsToInterface<typeof Options>;
-
-export function Options(yargs: CommonYargsArgv) {
-	return yargs
-		.positional("projectName", {
+export const pagesDownloadConfigCommand = createCommand({
+	metadata: {
+		description:
+			"Download your Pages project config as a Wrangler configuration file",
+		status: "experimental",
+		owner: "Workers: Authoring and Testing",
+		hideGlobalFlags: ["config", "env"],
+	},
+	behaviour: {
+		provideConfig: false,
+	},
+	args: {
+		projectName: {
 			type: "string",
 			description: "The Pages project to download",
-		})
-		.option("force", {
-			describe:
+		},
+		force: {
+			description:
 				"Overwrite an existing Wrangler configuration file without prompting",
 			type: "boolean",
-		});
-}
+		},
+	},
+	positionalArgs: ["projectName"],
+	async handler({ projectName, force }) {
+		void metrics.sendMetricsEvent("download pages config");
 
-export const Handler = async ({ projectName, force }: DownloadConfigArgs) => {
-	void metrics.sendMetricsEvent("download pages config");
-	await printWranglerBanner();
-
-	const projectConfig = getConfigCache<PagesConfigCache>(
-		PAGES_CONFIG_CACHE_FILENAME
-	);
-	const accountId = await requireAuth(projectConfig);
-
-	projectName ??= projectConfig.project_name;
-
-	if (!projectName) {
-		throw new FatalError("Must specify a project name.", 1);
-	}
-	const config = await downloadProject(accountId, projectName);
-	if (!force && existsSync("wrangler.toml")) {
-		const overwrite = await confirm(
-			"Your existing Wrangler configuration file will be overwritten. Continue?",
-			{ fallbackValue: false }
+		const projectConfig = getConfigCache<PagesConfigCache>(
+			PAGES_CONFIG_CACHE_FILENAME
 		);
-		if (!overwrite) {
-			throw new FatalError(
-				"Not overwriting existing Wrangler configuration file"
+		const accountId =
+			getCloudflareAccountIdFromEnv() ?? (await requireAuth(projectConfig));
+
+		projectName ??= projectConfig.project_name;
+
+		if (!projectName) {
+			throw new UserError(
+				"Missing Pages project name. Provide the project name as a positional argument: wrangler pages download config <name>.",
+				{
+					telemetryMessage: "pages download config missing project name",
+				}
 			);
 		}
-	}
-	await writeWranglerToml(config);
-	logger.info(
-		chalk.green(
-			"Success! Your project settings have been downloaded to wrangler.toml"
-		)
-	);
-};
+		const config = await downloadProject(accountId, projectName);
+		if (!force && existsSync("wrangler.toml")) {
+			const overwrite = await confirm(
+				"Your existing Wrangler configuration file will be overwritten. Continue?",
+				{ fallbackValue: false }
+			);
+			if (!overwrite) {
+				throw new FatalError(
+					"Not overwriting existing Wrangler configuration file",
+					{ telemetryMessage: "pages download config overwrite declined" }
+				);
+			}
+		}
+		await writeWranglerToml(config);
+		logger.info(
+			chalk.green(
+				"Success! Your project settings have been downloaded to wrangler.toml"
+			)
+		);
+	},
+});

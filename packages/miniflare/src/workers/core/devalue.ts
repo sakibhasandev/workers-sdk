@@ -52,12 +52,33 @@ export const structuredSerializableReducers: ReducersRevivers = {
 	},
 	ArrayBufferView(value) {
 		if (ArrayBuffer.isView(value)) {
-			return [
-				value.constructor.name,
-				value.buffer,
-				value.byteOffset,
-				value.byteLength,
-			];
+			let name = value.constructor.name;
+			// Subclasses like Node.js `Buffer` extend standard typed arrays but
+			// aren't available in all runtimes. Normalise to the parent constructor.
+			if (
+				!ALLOWED_ARRAY_BUFFER_VIEW_CONSTRUCTORS.some((c) => c.name === name)
+			) {
+				for (const ctor of ALLOWED_ARRAY_BUFFER_VIEW_CONSTRUCTORS) {
+					if (value instanceof ctor) {
+						name = ctor.name;
+						break;
+					}
+				}
+			}
+			let buf = value.buffer;
+			let off = value.byteOffset;
+			if (off !== 0 || buf.byteLength !== value.byteLength) {
+				buf = buf.slice(off, off + value.byteLength);
+				off = 0;
+			}
+			return [name, buf, off, value.byteLength];
+		}
+	},
+	RegExp(value) {
+		if (value instanceof RegExp) {
+			const { source, flags } = value;
+			const encoded = Buffer.from(source).toString("base64");
+			return flags ? ["RegExp", encoded, flags] : ["RegExp", encoded];
 		}
 	},
 	Error(value) {
@@ -97,6 +118,14 @@ export const structuredSerializableRevivers: ReducersRevivers = {
 		if ("BYTES_PER_ELEMENT" in ctor) length /= ctor.BYTES_PER_ELEMENT;
 		return new ctor(buffer as ArrayBuffer, byteOffset, length);
 	},
+	RegExp(value) {
+		assert(Array.isArray(value));
+		const [name, encoded, flags] = value;
+		assert(typeof name === "string");
+		assert(typeof encoded === "string");
+		const source = Buffer.from(encoded, "base64").toString("utf-8");
+		return new RegExp(source, flags);
+	},
 	Error(value) {
 		assert(Array.isArray(value));
 		const [name, message, stack, cause] = value as unknown[];
@@ -134,7 +163,7 @@ export function createHTTPReducers(
 ): ReducersRevivers {
 	return {
 		Headers(val) {
-			if (val instanceof impl.Headers) return Object.fromEntries(val);
+			if (val instanceof impl.Headers) return [...val.entries()];
 		},
 		Request(val) {
 			if (val instanceof impl.Request) {
@@ -154,7 +183,7 @@ export function createHTTPRevivers<RS>(
 	return {
 		Headers(value) {
 			assert(typeof value === "object" && value !== null);
-			return new impl.Headers(value as Record<string, string>);
+			return new impl.Headers(value as string[][]);
 		},
 		Request(value) {
 			assert(Array.isArray(value));

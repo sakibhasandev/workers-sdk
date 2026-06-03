@@ -1,13 +1,17 @@
+import { setTimeout } from "node:timers/promises";
+import {
+	normalizeString,
+	runInTempDir,
+} from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
 import { Headers, Request } from "undici";
-import { vi } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import MockWebSocketServer from "vitest-websocket-mock";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { useMockIsTTY } from "../helpers/mock-istty";
 import { MockWebSocket } from "../helpers/mock-web-socket";
 import { msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
 import type {
 	AlarmEvent,
@@ -21,11 +25,7 @@ import type {
 import type { RequestInit } from "undici";
 import type WebSocket from "ws";
 
-// we want to include the banner to make sure it doesn't show up in the output when
-// when --format=json
-vi.unmock("../../wrangler-banner");
 vi.mock("ws", async (importOriginal) => {
-	// eslint-disable-next-line @typescript-eslint/consistent-type-imports
 	const realModule = await importOriginal<typeof import("ws")>();
 	const module = {
 		__esModule: true,
@@ -52,6 +52,7 @@ vi.mock("ws", async (importOriginal) => {
 
 describe("pages deployment tail", () => {
 	runInTempDir();
+	const { setIsTTY } = useMockIsTTY();
 
 	let api: MockAPI;
 	afterEach(async () => {
@@ -65,28 +66,25 @@ describe("pages deployment tail", () => {
 	mockApiToken();
 	const std = mockConsoleMethods();
 
-	beforeEach(() => {
-		// Force the CLI to be "non-interactive" in test env
-		vi.stubEnv("CF_PAGES", "1");
-	});
-
 	/**
 	 * Interaction with the tailing API, including tail creation,
 	 * deletion, and connection.
 	 */
 	describe("API interaction", () => {
-		it("should throw an error if deployment isn't provided", async () => {
+		it("should throw an error if deployment isn't provided", async ({
+			expect,
+		}) => {
 			api = mockTailAPIs();
 			await expect(
 				runWrangler("pages deployment tail")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[Error: Must specify a deployment in non-interactive mode.]`
+				`[Error: Missing deployment. In non-interactive mode, provide the deployment ID or URL as a positional argument.]`
 			);
 			expect(api.requests.deployments.count).toStrictEqual(0);
 			await api.closeHelper();
 		});
 
-		it("creates and then delete tails by deployment ID", async () => {
+		it("creates and then delete tails by deployment ID", async ({ expect }) => {
 			api = mockTailAPIs();
 			expect(api.requests.creation.length).toStrictEqual(0);
 
@@ -103,7 +101,28 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("creates and then deletes tails by deployment URL", async () => {
+		it("only uses deployments with status=success and name=deploy", async ({
+			expect,
+		}) => {
+			setIsTTY(true);
+
+			api = mockTailAPIs("mock-deployment-id");
+			expect(api.requests.creation.length).toStrictEqual(0);
+
+			await runWrangler("pages deployment tail --project-name mock-project");
+
+			await expect(api.ws.connected).resolves.toBeTruthy();
+			expect(api.requests.creation.length).toStrictEqual(1);
+			expect(api.requests.deletion.count).toStrictEqual(0);
+
+			await api.closeHelper();
+			expect(api.requests.deletion.count).toStrictEqual(1);
+			await api.closeHelper();
+		});
+
+		it("creates and then deletes tails by deployment URL", async ({
+			expect,
+		}) => {
 			api = mockTailAPIs();
 			expect(api.requests.creation.length).toStrictEqual(0);
 
@@ -120,15 +139,17 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("errors when passing in a deployment without a project", async () => {
+		it("errors when passing in a deployment without a project", async ({
+			expect,
+		}) => {
 			await expect(
 				runWrangler("pages deployment tail foo")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[Error: Must specify a project name in non-interactive mode.]`
+				`[Error: Missing Pages project name. In non-interactive mode, use --project-name <name> to specify which project to tail.]`
 			);
 		});
 
-		it("creates and then delete tails by project name", async () => {
+		it("creates and then delete tails by project name", async ({ expect }) => {
 			api = mockTailAPIs();
 			expect(api.requests.creation.length).toStrictEqual(0);
 
@@ -144,7 +165,7 @@ describe("pages deployment tail", () => {
 			expect(api.requests.deletion.count).toStrictEqual(1);
 		});
 
-		it("errors when the websocket closes unexpectedly", async () => {
+		it("errors when the websocket closes unexpectedly", async ({ expect }) => {
 			api = mockTailAPIs();
 			await api.closeHelper();
 
@@ -157,7 +178,9 @@ describe("pages deployment tail", () => {
 			);
 		});
 
-		it("activates debug mode when the cli arg is passed in", async () => {
+		it("activates debug mode when the cli arg is passed in", async ({
+			expect,
+		}) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --debug"
@@ -169,7 +192,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("passes default environment to deployments list", async () => {
+		it("passes default environment to deployments list", async ({ expect }) => {
 			api = mockTailAPIs();
 			expect(api.requests.creation.length).toStrictEqual(0);
 
@@ -188,7 +211,9 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("passes production environment to deployments list", async () => {
+		it("passes production environment to deployments list", async ({
+			expect,
+		}) => {
 			api = mockTailAPIs();
 			expect(api.requests.creation.length).toStrictEqual(0);
 
@@ -207,7 +232,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("passes preview environment to deployments list", async () => {
+		it("passes preview environment to deployments list", async ({ expect }) => {
 			api = mockTailAPIs();
 			expect(api.requests.creation.length).toStrictEqual(0);
 
@@ -228,7 +253,9 @@ describe("pages deployment tail", () => {
 	});
 
 	describe("filtering", () => {
-		it("should throw for bad sampling rate filters ranges", async () => {
+		it("should throw for bad sampling rate filters ranges", async ({
+			expect,
+		}) => {
 			const tooHigh = runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --sampling-rate 10"
 			);
@@ -241,7 +268,7 @@ describe("pages deployment tail", () => {
 			await expect(tooLow).rejects.toThrow();
 		});
 
-		it("should send sampling rate filter", async () => {
+		it("should send sampling rate filter", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --sampling-rate 0.25"
@@ -252,7 +279,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends single status filters", async () => {
+		it("sends single status filters", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --status error"
@@ -267,7 +294,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends multiple status filters", async () => {
+		it("sends multiple status filters", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --status error --status canceled"
@@ -288,7 +315,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends single HTTP method filters", async () => {
+		it("sends single HTTP method filters", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --method POST"
@@ -299,7 +326,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends multiple HTTP method filters", async () => {
+		it("sends multiple HTTP method filters", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --method POST --method GET"
@@ -310,7 +337,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends header filters without a query", async () => {
+		it("sends header filters without a query", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --header X-CUSTOM-HEADER"
@@ -321,7 +348,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends header filters with a query", async () => {
+		it("sends header filters with a query", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --header X-CUSTOM-HEADER:some-value"
@@ -332,7 +359,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends single IP filters", async () => {
+		it("sends single IP filters", async ({ expect }) => {
 			api = mockTailAPIs();
 			const fakeIp = "192.0.2.1";
 
@@ -345,7 +372,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends multiple IP filters", async () => {
+		it("sends multiple IP filters", async ({ expect }) => {
 			api = mockTailAPIs();
 			const fakeIp = "192.0.2.1";
 
@@ -358,7 +385,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends search filters", async () => {
+		it("sends search filters", async ({ expect }) => {
 			api = mockTailAPIs();
 			const search = "filterMe";
 
@@ -371,7 +398,7 @@ describe("pages deployment tail", () => {
 			await api.closeHelper();
 		});
 
-		it("sends everything but the kitchen sink", async () => {
+		it("sends everything but the kitchen sink", async ({ expect }) => {
 			api = mockTailAPIs();
 			const sampling_rate = 0.69;
 			const status = ["ok", "error"];
@@ -417,9 +444,7 @@ describe("pages deployment tail", () => {
 	});
 
 	describe("printing", () => {
-		const { setIsTTY } = useMockIsTTY();
-
-		it("logs request messages in JSON format", async () => {
+		it("logs request messages in JSON format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format json"
@@ -430,11 +455,13 @@ describe("pages deployment tail", () => {
 			const serializedMessage = serialize(message);
 
 			api.ws.send(serializedMessage);
-			expect(std.out).toMatch(deserializeToJson(serializedMessage));
+			expect(JSON.parse(std.out)).toEqual(
+				deserializeJsonMessage(serializedMessage)
+			);
 			await api.closeHelper();
 		});
 
-		it("logs scheduled messages in JSON format", async () => {
+		it("logs scheduled messages in JSON format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format json"
@@ -445,11 +472,13 @@ describe("pages deployment tail", () => {
 			const serializedMessage = serialize(message);
 
 			api.ws.send(serializedMessage);
-			expect(std.out).toMatch(deserializeToJson(serializedMessage));
+			expect(JSON.parse(std.out)).toEqual(
+				deserializeJsonMessage(serializedMessage)
+			);
 			await api.closeHelper();
 		});
 
-		it("logs alarm messages in json format", async () => {
+		it("logs alarm messages in json format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format json"
@@ -460,11 +489,13 @@ describe("pages deployment tail", () => {
 			const serializedMessage = serialize(message);
 
 			api.ws.send(serializedMessage);
-			expect(std.out).toMatch(deserializeToJson(serializedMessage));
+			expect(JSON.parse(std.out)).toEqual(
+				deserializeJsonMessage(serializedMessage)
+			);
 			await api.closeHelper();
 		});
 
-		it("logs email messages in json format", async () => {
+		it("logs email messages in json format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format json"
@@ -475,11 +506,13 @@ describe("pages deployment tail", () => {
 			const serializedMessage = serialize(message);
 
 			api.ws.send(serializedMessage);
-			expect(std.out).toMatch(deserializeToJson(serializedMessage));
+			expect(JSON.parse(std.out)).toEqual(
+				deserializeJsonMessage(serializedMessage)
+			);
 			await api.closeHelper();
 		});
 
-		it("logs queue messages in json format", async () => {
+		it("logs queue messages in json format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format json"
@@ -490,11 +523,13 @@ describe("pages deployment tail", () => {
 			const serializedMessage = serialize(message);
 
 			api.ws.send(serializedMessage);
-			expect(std.out).toMatch(deserializeToJson(serializedMessage));
+			expect(JSON.parse(std.out)).toEqual(
+				deserializeJsonMessage(serializedMessage)
+			);
 			await api.closeHelper();
 		});
 
-		it("logs request messages in pretty format", async () => {
+		it("logs request messages in pretty format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format pretty"
@@ -518,15 +553,14 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
 				GET https://example.org/ - Ok @ [mock event timestamp]"
 			`);
 			await api.closeHelper();
 		});
 
-		it("logs scheduled messages in pretty format", async () => {
+		it("logs scheduled messages in pretty format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format pretty"
@@ -550,15 +584,14 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
-				\\"* * * * *\\" @ [mock timestamp string] - Ok"
+				"* * * * *" @ [mock timestamp string] - Ok"
 			`);
 			await api.closeHelper();
 		});
 
-		it("logs alarm messages in pretty format", async () => {
+		it("logs alarm messages in pretty format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format pretty"
@@ -582,15 +615,14 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
 				Alarm @ [mock scheduled time] - Ok"
 			`);
 			await api.closeHelper();
 		});
 
-		it("logs email messages in pretty format", async () => {
+		it("logs email messages in pretty format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format pretty"
@@ -614,15 +646,14 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
 				Email from:from@example.com to:to@example.com size:45416 @ [mock event timestamp] - Ok"
 			`);
 			await api.closeHelper();
 		});
 
-		it("logs queue messages in pretty format", async () => {
+		it("logs queue messages in pretty format", async ({ expect }) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format pretty"
@@ -646,15 +677,16 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
 				Queue my-queue123 (7 messages) - Ok @ [mock timestamp string]"
 			`);
 			await api.closeHelper();
 		});
 
-		it("should not crash when the tail message has a void event", async () => {
+		it("should not crash when the tail message has a void event", async ({
+			expect,
+		}) => {
 			api = mockTailAPIs();
 			await runWrangler(
 				"pages deployment tail mock-deployment-id --project-name mock-project --format pretty"
@@ -677,15 +709,16 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
 				Unknown Event - Ok @ [mock timestamp string]"
 			`);
 			await api.closeHelper();
 		});
 
-		it("defaults to logging in pretty format when the output is a TTY", async () => {
+		it("defaults to logging in pretty format when the output is a TTY", async ({
+			expect,
+		}) => {
 			setIsTTY(true);
 			api = mockTailAPIs();
 			await runWrangler(
@@ -710,15 +743,16 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
 				GET https://example.org/ - Ok @ [mock event timestamp]"
 			`);
 			await api.closeHelper();
 		});
 
-		it("defaults to logging in json format when the output is not a TTY", async () => {
+		it("defaults to logging in json format when the output is not a TTY", async ({
+			expect,
+		}) => {
 			setIsTTY(false);
 
 			api = mockTailAPIs();
@@ -731,11 +765,13 @@ describe("pages deployment tail", () => {
 			const serializedMessage = serialize(message);
 
 			api.ws.send(serializedMessage);
-			expect(std.out).toMatch(deserializeToJson(serializedMessage));
+			expect(JSON.parse(std.out)).toEqual(
+				deserializeJsonMessage(serializedMessage)
+			);
 			await api.closeHelper();
 		});
 
-		it("logs console messages and exceptions", async () => {
+		it("logs console messages and exceptions", async ({ expect }) => {
 			setIsTTY(true);
 			api = mockTailAPIs();
 
@@ -756,8 +792,23 @@ describe("pages deployment tail", () => {
 					{ message: [1234], level: "error", timestamp: 1234563 },
 				],
 				exceptions: [
-					{ name: "Error", message: "some error", timestamp: 1234564 },
-					{ name: "Error", message: { complex: "error" }, timestamp: 1234564 },
+					{
+						name: "Error",
+						message: "some error",
+						timestamp: 1234564,
+						stack: "  at Object.foo (file.js:1:2)",
+					},
+					{
+						name: "Error",
+						message: "some error without stack trace",
+						timestamp: 1234564,
+					},
+					{
+						name: "Error",
+						message: { complex: "error" },
+						timestamp: 1234564,
+						stack: "  at Object.foo (file.js:1:2)",
+					},
 				],
 			});
 			const serializedMessage = serialize(message);
@@ -772,21 +823,27 @@ describe("pages deployment tail", () => {
 			).toMatchInlineSnapshot(`
 				"
 				 ⛅️ wrangler x.x.x
-				------------------
-
+				──────────────────
 				Connected to deployment mock-deployment-id, waiting for logs...
 				GET https://example.org/ - Ok @ [mock event timestamp]
 				  (log) some string
 				  (log) { complex: 'object' }
 				  (error) 1234"
 			`);
-			expect(std.err).toMatchInlineSnapshot(`
-					"[31mX [41;31m[[41;97mERROR[41;31m][0m [1m  Error: some error[0m
+			expect(normalizeString(std.err)).toMatchInlineSnapshot(`
+				"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mError: some error[0m
+
+				    at Object.foo (file.js:1:2)
 
 
-					[31mX [41;31m[[41;97mERROR[41;31m][0m [1m  Error: { complex: 'error' }[0m
+				[31mX [41;31m[[41;97mERROR[41;31m][0m [1mError: some error without stack trace[0m
 
-					"
+
+				[31mX [41;31m[[41;97mERROR[41;31m][0m [1mError: { complex: 'error' }[0m
+
+				    at Object.foo (file.js:1:2)
+
+				"
 			`);
 			expect(std.warn).toMatchInlineSnapshot(`""`);
 			await api.closeHelper();
@@ -847,14 +904,13 @@ function isRequest(event: TailEventMessageType): event is RequestEvent {
 
 /**
  * Similarly, we need to deserialize from a raw buffer instead
- * of just JSON.parsing a raw string. This deserializer also then
- * re-stringifies with some spacing, the same way wrangler tail does.
+ * of just JSON.parsing a raw string.
  *
  * @param message a buffer of data received from the websocket
- * @returns a string ready to be printed to the terminal or compared against
+ * @returns a JSON object ready to be compared against
  */
-function deserializeToJson(message: WebSocket.RawData): string {
-	return JSON.stringify(JSON.parse(message.toString()), null, 2);
+function deserializeJsonMessage(message: WebSocket.RawData) {
+	return JSON.parse(message.toString());
 }
 
 /**
@@ -903,6 +959,24 @@ function mockListDeployments(): RequestLogger {
 						messages: [],
 						result: [
 							{
+								id: "mock-deployment-id-skipped",
+								url: "https://abc123.mock.pages.dev",
+								environment: "production",
+								created_on: "2020-01-17T14:52:26.133835Z",
+								latest_stage: {
+									ended_on: "2020-01-17T14:52:26.133835Z",
+									status: "skipped",
+									name: "deploy",
+								},
+								deployment_trigger: {
+									metadata: {
+										branch: "main",
+										commit_hash: "11122334c4cb32ad4f65b530b9424e8be5bec9d6",
+									},
+								},
+								project_name: "mock-project",
+							},
+							{
 								id: "mock-deployment-id",
 								url: "https://87bbc8fe.mock.pages.dev",
 								environment: "production",
@@ -910,6 +984,7 @@ function mockListDeployments(): RequestLogger {
 								latest_stage: {
 									ended_on: "2021-11-17T14:52:26.133835Z",
 									status: "success",
+									name: "deploy",
 								},
 								deployment_trigger: {
 									metadata: {
@@ -936,11 +1011,13 @@ function mockListDeployments(): RequestLogger {
  *
  * @returns a `RequestCounter` for counting how many times the API is hit
  */
-function mockCreateTailRequest(): RequestInit[] {
+function mockCreateTailRequest(
+	deploymentId: string = ":deploymentId"
+): RequestInit[] {
 	const requests: RequestInit[] = [];
 	msw.use(
 		http.post(
-			`*/accounts/:accountId/pages/projects/:projectName/deployments/:deploymentId/tails`,
+			`*/accounts/:accountId/pages/projects/:projectName/deployments/${deploymentId}/tails`,
 			async ({ request }) => {
 				requests.push((await request.json()) as RequestInit);
 				return HttpResponse.json(
@@ -1037,14 +1114,16 @@ const websocketURL = "ws://localhost:1234";
  * @param websocketURL a fake websocket URL for wrangler to connect to
  * @returns a mocked-out version of the API
  */
-function mockTailAPIs(): MockAPI {
+function mockTailAPIs(
+	expectedCreateDeploymentId: string = ":deploymentId"
+): MockAPI {
 	const api: MockAPI = {
 		requests: {
 			deletion: { count: 0 },
 			creation: [],
 			deployments: { count: 0, queryParams: [] },
 		},
-		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- Initialized in beforeEach()
 		ws: null!, // will be set in the `beforeEach()`.
 
 		/**
@@ -1062,14 +1141,14 @@ function mockTailAPIs(): MockAPI {
 		 */
 		async closeHelper() {
 			api.ws.close();
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await setTimeout(0);
 		},
 	};
 
 	api.ws = new MockWebSocketServer(websocketURL);
 	mockWebSockets.push(api.ws);
 
-	api.requests.creation = mockCreateTailRequest();
+	api.requests.creation = mockCreateTailRequest(expectedCreateDeploymentId);
 	api.requests.deletion = mockDeleteTailRequest();
 	api.requests.deployments = mockListDeployments();
 

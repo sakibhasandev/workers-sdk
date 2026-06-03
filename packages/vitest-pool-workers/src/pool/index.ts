@@ -1,14 +1,13 @@
 import assert from "node:assert";
 import crypto from "node:crypto";
-import events from "node:events";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import util from "node:util";
-import { createBirpc } from "birpc";
+import { getTodaysCompatDate } from "@cloudflare/workers-utils";
 import * as devalue from "devalue";
+import getPort, { portNumbers } from "get-port";
 import {
-	compileModuleRules,
 	getNodeCompat,
 	kCurrentWorker,
 	kUnsafeEphemeralUniqueKey,
@@ -18,75 +17,36 @@ import {
 	Miniflare,
 	structuredSerializableReducers,
 	structuredSerializableRevivers,
-	testRegExps,
-	WebSocket,
 } from "miniflare";
 import semverSatisfies from "semver/functions/satisfies.js";
-import { createMethodsRPC } from "vitest/node";
-import { workerdBuiltinModules } from "../shared/builtin-modules";
-import { createChunkingSocket } from "../shared/chunking-socket";
+import { experimental_readRawConfig } from "wrangler";
 import { CompatibilityFlagAssertions } from "./compatibility-flag-assertions";
-import { OPTIONS_PATH, parseProjectOptions } from "./config";
+import { guessWorkerExports } from "./guess-exports";
 import {
 	getProjectPath,
 	getRelativeProjectPath,
 	isFileNotFoundError,
 	WORKER_NAME_PREFIX,
 } from "./helpers";
-import {
-	ABORT_ALL_WORKER,
-	handleLoopbackRequest,
-	scheduleStorageReset,
-	waitForStorageReset,
-} from "./loopback";
+import { handleLoopbackRequest } from "./loopback";
 import { handleModuleFallbackRequest } from "./module-fallback";
 import type {
 	SourcelessWorkerOptions,
-	WorkersConfigPluginAPI,
 	WorkersPoolOptions,
 	WorkersPoolOptionsWithDefines,
 } from "./config";
 import type {
-	CloseEvent,
 	MiniflareOptions,
 	SharedOptions,
 	WorkerOptions,
+	WorkerdStructuredLog,
 } from "miniflare";
-import type { Readable } from "node:stream";
-import type { MessagePort } from "node:worker_threads";
-import type {
-	RunnerRPC,
-	RuntimeRPC,
-	SerializedConfig,
-	WorkerContext,
-} from "vitest";
-import type {
-	ProcessPool,
-	TestSpecification,
-	Vitest,
-	WorkspaceProject,
-} from "vitest/node";
+import type { TestProject, Vitest } from "vitest/node";
 
-interface SerializedOptions {
-	main?: string;
-	durableObjectBindingDesignators?: Map<
-		string /* bound name */,
-		DurableObjectDesignator
-	>;
-	isolatedStorage?: boolean;
-}
-
-// https://github.com/vitest-dev/vitest/blob/v2.1.1/packages/vite-node/src/client.ts#L468
-declare const __vite_ssr_import__: unknown;
-assert(
-	typeof __vite_ssr_import__ === "undefined",
-	"Expected `@cloudflare/vitest-pool-workers` not to be transformed by Vite"
-);
-
-function structuredSerializableStringify(value: unknown): string {
-	// Vitest v2+ sends a sourcemap to it's runner, which we can't serialise currently
-	// Deleting it doesn't seem to cause any problems, and error stack traces etc...
-	// still seem to work
+export function structuredSerializableStringify(value: unknown): string {
+	// Vitest v2+ sends a sourcemap to its runner, which we can't serialise currently.
+	// Stripping it doesn't seem to cause any problems, and error stack traces etc.
+	// still seem to work.
 	// TODO: Figure out how to serialise SourceMap instances
 	if (
 		value &&
@@ -97,88 +57,62 @@ function structuredSerializableStringify(value: unknown): string {
 		"map" in value.r &&
 		value.r.map
 	) {
-		delete value.r.map;
+		// Shallow-copy to avoid mutating the caller's object
+		value = { ...value, r: { ...value.r, map: undefined } };
 	}
 	return devalue.stringify(value, structuredSerializableReducers);
 }
-function structuredSerializableParse(value: string): unknown {
+
+export function structuredSerializableParse(value: string): unknown {
 	return devalue.parse(value, structuredSerializableRevivers);
 }
 
-// Log for verbose debug messages (e.g. RPC messages)
-let debuglog: util.DebugLoggerFunction = util.debuglog(
-	"vitest-pool-workers:index",
-	(fn) => (debuglog = fn)
-);
-// Log for informational pool messages
-const log = new Log(LogLevel.VERBOSE, { prefix: "vpw" });
+// Log for pool info/warnings/errors (user-actionable messages only)
+const log = new Log(LogLevel.INFO, { prefix: "vpw" });
+// Debug log gated behind NODE_DEBUG=vitest-pool-workers
+const debug = util.debuglog("vitest-pool-workers");
 // Log for Miniflare instances, used for user code warnings/errors
 const mfLog = new Log(LogLevel.WARN);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DIST_PATH = path.resolve(__dirname, "..");
-const POOL_WORKER_PATH = path.join(DIST_PATH, "worker", "index.mjs");
-
-const NODE_URL_PATH = path.join(DIST_PATH, "worker", "lib", "node", "url.mjs");
+const POOL_WORKER_PATH = path.join(DIST_PATH, "worker/index.mjs");
 
 const symbolizerWarning =
 	"warning: Not symbolizing stack traces because $LLVM_SYMBOLIZER is not set.";
 const ignoreMessages = [
+	symbolizerWarning,
 	// Not user actionable
 	// TODO(someday): this is normal operation and really shouldn't error
 	"disconnected: operation canceled",
 	"disconnected: worker_do_not_log; Request failed due to internal error",
 	"disconnected: WebSocket was aborted",
+	"disconnected: WebSocket peer disconnected",
+	"CODE_MOVED for unknown code block",
+	"broken.outputGateBroken; jsg.Error: Instance dispose",
 ];
-function trimSymbolizerWarning(chunk: string): string {
-	return chunk.includes(symbolizerWarning)
-		? chunk.substring(chunk.indexOf("\n") + 1)
-		: chunk;
-}
-function handleRuntimeStdio(stdout: Readable, stderr: Readable): void {
-	stdout.on("data", (chunk: Buffer) => {
-		process.stdout.write(chunk);
-	});
-	stderr.on("data", (chunk: Buffer) => {
-		const str = trimSymbolizerWarning(chunk.toString());
-		if (ignoreMessages.some((message) => str.includes(message))) {
-			return;
-		}
-		process.stderr.write(str);
-	});
-}
-
-type SingleOrPerTestFileMiniflare =
-	| Miniflare // Single instance
-	| Map<string /* testFile */, Miniflare>; // Instance per test file
-function forEachMiniflare(
-	mfs: SingleOrPerTestFileMiniflare,
-	callback: (mf: Miniflare) => Promise<unknown>
-): Promise<unknown> {
-	if (mfs instanceof Miniflare) {
-		return callback(mfs);
+function handleStructuredLogs({ level, message }: WorkerdStructuredLog): void {
+	if (ignoreMessages.some((ignore) => message.includes(ignore))) {
+		return;
 	}
 
-	const promises: Promise<unknown>[] = [];
-	for (const mf of mfs.values()) {
-		promises.push(callback(mf));
+	switch (level) {
+		case "error":
+		case "warn":
+			process.stderr.write(`${message}\n`);
+			break;
+		default:
+			process.stdout.write(`${message}\n`);
+			break;
 	}
-	return Promise.all(promises);
 }
 
-interface Project {
-	project: WorkspaceProject;
-	options: WorkersPoolOptionsWithDefines;
-	testFiles: Set<string>;
-	relativePath: string | number;
-	mf?: SingleOrPerTestFileMiniflare;
-	previousMfOptions?: MiniflareOptions;
-}
-const allProjects = new Map<string /* projectName */, Project>();
-
-function getRunnerName(project: WorkspaceProject, testFile?: string) {
-	const name = `${WORKER_NAME_PREFIX}runner-${project.getName().replace(/[^a-z0-9-]/gi, "_")}`;
+export function getRunnerName(project: TestProject, testFile?: string) {
+	const name = `${WORKER_NAME_PREFIX}runner-${project.name.replace(
+		/[^a-z0-9-]/gi,
+		"_"
+	)}`;
 	if (testFile === undefined) {
 		return name;
 	}
@@ -230,106 +164,83 @@ interface DurableObjectDesignator {
  * Returns a map of Durable Objects bindings' bound names to the designators of
  * the objects they point to.
  */
-function getDurableObjectDesignators(
+export function getDurableObjectDesignators(
 	options: WorkersPoolOptions
 ): Map<string /* bound name */, DurableObjectDesignator> {
 	const result = new Map<string, DurableObjectDesignator>();
 	const durableObjects = options.miniflare?.durableObjects ?? {};
 	for (const [key, designator] of Object.entries(durableObjects)) {
 		if (typeof designator === "string") {
-			result.set(key, { className: USER_OBJECT_MODULE_NAME + designator });
+			result.set(key, { className: designator });
 		} else if (typeof designator.unsafeUniqueKey !== "symbol") {
-			let className = designator.className;
-			if (designator.scriptName === undefined) {
-				className = USER_OBJECT_MODULE_NAME + className; // Same-worker binding
-			}
 			result.set(key, {
-				className,
+				className: designator.className,
 				scriptName: designator.scriptName,
 				unsafeUniqueKey: designator.unsafeUniqueKey,
+			});
+		}
+	}
+
+	for (const unboundDurableObject of options.miniflare
+		?.additionalUnboundDurableObjects ?? []) {
+		if (typeof unboundDurableObject.unsafeUniqueKey !== "symbol") {
+			result.set(unboundDurableObject.className, {
+				className: unboundDurableObject.className,
+				scriptName: unboundDurableObject.scriptName,
+				unsafeUniqueKey: unboundDurableObject.unsafeUniqueKey,
 			});
 		}
 	}
 	return result;
 }
 
-const POOL_WORKER_DIR = path.dirname(POOL_WORKER_PATH);
-const USER_OBJECT_MODULE_NAME = "__VITEST_POOL_WORKERS_USER_OBJECT";
-const USER_OBJECT_MODULE_PATH = path.join(
-	POOL_WORKER_DIR,
-	USER_OBJECT_MODULE_NAME
-);
-const DEFINES_MODULE_PATH = path.join(
-	POOL_WORKER_DIR,
-	"__VITEST_POOL_WORKERS_DEFINES"
-);
-
 /**
- * Prefix all service binding named entrypoints, so they don't clash with other
- * identifiers in `src/worker/index.ts`. Returns a `Set` containing original
- * names of non-default entrypoints defined in this worker.
+ * Gets a set of Durable Object class names for the SELF Worker.
+ *
+ * This is calculated from the Durable Object bindings that point to SELF as well as the
+ * unbound Durable Objects that only have migrations defined.
  */
-function fixupServiceBindingsToSelf(
-	worker: SourcelessWorkerOptions
-): Set<string> {
-	const result = new Set<string>();
-	if (worker.serviceBindings === undefined) {
-		return result;
-	}
-	for (const value of Object.values(worker.serviceBindings)) {
-		// Assume user cannot guess name of current worker, so can only bind to self
-		// if `name` is `kCurrentWorker`
-		if (
-			typeof value === "object" &&
-			"name" in value &&
-			value.name === kCurrentWorker &&
-			value.entrypoint !== undefined &&
-			value.entrypoint !== "default"
-		) {
-			result.add(value.entrypoint);
-			value.entrypoint = USER_OBJECT_MODULE_NAME + value.entrypoint;
-		}
-	}
-	return result;
-}
-
-/**
- * Prefix all Durable Object class names, so they don't clash with other
- * identifiers in `src/worker/index.ts`. Returns a `Set` containing original
- * names of Durable Object classes defined in this worker.
- */
-function fixupDurableObjectBindingsToSelf(
-	worker: SourcelessWorkerOptions
-): Set<string> {
+function getDurableObjectClasses(worker: SourcelessWorkerOptions): Set<string> {
 	// TODO(someday): may need to extend this to take into account other workers
 	//  if doing multi-worker tests across workspace projects
 	// TODO(someday): may want to validate class names are valid identifiers?
 	const result = new Set<string>();
-	if (worker.durableObjects === undefined) {
-		return result;
-	}
-	for (const key of Object.keys(worker.durableObjects)) {
-		const designator = worker.durableObjects[key];
-		// `designator` hasn't been validated at this point
-		if (typeof designator === "string") {
-			// Either this is a simple `string` designator to the current worker...
-			result.add(designator);
-			worker.durableObjects[key] = USER_OBJECT_MODULE_NAME + designator;
-		} else if (isDurableObjectDesignatorToSelf(designator)) {
-			// ...or it's an object designator to the current worker
-			result.add(designator.className);
-			// Shallow clone to avoid mutating config
-			worker.durableObjects[key] = {
-				...designator,
-				className: USER_OBJECT_MODULE_NAME + designator.className,
-			};
+
+	// Get all the Durable Object class names from bindings to the SELF Worker.
+	for (const designator of Object.values(worker.durableObjects ?? {})) {
+		if (isDurableObjectDesignatorToSelf(designator)) {
+			result.add(
+				typeof designator === "string" ? designator : designator.className
+			);
 		}
 	}
+
+	// And all the Durable Object class names that may not have bindings but have migrations.
+	for (const designator of worker.additionalUnboundDurableObjects ?? []) {
+		result.add(designator.className);
+	}
+
 	return result;
 }
 
-function fixupWorkflowBindingsToSelf(
-	worker: SourcelessWorkerOptions
+function getWranglerWorkerName(
+	relativeWranglerConfigPath?: string
+): string | undefined {
+	if (!relativeWranglerConfigPath) {
+		return undefined;
+	}
+	const wranglerConfigObject = experimental_readRawConfig({
+		config: relativeWranglerConfigPath,
+	});
+	return wranglerConfigObject.rawConfig.name;
+}
+
+/**
+ * Gets a set of class names for Workflows defined in the SELF Worker.
+ */
+function getWorkflowClasses(
+	worker: SourcelessWorkerOptions,
+	relativeWranglerConfigPath: string | undefined
 ): Set<string> {
 	// TODO(someday): may need to extend this to take into account other workers
 	//  if doing multi-worker tests across workspace projects
@@ -340,14 +251,24 @@ function fixupWorkflowBindingsToSelf(
 	}
 	for (const key of Object.keys(worker.workflows)) {
 		const designator = worker.workflows[key];
+
+		let workerName: string | undefined;
+		// If the designator's scriptName matches its own Worker name,
+		// use that as the worker name, otherwise use the vitest worker's name
+		const wranglerWorkerName = getWranglerWorkerName(
+			relativeWranglerConfigPath
+		);
+		if (wranglerWorkerName && designator.scriptName === wranglerWorkerName) {
+			workerName = wranglerWorkerName;
+		} else {
+			workerName = worker.name;
+		}
+
 		// `designator` hasn't been validated at this point
-		if (isWorkflowDesignatorToSelf(designator, worker.name)) {
+		if (isWorkflowDesignatorToSelf(designator, workerName)) {
 			result.add(designator.className);
 			// Shallow clone to avoid mutating config
-			worker.workflows[key] = {
-				...designator,
-				className: USER_OBJECT_MODULE_NAME + designator.className,
-			};
+			worker.workflows[key] = { ...designator };
 		}
 	}
 	return result;
@@ -358,24 +279,42 @@ type ProjectWorkers = [
 	...auxiliaryWorkers: WorkerOptions[],
 ];
 
-const SELF_NAME_BINDING = "__VITEST_POOL_WORKERS_SELF_NAME";
 const SELF_SERVICE_BINDING = "__VITEST_POOL_WORKERS_SELF_SERVICE";
 const LOOPBACK_SERVICE_BINDING = "__VITEST_POOL_WORKERS_LOOPBACK_SERVICE";
 const RUNNER_OBJECT_BINDING = "__VITEST_POOL_WORKERS_RUNNER_OBJECT";
 
-function buildProjectWorkerOptions(
-	project: Omit<Project, "testFiles">
-): ProjectWorkers {
+async function buildProjectWorkerOptions(
+	project: TestProject,
+	customOptions: WorkersPoolOptionsWithDefines,
+	main: string | undefined
+): Promise<ProjectWorkers> {
 	const relativeWranglerConfigPath = maybeApply(
 		(v) => path.relative("", v),
-		project.options.wrangler?.configPath
+		customOptions.wrangler?.configPath
 	);
-	const runnerWorker = project.options.miniflare ?? {};
+	const runnerWorker = customOptions.miniflare ?? {};
 
-	// Make sure the worker has a well-known name, and share it with the runner
-	runnerWorker.name = getRunnerName(project.project);
-	runnerWorker.bindings ??= {};
-	runnerWorker.bindings[SELF_NAME_BINDING] = runnerWorker.name;
+	// `unstable_getMiniflareWorkerOptions` returns service bindings whose `name`
+	// is the literal `config.name` for self-references (e.g. `{ name: "my-worker" }`
+	// when the wrangler config has `name: "my-worker"`). We rename the runner
+	// worker below, so rewrite those self-references to `kCurrentWorker` first.
+	// That symbol resolves at request time relative to the referer worker, so it
+	// survives the rename.
+	const wranglerWorkerName = getWranglerWorkerName(relativeWranglerConfigPath);
+	if (wranglerWorkerName && runnerWorker.serviceBindings) {
+		for (const [key, sb] of Object.entries(runnerWorker.serviceBindings)) {
+			if (
+				typeof sb === "object" &&
+				sb !== null &&
+				"name" in sb &&
+				sb.name === wranglerWorkerName
+			) {
+				runnerWorker.serviceBindings[key] = { ...sb, name: kCurrentWorker };
+			}
+		}
+	}
+
+	runnerWorker.name = getRunnerName(project);
 
 	// Make sure the worker has the `nodejs_compat` and `export_commonjs_default`
 	// compatibility flags enabled. Vitest makes heavy use of Node APIs, and many
@@ -383,11 +322,32 @@ function buildProjectWorkerOptions(
 	// `module.exports` directly, rather than `{ default: module.exports }`.
 	runnerWorker.compatibilityFlags ??= [];
 
+	// By default, workerd tracks which request context a promise was created in
+	// and rejects promises that resolve in a different request context. This is a
+	// safety feature for production Workers to prevent data leaking between
+	// requests. However, vitest-pool-workers runs all test files within the same
+	// Durable Object, so promise resolution regularly crosses request boundaries
+	// (e.g. a setup promise created for one test file resolving during another).
+	// Without this flag, those promises get rejected and tests break.
+	runnerWorker.compatibilityFlags.push(
+		"no_handle_cross_request_promise_resolution"
+	);
+
+	if (runnerWorker.compatibilityDate === undefined) {
+		// No compatibility date was provided, so use today's date
+		runnerWorker.compatibilityDate = getTodaysCompatDate();
+		debug(
+			"No compatibility date was provided for project %s, defaulting to today's date %s.",
+			getRelativeProjectPath(project),
+			runnerWorker.compatibilityDate
+		);
+	}
+
 	const flagAssertions = new CompatibilityFlagAssertions({
 		compatibilityDate: runnerWorker.compatibilityDate,
 		compatibilityFlags: runnerWorker.compatibilityFlags,
-		optionsPath: `${OPTIONS_PATH}.miniflare`,
-		relativeProjectPath: project.relativePath.toString(),
+		optionsPath: `miniflare`,
+		relativeProjectPath: getRelativeProjectPath(project),
 		relativeWranglerConfigPath,
 	});
 
@@ -407,12 +367,19 @@ function buildProjectWorkerOptions(
 		}
 	}
 
-	const { mode } = getNodeCompat(
+	const { hasNoNodejsCompatV2Flag, mode } = getNodeCompat(
 		runnerWorker.compatibilityDate,
 		runnerWorker.compatibilityFlags
 	);
 
+	// Force nodejs_compat_v2 flag, even if it is disabled by the user, since we require this native stuff for Vitest to work properly
 	if (mode !== "v2") {
+		if (hasNoNodejsCompatV2Flag) {
+			runnerWorker.compatibilityFlags.splice(
+				runnerWorker.compatibilityFlags.indexOf("no_nodejs_compat_v2"),
+				1
+			);
+		}
 		runnerWorker.compatibilityFlags.push("nodejs_compat_v2");
 	}
 
@@ -421,6 +388,14 @@ function buildProjectWorkerOptions(
 	if (!runnerWorker.compatibilityFlags.includes("unsafe_module")) {
 		runnerWorker.compatibilityFlags.push("unsafe_module");
 	}
+
+	// The following nodejs compat flags enable features required for Vitest to work properly
+	ensureFeature(runnerWorker.compatibilityFlags, "nodejs_tty_module");
+	ensureFeature(runnerWorker.compatibilityFlags, "nodejs_fs_module");
+	ensureFeature(runnerWorker.compatibilityFlags, "nodejs_http_modules");
+	ensureFeature(runnerWorker.compatibilityFlags, "nodejs_perf_hooks_module");
+	ensureFeature(runnerWorker.compatibilityFlags, "nodejs_v8_module");
+	ensureFeature(runnerWorker.compatibilityFlags, "nodejs_process_v2");
 
 	// Make sure we define an unsafe eval binding and enable the fallback service
 	runnerWorker.unsafeEvalBinding = "__VITEST_POOL_WORKERS_UNSAFE_EVAL";
@@ -434,54 +409,85 @@ function buildProjectWorkerOptions(
 
 	// Build wrappers for entrypoints and Durable Objects defined in this worker
 	runnerWorker.durableObjects ??= {};
-	// Sort for deterministic output to minimise `Miniflare` restarts
-	const serviceBindingEntrypointNames = Array.from(
-		fixupServiceBindingsToSelf(runnerWorker)
-	).sort();
-	const durableObjectClassNames = Array.from(
-		fixupDurableObjectBindingsToSelf(runnerWorker)
-	).sort();
-	const workflowClassNames = Array.from(
-		fixupWorkflowBindingsToSelf(runnerWorker)
-	).sort();
+	const durableObjectClassNames = getDurableObjectClasses(runnerWorker);
 
+	const workflowClassNames = getWorkflowClasses(
+		runnerWorker,
+		relativeWranglerConfigPath
+	);
+
+	const selfWorkerExports: string[] = [];
 	if (
-		workflowClassNames.length !== 0 &&
-		project.options.isolatedStorage === true
+		flagAssertions.isEnabled(
+			"enable_ctx_exports",
+			"disable_ctx_exports",
+			"2025-11-17"
+		)
 	) {
-		throw new Error(`Project ${project.relativePath} has Workflows defined and \`isolatedStorage\` set to true.
-Please set \`isolatedStorage\` to false in order to run projects with Workflows.
-Workflows defined in project: ${workflowClassNames.join(", ")}`);
+		try {
+			const guessedExports = await guessWorkerExports(
+				main,
+				customOptions.additionalExports
+			);
+			for (const [exportName, exportType] of guessedExports) {
+				switch (exportType) {
+					case "DurableObject":
+						durableObjectClassNames.add(exportName);
+						break;
+					case "WorkflowEntrypoint":
+						workflowClassNames.add(exportName);
+						break;
+					case "WorkerEntrypoint":
+					case null:
+						selfWorkerExports.push(exportName);
+				}
+			}
+		} catch (e) {
+			const message = `Failed to statically analyze the exports of the main Worker entry-point "${customOptions.main}"\nMore details: ${e}`;
+			for (const line of message.split("\n")) {
+				log.warn(line);
+			}
+		}
 	}
+
+	const workerEntrypointExports = selfWorkerExports.filter(
+		(name) =>
+			name !== "default" &&
+			name !== "__esModule" &&
+			!durableObjectClassNames.has(name) &&
+			!workflowClassNames.has(name)
+	);
 
 	const wrappers = [
 		'import { createWorkerEntrypointWrapper, createDurableObjectWrapper, createWorkflowEntrypointWrapper } from "cloudflare:test-internal";',
 	];
 
-	for (const entrypointName of serviceBindingEntrypointNames) {
+	for (const entrypointName of workerEntrypointExports.sort()) {
 		const quotedEntrypointName = JSON.stringify(entrypointName);
-		const wrapper = `export const ${USER_OBJECT_MODULE_NAME}${entrypointName} = createWorkerEntrypointWrapper(${quotedEntrypointName});`;
+		const wrapper = `export const ${entrypointName} = createWorkerEntrypointWrapper(${quotedEntrypointName});`;
 		wrappers.push(wrapper);
 	}
-	for (const className of durableObjectClassNames) {
+	for (const className of Array.from(durableObjectClassNames).sort()) {
 		const quotedClassName = JSON.stringify(className);
-		const wrapper = `export const ${USER_OBJECT_MODULE_NAME}${className} = createDurableObjectWrapper(${quotedClassName});`;
+		const wrapper = `export const ${className} = createDurableObjectWrapper(${quotedClassName});`;
 		wrappers.push(wrapper);
 	}
 
-	for (const className of workflowClassNames) {
+	for (const className of Array.from(workflowClassNames).sort()) {
 		const quotedClassName = JSON.stringify(className);
-		const wrapper = `export const ${USER_OBJECT_MODULE_NAME}${className} = createWorkflowEntrypointWrapper(${quotedClassName});`;
+		const wrapper = `export const ${className} = createWorkflowEntrypointWrapper(${quotedClassName});`;
 		wrappers.push(wrapper);
 	}
 
-	// Make sure we define the `RunnerObject` Durable Object
+	// Make sure we define the `__VITEST_POOL_WORKERS_RUNNER_DURABLE_OBJECT__` Durable Object,
+	// which is the singleton host for running tests. It's ephemeral (in-memory)
+	// because the runner doesn't need persistent state, and all disk-backed DOs
+	// hit a workerd bug on Windows where SQLite paths use Unix-style forward
+	// slashes (cloudflare/workerd#6110).
 	runnerWorker.durableObjects[RUNNER_OBJECT_BINDING] = {
-		className: "RunnerObject",
-		// Make the runner object ephemeral, so it doesn't write any `.sqlite` files
-		// that would disrupt stacked storage because we prevent eviction
-		unsafeUniqueKey: kUnsafeEphemeralUniqueKey,
+		className: "__VITEST_POOL_WORKERS_RUNNER_DURABLE_OBJECT__",
 		unsafePreventEviction: true,
+		unsafeUniqueKey: kUnsafeEphemeralUniqueKey,
 	};
 
 	// Vite has its own define mechanism, but we can't control it from custom
@@ -490,7 +496,7 @@ Workflows defined in project: ${workflowClassNames.join(", ")}`);
 	// define script similar to Vite's. When defines change, Miniflare will be
 	// restarted as the input options will be different.
 	const defines = `export default {
-		${Object.entries(project.options.defines ?? {})
+		${Object.entries(customOptions.defines ?? {})
 			.map(([key, value]) => `${JSON.stringify(key)}: ${value}`)
 			.join(",\n")}
 	};
@@ -511,31 +517,39 @@ Workflows defined in project: ${workflowClassNames.join(", ")}`);
 	// module names. Setting `modulesRoot` to a drive letter and prepending this
 	// to paths ensures correct names. This requires us to specify `contents`
 	// with module definitions though, as the new paths don't exist.
-	// TODO(now): need to add source URL comments here to ensure those are correct
+	// TODO: add source URL comments to injected modules for better stack traces
 	const modulesRoot = process.platform === "win32" ? "Z:\\" : "/";
 	runnerWorker.modulesRoot = modulesRoot;
+
 	runnerWorker.modules = [
 		{
 			type: "ESModule",
-			path: path.join(modulesRoot, POOL_WORKER_PATH),
+			path: path.join(modulesRoot, "index.mjs"),
 			contents: fs.readFileSync(POOL_WORKER_PATH),
 		},
 		{
 			type: "ESModule",
-			path: path.join(modulesRoot, USER_OBJECT_MODULE_PATH),
+			path: path.join(modulesRoot, "__VITEST_POOL_WORKERS_USER_OBJECT"),
 			contents: wrappers.join("\n"),
 		},
 		{
 			type: "ESModule",
-			path: path.join(modulesRoot, DEFINES_MODULE_PATH),
+			path: path.join(modulesRoot, "__VITEST_POOL_WORKERS_DEFINES"),
 			contents: defines,
 		},
-		// The workerd provided `node:url` module doesn't support everything Vitest needs.
-		// As a short-term fix, inject a `node:url` polyfill into the worker bundle
+		// The native workerd provided nodejs modules don't always support everything Vitest needs.
+		// As a short-term fix, inject polyfills into the worker bundle that override the native modules.
 		{
 			type: "ESModule",
-			path: path.join(modulesRoot, "node:url"),
-			contents: fs.readFileSync(NODE_URL_PATH),
+			path: path.join(modulesRoot, "node:console"),
+			contents: fs.readFileSync(
+				path.join(DIST_PATH, `worker/node/console.mjs`)
+			),
+		},
+		{
+			type: "ESModule",
+			path: path.join(modulesRoot, "node:vm"),
+			contents: fs.readFileSync(path.join(DIST_PATH, `worker/node/vm.mjs`)),
 		},
 	];
 
@@ -554,13 +568,19 @@ Workflows defined in project: ${workflowClassNames.join(", ")}`);
 				worker.name === ""
 			) {
 				throw new Error(
-					`In project ${project.relativePath}, \`${OPTIONS_PATH}.miniflare.workers[${i}].name\` must be non-empty`
+					`In project ${getRelativeProjectPath(
+						project
+					)}, \`miniflare.workers[${i}].name\` must be non-empty`
 				);
 			}
 			// ...that doesn't start with our reserved prefix
 			if (worker.name.startsWith(WORKER_NAME_PREFIX)) {
 				throw new Error(
-					`In project ${project.relativePath}, \`${OPTIONS_PATH}.miniflare.workers[${i}].name\` must not start with "${WORKER_NAME_PREFIX}", got ${worker.name}`
+					`In project ${getRelativeProjectPath(
+						project
+					)}, \`miniflare.workers[${i}].name\` must not start with "${WORKER_NAME_PREFIX}", got ${
+						worker.name
+					}`
 				);
 			}
 
@@ -576,9 +596,15 @@ Workflows defined in project: ${workflowClassNames.join(", ")}`);
 const SHARED_MINIFLARE_OPTIONS: SharedOptions = {
 	log: mfLog,
 	verbose: true,
-	handleRuntimeStdio,
+	handleStructuredLogs,
 	unsafeStickyBlobs: true,
 } satisfies Partial<MiniflareOptions>;
+
+const DEFAULT_INSPECTOR_PORT = 9229;
+
+function getFirstAvailablePort(start: number): Promise<number> {
+	return getPort({ port: portNumbers(start, 65535) });
+}
 
 type ModuleFallbackService = NonNullable<
 	MiniflareOptions["unsafeModuleFallbackService"]
@@ -591,178 +617,108 @@ function getModuleFallbackService(ctx: Vitest): ModuleFallbackService {
 	if (service !== undefined) {
 		return service;
 	}
-	// @ts-expect-error ctx.vitenode is marked as internal
-	service = handleModuleFallbackRequest.bind(undefined, ctx.vitenode.server);
+	service = handleModuleFallbackRequest.bind(undefined, ctx.vite);
 	moduleFallbackServices.set(ctx, service);
 	return service;
 }
 
 /**
  * Builds options for the Miniflare instance running tests for the given Vitest
- * project. The first `runnerWorker` returned may be duplicated in the instance
- * if `singleWorker` is disabled so tests can execute in-parallel and isolation.
+ * project.
  */
-function buildProjectMiniflareOptions(
+async function buildProjectMiniflareOptions(
 	ctx: Vitest,
-	project: Project
-): MiniflareOptions {
+	project: TestProject,
+	customOptions: WorkersPoolOptions,
+	main: string | undefined
+): Promise<MiniflareOptions> {
 	const moduleFallbackService = getModuleFallbackService(ctx);
-	const [runnerWorker, ...auxiliaryWorkers] =
-		buildProjectWorkerOptions(project);
+	const [runnerWorker, ...auxiliaryWorkers] = await buildProjectWorkerOptions(
+		project,
+		customOptions,
+		main
+	);
 
 	assert(runnerWorker.name !== undefined);
 	assert(runnerWorker.name.startsWith(WORKER_NAME_PREFIX));
 
-	const inspectorPort = ctx.config.inspector.enabled
-		? ctx.config.inspector.port ?? 9229
-		: undefined;
-
-	if (inspectorPort !== undefined && !project.options.singleWorker) {
-		log.warn(`Tests run in singleWorker mode when the inspector is open.`);
-
-		project.options.singleWorker = true;
-	}
-
-	if (project.options.singleWorker || project.options.isolatedStorage) {
-		// Single Worker, Isolated or Shared Storage
-		//  --> single instance with single runner worker
-		// Multiple Workers, Isolated Storage:
-		//  --> multiple instances each with single runner worker
-		return {
-			...SHARED_MINIFLARE_OPTIONS,
-			inspectorPort,
-			unsafeModuleFallbackService: moduleFallbackService,
-			workers: [runnerWorker, ABORT_ALL_WORKER, ...auxiliaryWorkers],
-		};
-	} else {
-		// Multiple Workers, Shared Storage:
-		//  --> single instance with multiple runner workers
-		const testWorkers: WorkerOptions[] = [];
-		for (const testFile of project.testFiles) {
-			const testWorker = { ...runnerWorker };
-			testWorker.name = getRunnerName(project.project, testFile);
-
-			// Update binding to own name
-			assert(testWorker.bindings !== undefined);
-			testWorker.bindings = { ...testWorker.bindings };
-			testWorker.bindings[SELF_NAME_BINDING] = testWorker.name;
-
-			testWorkers.push(testWorker);
-		}
-		return {
-			...SHARED_MINIFLARE_OPTIONS,
-			unsafeModuleFallbackService: moduleFallbackService,
-			workers: [...testWorkers, ABORT_ALL_WORKER, ...auxiliaryWorkers],
-		};
-	}
-}
-async function getProjectMiniflare(
-	ctx: Vitest,
-	project: Project
-): Promise<SingleOrPerTestFileMiniflare> {
-	const mfOptions = buildProjectMiniflareOptions(ctx, project);
-	const changed = !util.isDeepStrictEqual(project.previousMfOptions, mfOptions);
-	project.previousMfOptions = mfOptions;
-
-	const previousSingleInstance = project.mf instanceof Miniflare;
-	const singleInstance =
-		project.options.singleWorker || !project.options.isolatedStorage;
-
-	if (project.mf !== undefined && previousSingleInstance !== singleInstance) {
-		// If isolated storage configuration has changed, reset project instances
-		log.info(`Isolation changed for ${project.relativePath}, resetting...`);
-		await forEachMiniflare(project.mf, (mf) => mf.dispose());
-		project.mf = undefined;
-	}
-
-	if (project.mf === undefined) {
-		// If `mf` is now `undefined`, create new instances
-		if (singleInstance) {
-			log.info(
-				`Starting single runtime for ${project.relativePath}` +
-					`${mfOptions.inspectorPort !== undefined ? ` with inspector on port ${mfOptions.inspectorPort}` : ""}` +
-					`...`
-			);
-			project.mf = new Miniflare(mfOptions);
+	let inspectorPort: number | undefined;
+	if (ctx.config.inspector.enabled) {
+		const userSpecifiedPort = ctx.config.inspector.port;
+		if (userSpecifiedPort !== undefined) {
+			const availablePort = await getFirstAvailablePort(userSpecifiedPort);
+			if (availablePort !== userSpecifiedPort) {
+				throw new Error(
+					`Inspector port ${userSpecifiedPort} is not available. ` +
+						`Either free up the port or remove the inspector port configuration to use an automatically assigned port.`
+				);
+			}
+			inspectorPort = userSpecifiedPort;
 		} else {
-			log.info(`Starting isolated runtimes for ${project.relativePath}...`);
-			project.mf = new Map();
-			for (const testFile of project.testFiles) {
-				project.mf.set(testFile, new Miniflare(mfOptions));
+			inspectorPort = await getFirstAvailablePort(DEFAULT_INSPECTOR_PORT);
+			if (inspectorPort !== DEFAULT_INSPECTOR_PORT) {
+				log.warn(
+					`Default inspector port ${DEFAULT_INSPECTOR_PORT} not available, using ${inspectorPort} instead.`
+				);
 			}
 		}
-		await forEachMiniflare(project.mf, (mf) => mf.ready);
-	} else if (changed) {
-		// Otherwise, update the existing instances if options have changed
-		log.info(`Options changed for ${project.relativePath}, updating...`);
-		await forEachMiniflare(project.mf, (mf) => mf.setOptions(mfOptions));
-	} else {
-		log.debug(`Reusing runtime for ${project.relativePath}...`);
 	}
 
-	return project.mf;
+	return {
+		...SHARED_MINIFLARE_OPTIONS,
+		inspectorPort,
+		unsafeModuleFallbackService: moduleFallbackService,
+		workers: [runnerWorker, ...auxiliaryWorkers],
+	};
+}
+export async function getProjectMiniflare(
+	ctx: Vitest,
+	project: TestProject,
+	poolOptions: WorkersPoolOptionsWithDefines,
+	main: string | undefined
+): Promise<Miniflare> {
+	const mfOptions = await buildProjectMiniflareOptions(
+		ctx,
+		project,
+		poolOptions,
+		main
+	);
+	debug("Starting runtime for %s...", getRelativeProjectPath(project));
+	if (mfOptions.inspectorPort !== undefined) {
+		log.info(
+			`Starting inspector on port ${mfOptions.inspectorPort} for ${getRelativeProjectPath(project)}`
+		);
+	}
+	const mf = new Miniflare(mfOptions);
+	await mf.ready;
+	return mf;
 }
 
-function maybeGetResolvedMainPath(project: Project): string | undefined {
-	const projectPath = getProjectPath(project.project);
-	const main = project.options.main;
+export function maybeGetResolvedMainPath(
+	project: TestProject,
+	options: WorkersPoolOptionsWithDefines
+): string | undefined {
+	const projectPath = getProjectPath(project);
+	const main = options.main;
 	if (main === undefined) {
 		return;
 	}
 	if (typeof projectPath === "string") {
-		return path.resolve(path.dirname(projectPath), main);
+		return path.resolve(projectPath, main);
 	} else {
 		return path.resolve(main);
 	}
 }
 
-async function runTests(
-	ctx: Vitest,
+export async function connectToMiniflareSocket(
 	mf: Miniflare,
-	workerName: string,
-	project: Project,
-	config: SerializedConfig,
-	files: string[],
-	invalidates: string[] = [],
-	method: "run" | "collect"
+	workerName: string
 ) {
-	const workerPath = path.join(ctx.distPath, "worker.js");
-	const threadsWorkerPath = path.join(ctx.distPath, "workers", "threads.js");
-
-	ctx.state.clearFiles(project.project, files);
-	const data: WorkerContext = {
-		pool: "threads",
-		worker: pathToFileURL(threadsWorkerPath).href,
-		port: undefined as unknown as MessagePort,
-		config,
-		files,
-		invalidates,
-		environment: { name: "node", options: null },
-		workerId: 0,
-		projectName: project.project.getName(),
-		providedContext: project.project.getProvidedContext(),
-	};
-
-	// Find the vitest-pool-workers:config plugin and give it the path to the main file.
-	// This allows that plugin to inject a virtual dependency on main so that vitest
-	// will automatically re-run tests when that gets updated, avoiding the user having
-	// to manually add such an import in their tests.
-	const configPlugin = project.project.server.config.plugins.find(
-		({ name }) => name === "@cloudflare/vitest-pool-workers:config"
-	);
-	if (configPlugin !== undefined) {
-		const api = configPlugin.api as WorkersConfigPluginAPI;
-		api.setMain(project.options.main);
-	}
-
-	// We reset storage at the end of tests when the user is presumably looking at
-	// results. We don't need to reset storage on the first run as instances were
-	// just created.
-	await waitForStorageReset(mf);
 	const ns = await mf.getDurableObjectNamespace(
 		RUNNER_OBJECT_BINDING,
 		workerName
 	);
+
 	// @ts-expect-error `ColoLocalActorNamespace`s are not included in types
 	const stub = ns.get("singleton");
 
@@ -770,119 +726,31 @@ async function runTests(
 		headers: {
 			Upgrade: "websocket",
 			"MF-Vitest-Worker-Data": structuredSerializableStringify({
-				filePath: pathToFileURL(workerPath).href,
-				name: method,
-				data,
 				cwd: process.cwd(),
 			}),
 		},
 	});
+
 	const webSocket = res.webSocket;
-	assert(webSocket !== null);
+	if (webSocket === null) {
+		const body = await res.text().catch(() => "");
+		throw new Error(
+			`Failed to establish WebSocket to runner (status ${res.status}): ${body}`
+		);
+	}
 
-	const chunkingSocket = createChunkingSocket({
-		post(message) {
-			webSocket.send(message);
-		},
-		on(listener) {
-			webSocket.addEventListener("message", (event) => {
-				listener(event.data);
-			});
-		},
-	});
-
-	// Compile module rules for matching against
-	const rules = project.options.miniflare?.modulesRules;
-	const compiledRules = compileModuleRules(rules ?? []);
-
-	const localRpcFunctions = createMethodsRPC(project.project, {
-		cacheFs: false,
-	});
-	const patchedLocalRpcFunctions: RuntimeRPC = {
-		...localRpcFunctions,
-		async fetch(...args) {
-			const specifier = args[0];
-
-			// Mark built-in modules (e.g. `cloudflare:test-runner`) as external.
-			// Note we explicitly don't mark `cloudflare:test` as external here, as
-			// this is handled by a Vite plugin injected by `defineWorkersConfig()`.
-			// The virtual `cloudflare:test` module will define a dependency on the
-			// specific `main` entrypoint, ensuring tests reload when it changes.
-			// Note Vite's module graph is constructed using static analysis, so the
-			// dynamic import of `main` won't add an imported-by edge to the graph.
-			if (
-				specifier !== "cloudflare:test" &&
-				(/^(cloudflare|workerd):/.test(specifier) ||
-					workerdBuiltinModules.has(specifier))
-			) {
-				return { externalize: specifier };
-			}
-
-			// If the specifier matches any module rules, force it to be loaded as
-			// that type. This will be handled by the module fallback service.
-			const maybeRule = compiledRules.find((rule) =>
-				testRegExps(rule.include, specifier)
-			);
-			if (maybeRule !== undefined) {
-				const externalize = specifier + `?mf_vitest_force=${maybeRule.type}`;
-				return { externalize };
-			}
-
-			return localRpcFunctions.fetch(...args);
-		},
-	};
-
-	let startupError: unknown;
-	const rpc = createBirpc<RunnerRPC, RuntimeRPC>(patchedLocalRpcFunctions, {
-		eventNames: ["onCancel"],
-		post(value) {
-			if (webSocket.readyState === WebSocket.READY_STATE_OPEN) {
-				debuglog("POOL-->WORKER", value);
-				chunkingSocket.post(structuredSerializableStringify(value));
-			} else {
-				debuglog("POOL--*      ", value);
-			}
-		},
-		on(listener) {
-			chunkingSocket.on((message) => {
-				const value = structuredSerializableParse(message);
-				debuglog("POOL<--WORKER", value);
-				if (
-					typeof value === "object" &&
-					value !== null &&
-					"vitestPoolWorkersError" in value
-				) {
-					startupError = value.vitestPoolWorkersError;
-				} else {
-					listener(value);
-				}
-			});
-		},
-	});
-	project.project.ctx.onCancel((reason) => rpc.onCancel(reason));
 	webSocket.accept();
 
-	const [event] = (await events.once(webSocket, "close")) as [CloseEvent];
-	if (webSocket.readyState === WebSocket.READY_STATE_CLOSING) {
-		if (event.code === 1005 /* No Status Received */) {
-			webSocket.close();
-		} else {
-			webSocket.close(event.code, event.reason);
-		}
-	}
-	if (event.code !== 1000) {
-		throw startupError ?? new Error("Failed to run tests");
-	}
-
-	debuglog("DONE", files);
+	return webSocket;
 }
 
 interface PackageJson {
+	name?: string;
 	version?: string;
 	peerDependencies?: Record<string, string | undefined>;
+	bundledVersions?: Record<string, string | undefined>;
 }
 function getPackageJson(dirPath: string): PackageJson | undefined {
-	// eslint-disable-next-line no-constant-condition
 	while (true) {
 		const pkgJsonPath = path.join(dirPath, "package.json");
 		try {
@@ -902,7 +770,16 @@ function getPackageJson(dirPath: string): PackageJson | undefined {
 	}
 }
 
-function assertCompatibleVitestVersion(ctx: Vitest) {
+/**
+ * Extract the upstream vitest version from an alternative distribution's
+ * package.json. Distributions like `@voidzero-dev/vite-plus-test` declare
+ * the bundled vitest version in `bundledVersions.vitest`.
+ */
+function getUpstreamVitestVersion(pkgJson: PackageJson): string | undefined {
+	return pkgJson.bundledVersions?.vitest;
+}
+
+export function assertCompatibleVitestVersion(ctx: Vitest) {
 	// Some package managers don't enforce `peerDependencies` requirements,
 	// so add a runtime sanity check to ensure things don't break in strange ways.
 	const poolPkgJson = getPackageJson(__dirname);
@@ -917,15 +794,25 @@ function assertCompatibleVitestVersion(ctx: Vitest) {
 	);
 
 	const expectedVitestVersion = poolPkgJson.peerDependencies?.vitest;
-	const actualVitestVersion = vitestPkgJson.version;
 	assert(
 		expectedVitestVersion !== undefined,
 		"Expected to find `@cloudflare/vitest-pool-workers`'s `vitest` version constraint"
 	);
+
+	const actualVitestVersion =
+		vitestPkgJson.name === "vitest"
+			? vitestPkgJson.version
+			: (getUpstreamVitestVersion(vitestPkgJson) ?? vitestPkgJson.version);
 	assert(
 		actualVitestVersion !== undefined,
 		"Expected to find `vitest`'s version"
 	);
+
+	// Hard error on Vitest v3, which definitely won't work
+	if (semverSatisfies(actualVitestVersion, "3.x")) {
+		const message = `You're running \`vitest@${actualVitestVersion}\`, but this version of \`@cloudflare/vitest-pool-workers\` only supports \`vitest ${expectedVitestVersion}\`.`;
+		throw new Error(message);
+	}
 
 	if (!semverSatisfies(actualVitestVersion, expectedVitestVersion)) {
 		const message = [
@@ -937,240 +824,30 @@ function assertCompatibleVitestVersion(ctx: Vitest) {
 	}
 }
 
-let warnedUnsupportedInspectorOptions = false;
-
-function validateInspectorConfig(config: SerializedConfig) {
-	if (config.inspector.host) {
-		throw new TypeError(
-			"Customizing inspector host is not supported with vitest-pool-workers."
+/**
+ * Ensures that the specified compatibility feature is enabled for Vitest to work.
+ * @param compatibilityFlags The list of current compatibility flags.
+ * @param feature The name of the feature to enable.
+ */
+function ensureFeature(compatibilityFlags: string[], feature: string) {
+	const flagToEnable = `enable_${feature}`;
+	const flagToDisable = `disable_${feature}`;
+	if (!compatibilityFlags.includes(flagToEnable)) {
+		debug(
+			"Adding `%s` compatibility flag during tests as this feature is needed to support the Vitest runner.",
+			flagToEnable
 		);
+		compatibilityFlags.push(flagToEnable);
 	}
-
-	if (config.inspector.enabled && !warnedUnsupportedInspectorOptions) {
-		if (config.inspectBrk) {
-			log.warn(
-				`The "--inspect-brk" flag is not supported. Use "--inspect" instead.`
-			);
-		} else if (config.inspector.waitForDebugger) {
-			log.warn(
-				`The "inspector.waitForDebugger" option is not supported. Insert a debugger statement if you need to pause execution.`
-			);
-		}
-
-		warnedUnsupportedInspectorOptions = true;
+	if (compatibilityFlags.includes(flagToDisable)) {
+		log.warn(
+			`Removing \`${flagToDisable}\` compatibility flag during tests as that feature is needed to support the Vitest runner.`
+		);
+		compatibilityFlags.splice(compatibilityFlags.indexOf(flagToDisable), 1);
 	}
 }
 
-async function executeMethod(
-	ctx: Vitest,
-	specs: TestSpecification[],
-	invalidates: string[] | undefined,
-	method: "run" | "collect"
-) {
-	// Vitest waits for the previous `runTests()` to complete before calling
-	// `runTests()` again:
-	// https://github.com/vitest-dev/vitest/blob/v1.0.4/packages/vitest/src/node/core.ts#L458-L459
-	// This behaviour is required for stacked storage to work correctly.
-	// If we had concurrent runs, stack pushes/pops would interfere. We should
-	// always have an empty, fully-popped stacked at the end of a run.
-
-	// 1. Collect new specs
-	const parsedProjectOptions = new Set<WorkspaceProject>();
-	for (const [project, testFile] of specs) {
-		// Vitest validates all project names are unique
-		const projectName = project.getName();
-		let workersProject = allProjects.get(projectName);
-		// Parse project options once per project per re-run
-		if (workersProject === undefined) {
-			workersProject = {
-				project,
-				options: await parseProjectOptions(project),
-				testFiles: new Set(),
-				relativePath: getRelativeProjectPath(project),
-			};
-			allProjects.set(projectName, workersProject);
-		} else if (!parsedProjectOptions.has(project)) {
-			workersProject.project = project;
-			workersProject.options = await parseProjectOptions(project);
-			workersProject.relativePath = getRelativeProjectPath(project);
-		}
-		workersProject.testFiles.add(testFile);
-
-		parsedProjectOptions.add(project);
-	}
-
-	// 2. Run just the required tests
-	const resultPromises: Promise<void>[] = [];
-	const filesByProject = new Map<WorkspaceProject, string[]>();
-	for (const [project, file] of specs) {
-		let group = filesByProject.get(project);
-		if (group === undefined) {
-			filesByProject.set(project, (group = []));
-		}
-		group.push(file);
-	}
-	for (const [workspaceProject, files] of filesByProject) {
-		const project = allProjects.get(workspaceProject.getName());
-		assert(project !== undefined); // Defined earlier in this function
-		const options = project.options;
-
-		const config = workspaceProject.getSerializableConfig();
-
-		// Use our custom test runner. We don't currently support custom
-		// runners, since we need our own for isolated storage/fetch mock resets
-		// to work properly. There aren't many use cases where a user would need
-		// to control this.
-		config.runner = "cloudflare:test-runner";
-
-		// Make sure `setImmediate` and `clearImmediate` are never faked as they
-		// don't exist on the workers global scope
-		config.fakeTimers.toFake = config.fakeTimers.toFake?.filter(
-			(timerMethod) =>
-				timerMethod !== "setImmediate" && timerMethod !== "clearImmediate"
-		);
-
-		validateInspectorConfig(config);
-
-		// We don't want it to call `node:inspector` inside Workerd
-		config.inspector = {
-			enabled: false,
-		};
-
-		// We don't need all pool options from the config at runtime.
-		// Additionally, users may set symbols in the config which aren't
-		// serialisable. `getSerializableConfig()` may also return references to
-		// the same objects, so override it with a new object.
-		config.poolOptions = {
-			// @ts-expect-error Vitest provides no way to extend this type
-			threads: {
-				// Allow workers to be re-used by removing the isolation requirement
-				isolate: false,
-			},
-			workers: {
-				// Include resolved `main` if defined, and the names of Durable Object
-				// bindings that point to classes in the current isolate in the
-				// serialized config
-				main: maybeGetResolvedMainPath(project),
-				// Include designators of all Durable Object namespaces bound in the
-				// runner worker. We'll use this to list IDs in a namespace. We'll
-				// also use this to check Durable Object test runner helpers are
-				// only used with classes defined in the current worker, as these
-				// helpers rely on wrapping the object.
-				durableObjectBindingDesignators: getDurableObjectDesignators(
-					project.options
-				),
-				// Include whether isolated storage has been enabled for this
-				// project, so we know whether to call out to the loopback service
-				// to push/pop the storage stack between tests.
-				isolatedStorage: project.options.isolatedStorage,
-			} satisfies SerializedOptions,
-		};
-
-		const mf = await getProjectMiniflare(ctx, project);
-		if (options.singleWorker) {
-			// Single Worker, Isolated or Shared Storage
-			//  --> single instance with single runner worker
-			assert(mf instanceof Miniflare, "Expected single instance");
-			const name = getRunnerName(workspaceProject);
-			resultPromises.push(
-				runTests(ctx, mf, name, project, config, files, invalidates, method)
-			);
-		} else if (options.isolatedStorage) {
-			// Multiple Workers, Isolated Storage:
-			//  --> multiple instances each with single runner worker
-			assert(mf instanceof Map, "Expected multiple isolated instances");
-			const name = getRunnerName(workspaceProject);
-			for (const file of files) {
-				const fileMf = mf.get(file);
-				assert(fileMf !== undefined);
-				resultPromises.push(
-					runTests(
-						ctx,
-						fileMf,
-						name,
-						project,
-						config,
-						[file],
-						invalidates,
-						method
-					)
-				);
-			}
-		} else {
-			// Multiple Workers, Shared Storage:
-			//  --> single instance with multiple runner workers
-			assert(mf instanceof Miniflare, "Expected single instance");
-			for (const file of files) {
-				const name = getRunnerName(workspaceProject, file);
-				resultPromises.push(
-					runTests(ctx, mf, name, project, config, [file], invalidates, method)
-				);
-			}
-		}
-	}
-
-	// 3. Wait for all tests to complete, and throw if any failed
-	const results = await Promise.allSettled(resultPromises);
-	const errors = results
-		.filter((r): r is PromiseRejectedResult => r.status === "rejected")
-		.map((r) => r.reason);
-
-	// 4. Clean up persistence directories. Note we do this in the background
-	//    at the end of tests as opposed to before tests start, so re-runs
-	//    start quickly, and results are displayed as soon as they're ready.
-	for (const project of allProjects.values()) {
-		if (project.mf !== undefined) {
-			void forEachMiniflare(project.mf, async (mf) => scheduleStorageReset(mf));
-		}
-	}
-
-	if (errors.length > 0) {
-		throw new AggregateError(
-			errors,
-			"Errors occurred while running tests. For more information, see serialized error."
-		);
-	}
-
-	// TODO(soon): something like this is required for watching non-statically imported deps,
-	//   `vitest/dist/vendor/node.c-kzGvOB.js:handleFileChanged` is interesting,
-	//   could also use `forceRerunTriggers`
-	//   (Vite statically analyses imports here: https://github.com/vitejs/vite/blob/2649f40733bad131bc94b06d370bedc8f57853e2/packages/vite/src/node/plugins/importAnalysis.ts#L770)
-	// const project = specs[0][0];
-	// const moduleGraph = project.server.moduleGraph;
-	// const testModule = moduleGraph.getModuleById(".../packages/vitest-pool-workers/test/kv/store.test.ts");
-	// const thingModule = moduleGraph.getModuleById(".../packages/vitest-pool-workers/test/kv/thing.ts");
-	// assert(testModule && thingModule);
-	// thingModule.importers.add(testModule);
-}
-export default function (ctx: Vitest): ProcessPool {
-	// This function is called when config changes and may be called on re-runs
-	assertCompatibleVitestVersion(ctx);
-
-	return {
-		name: "vitest-pool-workers",
-		async runTests(specs, invalidates) {
-			await executeMethod(ctx, specs, invalidates, "run");
-		},
-		async collectTests(specs, invalidates) {
-			await executeMethod(ctx, specs, invalidates, "collect");
-		},
-		async close() {
-			// `close()` will be called when shutting down Vitest or updating config
-			log.debug("Shutting down runtimes...");
-			const promises: Promise<unknown>[] = [];
-			for (const project of allProjects.values()) {
-				if (project.mf !== undefined) {
-					promises.push(
-						forEachMiniflare(project.mf, async (mf) => {
-							// Finish in-progress storage resets before disposing
-							await waitForStorageReset(mf);
-							await mf.dispose();
-						})
-					);
-				}
-			}
-			allProjects.clear();
-			await Promise.all(promises);
-		},
-	};
-}
+export { cloudflarePool } from "./pool";
+export { cloudflareTest } from "./plugin";
+export * from "./d1";
+export * from "./pages";

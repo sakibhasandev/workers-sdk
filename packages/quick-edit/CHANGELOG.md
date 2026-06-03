@@ -1,5 +1,66 @@
 # @cloudflare/quick-edit
 
+## 0.4.6
+
+### Patch Changes
+
+- [#12823](https://github.com/cloudflare/workers-sdk/pull/12823) [`784c5cb`](https://github.com/cloudflare/workers-sdk/commit/784c5cb1ab7397110362e74f4632151ae8bab8fc) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Add frame-ancestors CSP and postMessage origin validation to quick-edit
+
+  Mitigate `postMessage` origin bypass:
+
+  - Add Content-Security-Policy frame-ancestors header to quick-edit Worker responses, restricting which origins can embed the editor iframe
+  - Add client-side origin validation to the window.onmessage handler in workbench.ts, rejecting PORT messages from untrusted origins
+  - Inject allowed parent origins from server into HTML for client-side use
+  - Localhost origins are conditionally included when running via wrangler dev
+
+## 0.4.5
+
+### Patch Changes
+
+- [#12154](https://github.com/cloudflare/workers-sdk/pull/12154) [`e36c0c9`](https://github.com/cloudflare/workers-sdk/commit/e36c0c9f70041bea4abc4ee4e4e462e2dc11e9cc) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Use `X-Forwarded-Host` header for extension authority when behind a proxy
+
+  When Quick Edit is accessed through a proxy, the `X-Forwarded-Host` header is now used to determine the authority for loading builtin extensions. This ensures extensions load correctly when the Worker is behind a reverse proxy. The header value is only used if it matches `*.devprod.cloudflare.dev` for security.
+
+## 0.4.4
+
+### Patch Changes
+
+- [#11878](https://github.com/cloudflare/workers-sdk/pull/11878) [`e84e8fa`](https://github.com/cloudflare/workers-sdk/commit/e84e8fab79f17ffcc6a4c29c92c6924ceb351f94) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Fix relative path computation when the root folder name appears multiple times in a path
+
+  Previously, the logic assumed the root folder appeared exactly once in the path. When the root folder name appeared more than once, file modifications were not correctly detected.
+
+  For example, if the root folder is `my-worker`, a path like `/my-worker/my-worker/util.js` would incorrectly return `/` instead of `/my-worker/util.js`.
+
+## 0.4.3
+
+### Patch Changes
+
+- [#11448](https://github.com/cloudflare/workers-sdk/pull/11448) [`2b4813b`](https://github.com/cloudflare/workers-sdk/commit/2b4813b18076817bb739491246313c32b403651f) Thanks [@edmundhung](https://github.com/edmundhung)! - Builds package with esbuild `v0.27.0`
+
+## 0.4.2
+
+### Patch Changes
+
+- [#10347](https://github.com/cloudflare/workers-sdk/pull/10347) [`2e5b880`](https://github.com/cloudflare/workers-sdk/commit/2e5b8802b3d9b9b8ff0d44c6b7a5d80e64f92313) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - bump the quick editor version to trigger a release
+
+## 0.4.1
+
+### Patch Changes
+
+- [#10338](https://github.com/cloudflare/workers-sdk/pull/10338) [`d419fd8`](https://github.com/cloudflare/workers-sdk/commit/d419fd8cbb946b00b1758869b073567f2bb3a740) Thanks [@CarmenPopoviciu](https://github.com/CarmenPopoviciu)! - Dummy changeset
+
+## 0.4.0
+
+### Minor Changes
+
+- [#10047](https://github.com/cloudflare/workers-sdk/pull/10047) [`a4c4c5b`](https://github.com/cloudflare/workers-sdk/commit/a4c4c5bd9597d977d2e93f9d75a3260cf028decb) Thanks [@penalosa](https://github.com/penalosa)! - Bump base VSCode version for Quick Edit & Playground to 1.102.1
+
+## 0.3.3
+
+### Patch Changes
+
+- [#9649](https://github.com/cloudflare/workers-sdk/pull/9649) [`ec9b417`](https://github.com/cloudflare/workers-sdk/commit/ec9b417f8ed711e7b5044410e83d781f123a6a62) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - patch release to trigger a test release
+
 ## 0.3.2
 
 ### Patch Changes

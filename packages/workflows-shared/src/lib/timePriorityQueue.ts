@@ -34,18 +34,11 @@ type PriorityQueueDBEntry = {
 
 export class TimePriorityQueue {
 	#heap: Heap<WakerPriorityEntry> = new Heap(wakerPriorityEntryComparator);
-	// #env: Env;
 	#ctx: DurableObjectState;
-	#instanceMetadata: InstanceMetadata;
 
-	constructor(
-		ctx: DurableObjectState,
-		// env: Env,
-		instanceMetadata: InstanceMetadata
-	) {
+	constructor(ctx: DurableObjectState, _instanceMetadata: InstanceMetadata) {
 		this.#ctx = ctx;
-		// this.#env = env;
-		this.#instanceMetadata = instanceMetadata;
+
 		this.#heap.init(this.getEntries());
 	}
 
@@ -58,7 +51,6 @@ export class TimePriorityQueue {
 		const currentTimestamp = new Date().valueOf();
 		// heap-js does not have a ordered iterator that doesn't consume the input so we
 		// peek the first one, and pop if it's old until it's empty or in the future
-		// eslint-disable-next-line no-constant-condition
 		while (true) {
 			const element = this.#heap.peek();
 			if (element === undefined) {
@@ -114,6 +106,30 @@ export class TimePriorityQueue {
 				}
 				return false;
 			});
+		});
+	}
+
+	offsetAll(offset: number) {
+		// Clear the entire PQ table and re-insert only the offset entries.
+		// We can't use the append-only add/remove pattern here because the
+		// UNIQUE (action, entryType, hash) constraint would conflict with
+		// the original action=1 rows still in the table.
+		this.#ctx.storage.transactionSync(() => {
+			const entries = this.#heap.toArray();
+
+			// Wipe the table — removes all historical add/remove rows
+			this.#ctx.storage.sql.exec("DELETE FROM priority_queue");
+
+			const newEntries = entries.map((value) => ({
+				...value,
+				targetTimestamp: value.targetTimestamp + offset,
+			}));
+			for (const entry of newEntries) {
+				this.addEntryDB(entry);
+			}
+			// re-init in-memory heap
+			this.#heap = new Heap(wakerPriorityEntryComparator);
+			this.#heap.init(newEntries);
 		});
 	}
 

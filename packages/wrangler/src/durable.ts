@@ -1,9 +1,9 @@
 import assert from "node:assert";
+import { configFileName } from "@cloudflare/workers-utils";
 import { fetchResult } from "./cfetch";
-import { configFileName } from "./config";
 import { logger } from "./logger";
-import type { Config } from "./config";
-import type { CfWorkerInit } from "./deployment-bundle/worker";
+import { isWorkerNotFoundError } from "./utils/worker-not-found-error";
+import type { CfWorkerInit, Config } from "@cloudflare/workers-utils";
 
 /**
  * For a given Worker + migrations config, figure out which migrations
@@ -14,7 +14,8 @@ export async function getMigrationsToUpload(
 	props: {
 		accountId: string | undefined;
 		config: Config;
-		legacyEnv: boolean | undefined;
+		/** Deprecated service environments. Previously known as !legacyEnv :-) */
+		useServiceEnvironments: boolean | undefined;
 		env: string | undefined;
 		dispatchNamespace: string | undefined;
 	}
@@ -31,6 +32,7 @@ export async function getMigrationsToUpload(
 		if (props.dispatchNamespace) {
 			try {
 				const scriptData = await fetchResult<{ script: ScriptData }>(
+					config,
 					`/accounts/${accountId}/workers/dispatch/namespaces/${props.dispatchNamespace}/scripts/${scriptName}`
 				);
 				script = scriptData.script;
@@ -38,12 +40,13 @@ export async function getMigrationsToUpload(
 				suppressNotFoundError(err);
 			}
 		} else {
-			if (!props.legacyEnv) {
+			if (props.useServiceEnvironments) {
 				try {
 					if (props.env) {
 						const scriptData = await fetchResult<{
 							script: ScriptData;
 						}>(
+							config,
 							`/accounts/${accountId}/workers/services/${scriptName}/environments/${props.env}`
 						);
 						script = scriptData.script;
@@ -52,7 +55,7 @@ export async function getMigrationsToUpload(
 							default_environment: {
 								script: ScriptData;
 							};
-						}>(`/accounts/${accountId}/workers/services/${scriptName}`);
+						}>(config, `/accounts/${accountId}/workers/services/${scriptName}`);
 						script = scriptData.default_environment.script;
 					}
 				} catch (err) {
@@ -60,6 +63,7 @@ export async function getMigrationsToUpload(
 				}
 			} else {
 				const scripts = await fetchResult<ScriptData[]>(
+					config,
 					`/accounts/${accountId}/workers/scripts`
 				);
 				script = scripts.find(({ id }) => id === scriptName);
@@ -108,10 +112,8 @@ export async function getMigrationsToUpload(
 
 const suppressNotFoundError = (err: unknown) => {
 	if (
-		![
-			10090, // corresponds to workers.api.error.service_not_found, so the script wasn't previously published at all
-			10092, // workers.api.error.environment_not_found, so the script wasn't published to this environment yet
-		].includes((err as { code: number }).code)
+		!isWorkerNotFoundError(err) &&
+		(err as { code: number }).code !== 10092 // workers.api.error.environment_not_found, so the script wasn't published to this environment yet
 	) {
 		throw err;
 	}

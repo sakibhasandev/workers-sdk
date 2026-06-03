@@ -1,6 +1,26 @@
+// NOTE: this file is duplicated between miniflare and d1-workers, and should be kept in sync by hand.
+// Please tag someone from the D1 team as a reviewer and they will do this for you.
+//
 // NOTE: this function duplicates the logic inside SQLite's shell.c.in as close
 // as possible, with any deviations noted.
-import { SqlStorage } from "@cloudflare/workers-types/experimental";
+import type { SqlStorage } from "@cloudflare/workers-types/experimental";
+
+/** Stats tracking for dumpSql. Will be mutated in place if provided. */
+export interface DumpSqlStats {
+	rows_read: number;
+	rows_written: number;
+	// Stats for tracking INSERT statement sizes (column names are always included)
+	/** Number of INSERT statements over 100KB (current size, with column names) */
+	inserts_over_100kb_with_column_names: number;
+	/** Number of INSERT statements that would be over 100KB without column names (for backward comparison) */
+	inserts_already_over_100kb: number;
+	/** Total number of INSERT statements generated */
+	total_inserts: number;
+	/** Maximum INSERT statement size without column names (hypothetical, for backward comparison) */
+	max_insert_size: number;
+	/** Maximum INSERT statement size (current size, with column names) */
+	max_insert_size_with_column_names: number;
+}
 
 export function* dumpSql(
 	db: SqlStorage,
@@ -8,8 +28,11 @@ export function* dumpSql(
 		noSchema?: boolean;
 		noData?: boolean;
 		tables?: string[];
-	}
+	},
+	/** Optional stats tracking. Will be mutated in place if provided */
+	stats?: DumpSqlStats
 ) {
+	// WARNING: the caller in D1 assumes non-empty exports, so think carefully before removing this initial yield.
 	yield `PRAGMA defer_foreign_keys=TRUE;`;
 
 	// Empty set means include all tables
@@ -17,15 +40,20 @@ export function* dumpSql(
 	const { noData, noSchema } = options || {};
 
 	// Taken from SQLite shell.c.in https://github.com/sqlite/sqlite/blob/105c20648e1b05839fd0638686b95f2e3998abcb/src/shell.c.in#L8463-L8469
-	// @ts-ignore (SqlStorageStatement needs to be callable)
+	// @ts-expect-error -- SqlStorageStatement needs to be callable
 	const tables_cursor = db.prepare(`
-    SELECT name, type, sql 
-      FROM sqlite_schema AS o 
-    WHERE (true) AND type=='table' 
-      AND sql NOT NULL 
+    SELECT name, type, sql
+      FROM sqlite_schema AS o
+    WHERE (true) AND type=='table'
+      AND sql NOT NULL
     ORDER BY tbl_name='sqlite_sequence', rowid;
   `)();
-	const tables: any[] = Array.from(tables_cursor);
+	const tables: { name: string; type: string; sql: string }[] =
+		Array.from(tables_cursor);
+	if (stats) {
+		stats.rows_read += tables_cursor.rowsRead;
+		stats.rows_written += tables_cursor.rowsWritten;
+	}
 
 	for (const { name: table, sql } of tables) {
 		if (filterTables.size > 0 && !filterTables.has(table)) continue;
@@ -54,44 +82,104 @@ export function* dumpSql(
 		}
 
 		if (noData) continue;
-		const columns_cursor = db.exec(`PRAGMA table_info="${table}"`);
-		const columns = Array.from(columns_cursor);
-		const select = `SELECT ${columns.map((c) => c.name).join(", ")}
-                            FROM "${table}";`;
+		// eslint-disable-next-line workers-sdk/no-unsafe-command-execution -- input is escaped via escapeId() so this PRAGMA call is safe
+		const columns_cursor = db.exec(`PRAGMA table_info=${escapeId(table)}`);
+
+		const columns = Array.from(columns_cursor) as {
+			cid: string;
+			name: string;
+			type: string;
+			notnull: number;
+			dflt_val: string | null;
+			pk: number;
+		}[];
+		if (stats) {
+			stats.rows_read += columns_cursor.rowsRead;
+			stats.rows_written += columns_cursor.rowsWritten;
+		}
+
+		const select = `SELECT ${columns.map((c) => escapeId(c.name)).join(", ")} FROM ${escapeId(table)};`;
 		const rows_cursor = db.exec(select);
+		const columnNames = columns.map((c) => escapeId(c.name)).join(",");
+		// The column names portion is: " (" + columnNames + ")" = 3 + columnNames.length
+		const columnNamesOverhead = 3 + columnNames.length;
 		for (const dataRow of rows_cursor.raw()) {
 			const formattedCells = dataRow.map((cell: unknown, i: number) => {
 				const colType = columns[i].type;
 				const cellType = typeof cell;
 				if (cell === null) {
 					return "NULL";
-				} else if (colType === "INTEGER" || cellType === "number") {
+				} else if (cellType === "number") {
 					return cell;
-				} else if (colType === "TEXT" || cellType === "string") {
+				} else if (cellType === "string") {
 					return outputQuotedEscapedString(cell);
 				} else if (cell instanceof ArrayBuffer) {
 					return `X'${Array.prototype.map
 						.call(new Uint8Array(cell), (b) => b.toString(16).padStart(2, "0"))
 						.join("")}'`;
 				} else {
-					console.log({ colType, cellType, cell, column: columns[i] });
+					console.error({
+						message: "dumpSql: unexpected cell type",
+						colType,
+						cellType,
+						cell,
+						column: columns[i],
+					});
 					return "ERROR";
 				}
 			});
 
-			yield `INSERT INTO ${sqliteQuote(table)} VALUES(${formattedCells.join(",")});`;
+			const insertStmt = `INSERT INTO ${escapeId(table)} (${columnNames}) VALUES(${formattedCells.join(",")});`;
+
+			// Track stats for INSERT statement sizes
+			if (stats) {
+				const currentSize = insertStmt.length;
+				// Calculate what the size would be without column names (for comparison)
+				const sizeWithoutColumnNames = currentSize - columnNamesOverhead;
+				const LIMIT = 100 * 1024; // 100KB
+
+				stats.total_inserts++;
+				if (sizeWithoutColumnNames > LIMIT) {
+					stats.inserts_already_over_100kb++;
+				}
+				if (currentSize > LIMIT) {
+					stats.inserts_over_100kb_with_column_names++;
+				}
+				if (sizeWithoutColumnNames > stats.max_insert_size) {
+					stats.max_insert_size = sizeWithoutColumnNames;
+				}
+				if (currentSize > stats.max_insert_size_with_column_names) {
+					stats.max_insert_size_with_column_names = currentSize;
+				}
+			}
+
+			yield insertStmt;
+		}
+		if (stats) {
+			stats.rows_read += rows_cursor.rowsRead;
+			stats.rows_written += rows_cursor.rowsWritten;
 		}
 	}
 
 	if (!noSchema) {
 		// Taken from SQLite shell.c.in https://github.com/sqlite/sqlite/blob/105c20648e1b05839fd0638686b95f2e3998abcb/src/shell.c.in#L8473-L8478
 		const rest_of_schema = db.exec(
-			`SELECT name, sql FROM sqlite_schema AS o WHERE (true) AND sql NOT NULL AND type IN ('index', 'trigger', 'view') ORDER BY type COLLATE NOCASE /* DESC */;`
+			[
+				"SELECT name, sql",
+				"FROM sqlite_schema AS o",
+				"WHERE (true) AND sql NOT NULL",
+				"  AND type IN ('index', 'trigger', 'view')",
+				// 'DESC' appears in the code linked above but the observed behaviour of SQLite appears otherwise
+				"ORDER BY type COLLATE NOCASE",
+			].join(" ")
 		);
-		// 'DESC' appears in the code linked above but the observed behaviour of SQLite appears otherwise
 		for (const { name, sql } of rest_of_schema) {
 			if (filterTables.size > 0 && !filterTables.has(name as string)) continue;
 			yield `${sql};`;
+		}
+		if (stats) {
+			stats.rows_read += rest_of_schema.rowsRead;
+			stats.rows_written += rest_of_schema.rowsWritten;
 		}
 	}
 }
@@ -136,6 +224,15 @@ export function sqliteQuote(token: string) {
 		SQLITE_KEYWORDS.has(token.toUpperCase())
 		? `"${token}"`
 		: token;
+}
+
+/**
+ * Escape an identifier for use in SQL statements.
+ * @param id - The identifier to escape.
+ * @returns
+ */
+function escapeId(id: string) {
+	return `"${id.replace(/"/g, '""')}"`;
 }
 
 // List taken from `aKeywordTable` inhttps://github.com/sqlite/sqlite/blob/378bf82e2bc09734b8c5869f9b148efe37d29527/tool/mkkeywordhash.c#L172

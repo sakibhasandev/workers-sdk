@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, it, vitest } from "vitest";
 import {
 	deployNonNpmPackages,
@@ -11,7 +11,7 @@ import type { Mock } from "vitest";
 
 vitest.mock("node:child_process", async () => {
 	return {
-		execSync: vitest.fn(),
+		spawnSync: vitest.fn(),
 	};
 });
 
@@ -98,36 +98,33 @@ describe("findDeployablePackageNames()", () => {
 		expect(findDeployablePackageNames()).toMatchInlineSnapshot(`
 			Set {
 			  "@cloudflare/chrome-devtools-patches",
-			  "cloudflare-workers-bindings-extension",
-			  "devprod-status-bot",
-			  "edge-preview-authenticated-proxy",
-			  "format-errors",
-			  "playground-preview-worker",
-			  "@cloudflare/prerelease-registry",
+			  "@cloudflare/devprod-status-bot",
+			  "@cloudflare/edge-preview-authenticated-proxy",
+			  "@cloudflare/format-errors",
+			  "@cloudflare/playground-preview-worker",
 			  "@cloudflare/quick-edit",
-			  "turbo-r2-archive",
-			  "workers-playground",
+			  "@cloudflare/turbo-r2-archive",
+			  "@cloudflare/workers-playground",
 			  "@cloudflare/workers-shared",
-			  "workers.new",
-			  "@cloudflare/workflows-shared",
 			}
 		`);
 	});
 });
 
 describe("deployPackage", () => {
-	it("should run `pnpm deploy` for the given package via `execSync`", ({
+	it("should run `pnpm deploy` for the given package via `spawnSync`", ({
 		expect,
 	}) => {
 		deployPackage("foo", new Map());
-		expect(execSync).toHaveBeenCalledWith(
-			"pnpm -F foo run deploy",
+		expect(spawnSync).toHaveBeenCalledWith(
+			"pnpm",
+			["-F", "foo", "run", "deploy"],
 			expect.any(Object)
 		);
 	});
 
-	it("should ignore failures in `execSync`", ({ expect }) => {
-		(execSync as Mock).mockImplementationOnce(() => {
+	it("should ignore failures in `spawnSync`", ({ expect }) => {
+		(spawnSync as Mock).mockImplementationOnce(() => {
 			throw new Error("Bad deployment");
 		});
 		const logs: string[] = [];

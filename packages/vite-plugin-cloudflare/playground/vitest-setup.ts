@@ -7,17 +7,18 @@ import {
 	loadConfigFromFile,
 	mergeConfig,
 	preview,
-	Rollup,
 } from "vite";
-import { beforeAll, beforeEach, inject } from "vitest";
-import type * as http from "node:http";
+import { assert, beforeAll, inject } from "vitest";
 import type { Browser, Page } from "playwright-chromium";
 import type {
 	ConfigEnv,
 	InlineConfig,
 	Logger,
+	LogLevel,
 	PluginOption,
+	PreviewServer,
 	ResolvedConfig,
+	Rollup,
 	UserConfig,
 	ViteDevServer,
 } from "vite";
@@ -28,12 +29,16 @@ export const workspaceRoot = path.resolve(__dirname, "../");
 export const isBuild = !!process.env.VITE_TEST_BUILD;
 export const isWindows = process.platform === "win32";
 
-let server: ViteDevServer | http.Server;
+export const isCINonLinux =
+	process.platform !== "linux" && process.env.CI === "true";
+
+export const isLocalWithoutDockerRunning =
+	process.env.LOCAL_TESTS_WITHOUT_DOCKER === "true";
 
 /**
  * Vite Dev Server when testing serve
  */
-export let viteServer: ViteDevServer;
+export let viteServer: ViteDevServer | PreviewServer;
 /**
  * Root of the Vite fixture
  */
@@ -63,28 +68,37 @@ export const serverLogs: {
 export const browserLogs: string[] = [];
 export const browserErrors: Error[] = [];
 
-export let resolvedConfig: ResolvedConfig = undefined!;
+export let resolvedConfig: ResolvedConfig =
+	undefined as unknown as ResolvedConfig;
 
-export let page: Page = undefined!;
-export let browser: Browser = undefined!;
+export let page: Page = undefined as unknown as Page;
+export let browser: Browser = undefined as unknown as Browser;
 export let viteTestUrl: string = "";
-export let watcher: Rollup.RollupWatcher | undefined = undefined;
+export const watcher: Rollup.RollupWatcher | undefined = undefined;
 
 export function setViteUrl(url: string): void {
 	viteTestUrl = url;
 }
 
 export function resetServerLogs() {
-	serverLogs.info = [];
-	serverLogs.warns = [];
-	serverLogs.errors = [];
+	serverLogs.info.splice(0, serverLogs.info.length);
+	serverLogs.warns.splice(0, serverLogs.warns.length);
+	serverLogs.errors.splice(0, serverLogs.errors.length);
 }
 
-beforeAll(async (s) => {
+// eslint-disable-next-line no-empty-pattern -- Vitest requires the 1st argument to use object destructuring
+beforeAll(async ({}, s) => {
+	let server: ViteDevServer | PreviewServer | undefined;
+	let postServe: (() => Promise<void>) | undefined;
+
 	const suite = s as RunnerTestFile;
 
-	testPath = suite.filepath!;
-	testName = slash(testPath).match(/playground\/([\w-]+)\//)?.[1]!;
+	assert(suite.filepath);
+	testPath = suite.filepath;
+	const regexMatchArray = slash(testPath).match(/playground\/([\w-♫]+)\//);
+	assert(regexMatchArray);
+	assert(regexMatchArray[1]);
+	testName = regexMatchArray[1];
 	testDir = path.dirname(testPath);
 	if (testName) {
 		testDir = path.resolve(workspaceRoot, "playground", testName);
@@ -95,18 +109,27 @@ beforeAll(async (s) => {
 		throw new Error("wsEndpoint not found");
 	}
 
+	const logLabel = "bootup: " + testName;
+
+	console.time(logLabel);
+	console.timeLog(logLabel, "Starting browser connect to", wsEndpoint);
 	browser = await chromium.connect(wsEndpoint);
-	page = await browser.newPage();
+	// `@vitejs/plugin-basic-ssl` requires a manual confirmation step in the browser so we enable `ignoreHTTPSErrors` to bypass this
+	page = await browser.newPage({ ignoreHTTPSErrors: true });
+	console.timeLog(logLabel, `Browser connected`);
 
 	const globalConsole = console;
 	const warn = globalConsole.warn;
 	globalConsole.warn = (msg: string, ...args: unknown[]) => {
-		if (msg.includes("Generated an empty chunk")) return;
+		if (msg.includes("Generated an empty chunk")) {
+			return;
+		}
 		warn.call(globalConsole, msg, ...args);
 	};
 
 	try {
 		page.on("console", (msg) => {
+			console.timeLog(logLabel, `BROWSER LOG [${msg.type()}]: ${msg.text()}`);
 			// ignore favicon requests in headed browser
 			if (
 				process.env.VITE_DEBUG_SERVE &&
@@ -118,6 +141,7 @@ beforeAll(async (s) => {
 			browserLogs.push(msg.text());
 		});
 		page.on("pageerror", (error) => {
+			console.timeLog(logLabel, `BROWSER ERROR: ${error.message}`);
 			browserErrors.push(error);
 		});
 
@@ -142,21 +166,26 @@ beforeAll(async (s) => {
 				path.resolve(path.dirname(testPath), "serve.js"),
 			].find((i) => fs.existsSync(i));
 
+			console.timeLog(logLabel, "Starting test server...");
 			if (testCustomServe) {
 				// test has custom server configuration.
 				const mod = await import(testCustomServe);
 				const serve = mod.serve || mod.default?.serve;
 				const preServe = mod.preServe || mod.default?.preServe;
+				postServe = mod.postServe || mod.default?.postServe;
 				if (preServe) {
 					await preServe();
 				}
 				if (serve) {
 					server = (await serve()) ?? server;
 					viteServer = mod.viteServer ?? viteServer;
+					viteTestUrl = mod.viteTestUrl ?? viteTestUrl;
 				}
 			} else {
-				await startDefaultServe();
+				server = await startDefaultServe();
 			}
+			console.timeLog(logLabel, "Started test server...");
+			console.timeEnd(logLabel);
 		}
 	} catch (e) {
 		// Closing the page since an error in the setup, for example a runtime error
@@ -165,6 +194,9 @@ beforeAll(async (s) => {
 		// a timeout with an exception that hides the real error in the console.
 		await page.close();
 		await server?.close();
+		if (postServe) {
+			await postServe();
+		}
 		throw e;
 	}
 
@@ -173,16 +205,14 @@ beforeAll(async (s) => {
 
 		await page?.close();
 		await server?.close();
+		// @ts-expect-error TODO: fix
 		await watcher?.close();
-		if (browser) {
-			await browser.close();
+		await browser?.close();
+		if (postServe) {
+			await postServe();
 		}
 	};
-}, 15_000);
-
-beforeEach(async () => {
-	await page.goto(viteTestUrl);
-});
+}, 40_000);
 
 export async function loadConfig(configEnv: ConfigEnv) {
 	let config: UserConfig | null = null;
@@ -240,26 +270,33 @@ export async function loadConfig(configEnv: ConfigEnv) {
 		customLogger: createInMemoryLogger(
 			serverLogs.info,
 			serverLogs.warns,
-			serverLogs.errors
+			serverLogs.errors,
+			config?.logLevel
 		),
 	};
 	return mergeConfig(options, config || {});
 }
 
 export async function startDefaultServe(): Promise<
-	ViteDevServer | http.Server
+	ViteDevServer | PreviewServer
 > {
 	setupConsoleWarnCollector(serverLogs.warns);
+
+	// Vitest 4 sets NODE_ENV=test — override so Vite uses the correct mode
+	process.env.NODE_ENV = isBuild ? "production" : "development";
 
 	if (!isBuild) {
 		process.env.VITE_INLINE = "inline-serve";
 		const config = await loadConfig({ command: "serve", mode: "development" });
-		viteServer = server = await (await createServer(config)).listen();
-		viteTestUrl = server!.resolvedUrls!.local[0]!;
-		if (server.config.base === "/") {
+		viteServer = await (await createServer(config)).listen();
+		assert(viteServer.resolvedUrls);
+		assert(viteServer.resolvedUrls.local[0]);
+		viteTestUrl = viteServer.resolvedUrls.local[0];
+		if (viteServer.config.base === "/") {
 			viteTestUrl = viteTestUrl.replace(/\/$/, "");
 		}
 		await page.goto(viteTestUrl);
+		return viteServer;
 	} else {
 		process.env.VITE_INLINE = "inline-build";
 		// determine build watch
@@ -281,6 +318,10 @@ export async function startDefaultServe(): Promise<
 		const builder = await createBuilder(buildConfig);
 		await builder.buildApp();
 
+		// This environment variable is used to indicate to the preview server that it is being run during a build
+		// We need to delete it here as, during testing, preview also runs in the same process after the build completes
+		delete process.env.CLOUDFLARE_VITE_BUILD;
+
 		const previewConfig = await loadConfig({
 			command: "serve",
 			mode: "development",
@@ -293,20 +334,23 @@ export async function startDefaultServe(): Promise<
 		const previewServer = await preview(previewConfig);
 		// prevent preview change NODE_ENV
 		process.env.NODE_ENV = _nodeEnv;
-		viteTestUrl = previewServer!.resolvedUrls!.local[0]!;
+		viteServer = previewServer;
+		assert(previewServer.resolvedUrls);
+		assert(previewServer.resolvedUrls.local[0]);
+		viteTestUrl = previewServer.resolvedUrls.local[0];
 		if (previewServer.config.base === "/") {
 			viteTestUrl = viteTestUrl.replace(/\/$/, "");
 		}
 		await page.goto(viteTestUrl);
+		return previewServer;
 	}
-	return server;
 }
 
 /**
  * Send the rebuild complete message in build watch
  */
 export async function notifyRebuildComplete(
-	watcher: Rollup.RollupWatcher
+	rollupWatcher: Rollup.RollupWatcher
 ): Promise<Rollup.RollupWatcher> {
 	let resolveFn: undefined | (() => void);
 	const callback = (event: Rollup.RollupWatcherEvent): void => {
@@ -314,18 +358,29 @@ export async function notifyRebuildComplete(
 			resolveFn?.();
 		}
 	};
-	watcher.on("event", callback);
+	rollupWatcher.on("event", callback);
 	await new Promise<void>((resolve) => {
 		resolveFn = resolve;
 	});
-	return watcher.off("event", callback);
+	return rollupWatcher.off("event", callback);
 }
+
+// logLevel values taken from the vite source code: https://github.com/vitejs/vite/blob/302f8091b/packages/vite/src/node/logger.ts#L30-L35
+const logLevels: Record<LogLevel, number> = {
+	silent: 0,
+	error: 1,
+	warn: 2,
+	info: 3,
+};
 
 export function createInMemoryLogger(
 	info: string[],
 	warns: string[],
-	errors: string[]
+	errors: string[],
+	logLevel: LogLevel = "info"
 ): Logger {
+	const thresholdLogLevel = logLevels[logLevel];
+
 	const loggedErrors = new WeakSet<Error | Rollup.RollupError>();
 	const warnedMessages = new Set<string>();
 
@@ -334,22 +389,32 @@ export function createInMemoryLogger(
 		hasErrorLogged: (err) => loggedErrors.has(err),
 		clearScreen: () => {},
 		info(msg) {
-			info.push(msg);
+			if (thresholdLogLevel >= logLevels.info) {
+				info.push(msg);
+			}
 		},
 		warn(msg) {
-			warns.push(msg);
-			logger.hasWarned = true;
+			if (thresholdLogLevel >= logLevels.warn) {
+				warns.push(msg);
+				logger.hasWarned = true;
+			}
 		},
 		warnOnce(msg) {
-			if (warnedMessages.has(msg)) return;
-			warns.push(msg);
-			logger.hasWarned = true;
-			warnedMessages.add(msg);
+			if (thresholdLogLevel >= logLevels.warn) {
+				if (warnedMessages.has(msg)) {
+					return;
+				}
+				warns.push(msg);
+				logger.hasWarned = true;
+				warnedMessages.add(msg);
+			}
 		},
 		error(msg, opts) {
-			errors.push(msg);
-			if (opts?.error) {
-				loggedErrors.add(opts.error);
+			if (thresholdLogLevel >= logLevels.error) {
+				errors.push(msg);
+				if (opts?.error) {
+					loggedErrors.add(opts.error);
+				}
 			}
 		},
 	};

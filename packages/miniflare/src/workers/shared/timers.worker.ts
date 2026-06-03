@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { Awaitable } from "./types";
+import type { Awaitable } from "./types";
 
 const kFakeTimerHandle = Symbol("kFakeTimerHandle");
 export type TimerHandle = number | { [kFakeTimerHandle]: number };
@@ -27,7 +27,7 @@ export class Timers {
 		...args: Args
 	): TimerHandle {
 		if (this.#fakeTimestamp === undefined) {
-			return setTimeout(closure, delay, ...args);
+			return setTimeout(closure, delay, ...args) as unknown as TimerHandle;
 		}
 
 		const handle = this.#fakeNextTimerHandle++;

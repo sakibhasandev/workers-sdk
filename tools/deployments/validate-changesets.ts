@@ -3,9 +3,9 @@ import { resolve } from "node:path";
 import parseChangeset from "@changesets/parse";
 
 if (require.main === module) {
-	const packageNames = findPackageNames();
+	const packages = findPackages();
 	const changesets = readChangesets(resolve(__dirname, "../../.changeset"));
-	const errors = validateChangesets(packageNames, changesets);
+	const errors = validateChangesets(packages, changesets);
 	if (errors.length > 0) {
 		console.error("Validation errors in changesets:");
 		for (const error of errors) {
@@ -16,7 +16,7 @@ if (require.main === module) {
 }
 
 export function validateChangesets(
-	packageNames: Set<string>,
+	packages: Map<string, PackageJSON>,
 	changesets: ChangesetFile[]
 ) {
 	const errors: string[] = [];
@@ -24,9 +24,16 @@ export function validateChangesets(
 		try {
 			const changeset = parseChangeset(contents);
 			for (const release of changeset.releases) {
-				if (!packageNames.has(release.name)) {
+				const targetPackage = packages.get(release.name);
+				if (!targetPackage) {
 					errors.push(
-						`Invalid package name "${release.name}" in changeset at "${file}".`
+						`Unknown package name "${release.name}" in changeset at "${file}".`
+					);
+				}
+
+				if (release.type === "major" && targetPackage?.private !== true) {
+					errors.push(
+						`Major version bumps are not allowed for package "${release.name}" in changeset at "${file}".`
 					);
 				}
 				if (!["major", "minor", "patch", "none"].includes(release.type)) {
@@ -64,7 +71,7 @@ export function readChangesets(changesetDir: string): ChangesetFile[] {
  * This is determined by the package containing a package.json that is public or
  * is marked as `"private": true` and has a `deploy` script.
  */
-export function findPackageNames(): Set<string> {
+export function findPackages(): Map<string, PackageJSON> {
 	const packagesDirectory = resolve(__dirname, "../../packages");
 	const allPackageDirectories = readdirSync(packagesDirectory).map((p) =>
 		resolve(packagesDirectory, p)
@@ -79,10 +86,10 @@ export function findPackageNames(): Set<string> {
 			// Do nothing
 		}
 	}
-	const deployablePackages = new Set<string>();
+	const deployablePackages = new Map<string, PackageJSON>();
 	for (const pkg of allPackages) {
 		if (!pkg.private || pkg.scripts?.deploy !== undefined) {
-			deployablePackages.add(pkg.name);
+			deployablePackages.set(pkg.name, pkg);
 		}
 	}
 	return deployablePackages;
@@ -97,4 +104,7 @@ export type PackageJSON = {
 	name: string;
 	private?: boolean;
 	scripts?: Record<string, unknown>;
+	"workers-sdk"?: {
+		deploy?: boolean;
+	};
 };

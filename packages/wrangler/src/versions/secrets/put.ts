@@ -1,9 +1,9 @@
+import { configFileName, UserError } from "@cloudflare/workers-utils";
 import { fetchResult } from "../../cfetch";
-import { configFileName } from "../../config";
 import { createCommand } from "../../core/create-command";
 import { prompt } from "../../dialogs";
-import { UserError } from "../../errors";
 import { logger } from "../../logger";
+import * as metrics from "../../metrics";
 import { requireAuth } from "../../user";
 import { getLegacyScriptName } from "../../utils/getLegacyScriptName";
 import { readFromStdin, trimTrailingWhitespace } from "../../utils/std";
@@ -18,6 +18,7 @@ export const versionsSecretPutCommand = createCommand({
 	},
 	behaviour: {
 		printConfigWarnings: false,
+		warnIfMultipleEnvsConfiguredButNoneSpecified: true,
 	},
 	args: {
 		key: {
@@ -46,13 +47,15 @@ export const versionsSecretPutCommand = createCommand({
 		const scriptName = getLegacyScriptName(args, config);
 		if (!scriptName) {
 			throw new UserError(
-				`Required Worker name missing. Please specify the Worker name in your ${configFileName(config.configPath)} file, or pass it as an argument with \`--name <worker-name>\``
+				`Required Worker name missing. Please specify the Worker name in your ${configFileName(config.configPath)} file, or pass it as an argument with \`--name <worker-name>\``,
+				{ telemetryMessage: "versions secrets put missing worker name" }
 			);
 		}
 
 		if (args.key === undefined) {
 			throw new UserError(
-				"Secret name is required. Please specify the name of your secret."
+				"Secret name is required. Please specify the name of your secret.",
+				{ telemetryMessage: "versions secrets put missing secret name" }
 			);
 		}
 
@@ -72,17 +75,20 @@ export const versionsSecretPutCommand = createCommand({
 		// Grab the latest version
 		const versions = (
 			await fetchResult<{ items: WorkerVersion[] }>(
+				config,
 				`/accounts/${accountId}/workers/scripts/${scriptName}/versions`
 			)
 		).items;
 		if (versions.length === 0) {
 			throw new UserError(
-				"There are currently no uploaded versions of this Worker. Please upload a version before uploading a secret."
+				"There are currently no uploaded versions of this Worker. Please upload a version before uploading a secret.",
+				{ telemetryMessage: "versions secrets put no uploaded versions" }
 			);
 		}
 		const latestVersion = versions[0];
 
 		const newVersion = await copyWorkerVersionWithNewSecrets({
+			config,
 			accountId,
 			scriptName,
 			versionId: latestVersion.id,
@@ -92,6 +98,18 @@ export const versionsSecretPutCommand = createCommand({
 			sendMetrics: config.send_metrics,
 			unsafeMetadata: config.unsafe.metadata,
 		});
+
+		metrics.sendMetricsEvent(
+			"create encrypted variable",
+			{
+				secretOperation: "single",
+				secretSource: isInteractive ? "interactive" : "stdin",
+				hasEnvironment: Boolean(args.env),
+			},
+			{
+				sendMetrics: config.send_metrics,
+			}
+		);
 
 		logger.log(
 			`✨ Success! Created version ${newVersion.id} with secret ${args.key}.` +

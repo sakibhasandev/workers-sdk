@@ -3,14 +3,13 @@
 	"extends": ["//"],
 	"tasks": {
 		"build": {
-			"inputs": ["src/**", "scripts/**", "types/**", "*.mjs", "*.js", "*.json"],
+			"inputs": ["$TURBO_DEFAULT$", "!test/**"],
 			"outputs": ["dist/**", "bootstrap.js", "worker-metafiles/**"],
-			"env": ["CI_OS"]
+			"env": ["CI_OS", "SPARROW_SOURCE_KEY"]
 		},
 		"test:ci": {
-			"inputs": ["test/**"],
 			"dependsOn": ["build"],
-			"env": ["MINIFLARE_WORKERD_PATH"]
+			"env": ["MINIFLARE_WORKERD_PATH", "MINIFLARE_WORKERD_CONFIG_DEBUG"]
 		}
 	}
 }

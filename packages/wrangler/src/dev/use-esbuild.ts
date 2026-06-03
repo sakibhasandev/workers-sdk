@@ -12,10 +12,13 @@ import {
 	getWrangler1xLegacyModuleReferences,
 	noopModuleCollector,
 } from "../deployment-bundle/module-collection";
-import type { Config } from "../config";
 import type { SourceMapMetadata } from "../deployment-bundle/bundle";
-import type { Entry } from "../deployment-bundle/entry";
-import type { CfModule, CfModuleType } from "../deployment-bundle/worker";
+import type {
+	CfModule,
+	CfModuleType,
+	Config,
+	Entry,
+} from "@cloudflare/workers-utils";
 import type { Metafile } from "esbuild";
 import type { NodeJSCompatMode } from "miniflare";
 
@@ -42,12 +45,14 @@ export function runBuild(
 		rules,
 		tsconfig,
 		minify,
+		keepNames,
 		nodejsCompatMode,
+		compatibilityDate,
+		compatibilityFlags,
 		define,
 		alias,
 		noBundle,
 		findAdditionalModules,
-		mockAnalyticsEngineDatasets,
 		durableObjects,
 		workflows,
 		local,
@@ -57,6 +62,7 @@ export function runBuild(
 		onStart,
 		defineNavigatorUserAgent,
 		checkFetch,
+		pythonModulesExcludes,
 	}: {
 		entry: Entry;
 		destination: string | undefined;
@@ -69,12 +75,14 @@ export function runBuild(
 		alias: Config["alias"];
 		tsconfig: string | undefined;
 		minify: boolean | undefined;
+		keepNames: boolean;
 		nodejsCompatMode: NodeJSCompatMode | undefined;
+		compatibilityDate: string | undefined;
+		compatibilityFlags: string[] | undefined;
 		noBundle: boolean;
 		findAdditionalModules: boolean | undefined;
 		durableObjects: Config["durable_objects"];
 		workflows: Config["workflows"];
-		mockAnalyticsEngineDatasets: Config["analytics_engine_datasets"];
 		local: boolean;
 		targetConsumer: "dev" | "deploy";
 		testScheduled: boolean;
@@ -82,6 +90,7 @@ export function runBuild(
 		onStart: () => void;
 		defineNavigatorUserAgent: boolean;
 		checkFetch: boolean;
+		pythonModulesExcludes?: string[];
 	},
 	setBundle: (
 		cb: (previous: EsbuildBundle | undefined) => EsbuildBundle
@@ -106,7 +115,12 @@ export function runBuild(
 	async function getAdditionalModules() {
 		return noBundle
 			? dedupeModulesByName([
-					...((await doFindAdditionalModules(entry, rules)) ?? []),
+					...((await doFindAdditionalModules(
+						entry,
+						rules,
+						false,
+						pythonModulesExcludes ?? []
+					)) ?? []),
 					...additionalModules,
 				])
 			: additionalModules;
@@ -150,12 +164,14 @@ export function runBuild(
 						watch: true,
 						tsconfig,
 						minify,
+						keepNames,
 						nodejsCompatMode,
+						compatibilityDate,
+						compatibilityFlags,
 						doBindings: durableObjects.bindings,
 						workflowBindings: workflows,
 						alias,
 						define,
-						mockAnalyticsEngineDatasets,
 						targetConsumer,
 						testScheduled,
 						plugins: [logBuildOutput(nodejsCompatMode, onStart, updateBundle)],
@@ -172,6 +188,8 @@ export function runBuild(
 						// sourcemap defaults to true in dev
 						sourcemap: undefined,
 						checkFetch,
+
+						metafile: undefined,
 					})
 				: undefined;
 
@@ -182,19 +200,14 @@ export function runBuild(
 		// trigger "builds" when any change
 		if (noBundle) {
 			const watching = [path.resolve(entry.moduleRoot)];
-			// Check whether we need to watch a Python requirements.txt file.
-			const watchPythonRequirements =
-				getBundleType(entry.format, entry.file) === "python"
-					? path.resolve(entry.projectRoot, "requirements.txt")
-					: undefined;
-
-			if (watchPythonRequirements) {
-				watching.push(watchPythonRequirements);
-			}
-
 			const watcher = watch(watching, {
 				persistent: true,
-				ignored: [".git", "node_modules"],
+				// Ignore VCS dirs, dependencies, and the .wrangler dir (which
+				// contains miniflare state/cache files written by workerd at
+				// runtime — watching them causes an infinite reload loop).
+				// chokidar v4 normalises paths to forward slashes before
+				// matching, so a regex on path segments works cross-platform.
+				ignored: /[/\\](\.git|node_modules|\.wrangler)([/\\]|$)/,
 			}).on("change", async (_event) => {
 				await updateBundle();
 			});
@@ -217,12 +230,22 @@ export function runBuild(
 		}));
 	}
 
-	build().catch((err) => {
+	const buildPromise = build().catch((err) => {
 		// If esbuild fails on first run, we want to quit the process
 		// since we can't recover from here
 		// related: https://github.com/evanw/esbuild/issues/1037
 		onErr(err);
 	});
 
-	return () => stopWatching?.();
+	return async () => {
+		// Wait for the initial build to settle so that `stopWatching` is
+		// assigned (on success) or the esbuild context has been disposed
+		// by `bundle.ts`'s catch block (on failure). Without this await,
+		// teardown can return before `ctx.dispose()` has run, leaving the
+		// esbuild child process alive and preventing Node from exiting.
+		// Errors from `build()` are already routed to `onErr` above, so we
+		// don't need to handle rejections here.
+		await buildPromise;
+		await stopWatching?.();
+	};
 }

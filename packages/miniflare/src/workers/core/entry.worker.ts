@@ -1,24 +1,20 @@
-import {
-	blue,
-	bold,
-	Colorize,
-	green,
-	grey,
-	red,
-	reset,
-	yellow,
-} from "kleur/colors";
+import { blue, bold, green, grey, red, reset, yellow } from "kleur/colors";
 import { HttpError, LogLevel, SharedHeaders } from "miniflare:shared";
 import { isCompressedByCloudflareFL } from "../../shared/mime-types";
-import { CoreBindings, CoreHeaders } from "./constants";
+import { CoreBindings, CoreHeaders, CorePaths } from "./constants";
 import { handleEmail } from "./email";
 import { STATUS_CODES } from "./http";
-import { matchRoutes, WorkerRoute } from "./routing";
+import { matchRoutes } from "./routing";
 import { handleScheduled } from "./scheduled";
+import type { WorkerRoute } from "./routing";
+import type { Colorize } from "kleur/colors";
 
 type Env = {
 	[CoreBindings.SERVICE_LOOPBACK]: Fetcher;
 	[CoreBindings.SERVICE_USER_FALLBACK]: Fetcher;
+	[CoreBindings.SERVICE_LOCAL_EXPLORER]: Fetcher;
+	[CoreBindings.SERVICE_STREAM]?: Fetcher;
+	[CoreBindings.SERVICE_IMAGES_DELIVERY]?: Fetcher;
 	[CoreBindings.TEXT_CUSTOM_SERVICE]: string;
 	[CoreBindings.TEXT_UPSTREAM_URL]?: string;
 	[CoreBindings.JSON_CF_BLOB]: IncomingRequestCfProperties;
@@ -28,6 +24,8 @@ type Env = {
 	[CoreBindings.DURABLE_OBJECT_NAMESPACE_PROXY]: DurableObjectNamespace;
 	[CoreBindings.DATA_PROXY_SHARED_SECRET]?: ArrayBuffer;
 	[CoreBindings.TRIGGER_HANDLERS]: boolean;
+	[CoreBindings.LOG_REQUESTS]: boolean;
+	[CoreBindings.STRIP_DISABLE_PRETTY_ERROR]: boolean;
 } & {
 	[K in `${typeof CoreBindings.SERVICE_USER_ROUTE_PREFIX}${string}`]:
 		| Fetcher
@@ -35,6 +33,7 @@ type Env = {
 };
 
 const encoder = new TextEncoder();
+
 function getUserRequest(
 	request: Request<unknown, IncomingRequestCfProperties>,
 	env: Env,
@@ -74,6 +73,8 @@ function getUserRequest(
 
 	// If Miniflare was configured with `upstream`, then we use this to override the url and host in the request.
 	const upstreamUrl = env[CoreBindings.TEXT_UPSTREAM_URL];
+	// Store the original hostname before it gets rewritten by upstream
+	const originalHostname = upstreamUrl !== undefined ? url.host : undefined;
 	if (upstreamUrl !== undefined) {
 		// If a custom `upstream` was specified, make sure the URL starts with it
 		let path = url.pathname + url.search;
@@ -97,16 +98,20 @@ function getUserRequest(
 	// https://developers.cloudflare.com/fundamentals/reference/http-request-headers/#accept-encoding
 	request.headers.set("Accept-Encoding", "br, gzip");
 
-	// `miniflare.dispatchFetch(request)` strips any `sec-fetch-mode` header. This allows clients to
-	// send it over a `x-mf-sec-fetch-mode` header instead (currently required by `vite preview`)
-	const secFetchMode = request.headers.get("X-Mf-Sec-Fetch-Mode");
+	const secFetchMode = request.headers.get(CoreHeaders.SEC_FETCH_MODE);
 	if (secFetchMode) {
 		request.headers.set("Sec-Fetch-Mode", secFetchMode);
 	}
-	request.headers.delete("X-Mf-Sec-Fetch-Mode");
+	request.headers.delete(CoreHeaders.SEC_FETCH_MODE);
 
 	if (rewriteHeadersFromOriginalUrl) {
 		request.headers.set("Host", url.host);
+	}
+
+	// Set the original hostname header when using upstream, so Workers can
+	// access the original hostname even after the Host header is rewritten
+	if (originalHostname !== undefined) {
+		request.headers.set(CoreHeaders.ORIGINAL_HOSTNAME, originalHostname);
 	}
 
 	if (clientIp && !request.headers.get("CF-Connecting-IP")) {
@@ -123,7 +128,9 @@ function getUserRequest(
 
 	request.headers.delete(CoreHeaders.PROXY_SHARED_SECRET);
 	request.headers.delete(CoreHeaders.ORIGINAL_URL);
-	request.headers.delete(CoreHeaders.DISABLE_PRETTY_ERROR);
+	if (env[CoreBindings.STRIP_DISABLE_PRETTY_ERROR]) {
+		request.headers.delete(CoreHeaders.DISABLE_PRETTY_ERROR);
+	}
 	return request;
 }
 
@@ -138,6 +145,119 @@ function getTargetService(request: Request, url: URL, env: Env) {
 		service = env[`${CoreBindings.SERVICE_USER_ROUTE_PREFIX}${route}`];
 	}
 	return service;
+}
+
+const LOCALHOST_HOSTNAMES = ["localhost", "127.0.0.1", "[::1]"];
+
+function isCdnCgiRequest(url: string | null): boolean {
+	if (url === null) return false;
+
+	try {
+		return new URL(url).pathname.startsWith("/cdn-cgi/");
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Validates that a request to a /cdn-cgi/* endpoint originates from an allowed host.
+ * This check must happen BEFORE any header rewriting (getUserRequest) to ensure
+ * we're checking the actual browser-sent headers, not Miniflare rewritten ones.
+ */
+function validateCdnCgiRequest(
+	request: Request,
+	routes: WorkerRoute[],
+	upstreamUrl: string | undefined
+): void {
+	if (
+		!isCdnCgiRequest(request.url) &&
+		!isCdnCgiRequest(request.headers.get(CoreHeaders.ORIGINAL_URL))
+	) {
+		return;
+	}
+
+	// Subdomain matching should only apply to wildcard routes (e.g.
+	// "*.example.com/*"). Exact routes and the configured upstream hostname
+	// must match the request hostname exactly.
+	const exactHostnames = new Set<string>();
+	const wildcardHostnames = new Set<string>();
+	for (const route of routes) {
+		// route.hostname has already had the leading "*" stripped by parseRoutes,
+		// but wildcard routes still carry a leading "." (e.g., "*.example.com" -> ".example.com")
+		const hostname = route.hostname.replace(/^\./, "");
+		if (!hostname) {
+			continue;
+		}
+		if (route.allowHostnamePrefix) {
+			wildcardHostnames.add(hostname);
+		} else {
+			exactHostnames.add(hostname);
+		}
+	}
+	// Upstream is a single configured host, not a wildcard.
+	if (upstreamUrl) {
+		try {
+			const upstreamHostname = new URL(upstreamUrl).hostname;
+			if (upstreamHostname) {
+				exactHostnames.add(upstreamHostname);
+			}
+		} catch {
+			// Ignore invalid upstream URL
+		}
+	}
+
+	const hostHeader = request.headers.get("Host");
+	let hostHostname: string;
+	if (hostHeader) {
+		try {
+			hostHostname = new URL(`http://${hostHeader}`).hostname;
+		} catch {
+			throw new HttpError(403, "Invalid Host header");
+		}
+		if (!isHostnameAllowed(hostHostname, exactHostnames, wildcardHostnames)) {
+			throw new HttpError(403, "Invalid Host header");
+		}
+	}
+
+	const origin = request.headers.get("Origin");
+	if (origin) {
+		let originHostname: string;
+		try {
+			originHostname = new URL(origin).hostname;
+		} catch {
+			throw new HttpError(403, "Invalid Origin header");
+		}
+		if (!isHostnameAllowed(originHostname, exactHostnames, wildcardHostnames)) {
+			throw new HttpError(403, "Invalid Origin header");
+		}
+	}
+}
+
+/**
+ * Checks whether a hostname is allowed.
+ * - exactHostnames: must match exactly (configured non-wildcard routes, upstream)
+ * - wildcardHostnames: also match any subdomain (for wildcard routes like *.example.com)
+ *
+ * Localhost hostnames are always allowed.
+ */
+function isHostnameAllowed(
+	hostname: string,
+	exactHostnames: Set<string>,
+	wildcardHostnames: Set<string>
+): boolean {
+	if (LOCALHOST_HOSTNAMES.includes(hostname)) {
+		return true;
+	}
+	if (exactHostnames.has(hostname)) {
+		return true;
+	}
+	for (const allowed of wildcardHostnames) {
+		// Match the base domain or any subdomain
+		if (hostname === allowed || hostname.endsWith(`.${allowed}`)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 function maybePrettifyError(request: Request, response: Response, env: Env) {
@@ -173,9 +293,7 @@ function maybeInjectLiveReload(
 	}
 
 	const headers = new Headers(response.headers);
-	// Safety of `!`: `parseInt(null)` is `NaN`
-	// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-	const contentLength = parseInt(headers.get("content-length")!);
+	const contentLength = parseInt(headers.get("content-length") ?? "NaN");
 	if (!isNaN(contentLength)) {
 		headers.set(
 			"content-length",
@@ -299,14 +417,22 @@ function colourFromHTTPStatus(status: number): Colorize {
 	return blue;
 }
 
+const ADDITIONAL_RESPONSE_LOG_HEADER_NAME = "X-Mf-Additional-Response-Log";
+
 function maybeLogRequest(
 	req: Request,
 	res: Response,
 	env: Env,
 	ctx: ExecutionContext,
 	startTime: number
-) {
-	if (env[CoreBindings.JSON_LOG_LEVEL] < LogLevel.INFO) return;
+): Response {
+	res = new Response(res.body, res); // Ensure mutable headers
+	const additionalResponseLog = res.headers.get(
+		ADDITIONAL_RESPONSE_LOG_HEADER_NAME
+	);
+	res.headers.delete(ADDITIONAL_RESPONSE_LOG_HEADER_NAME);
+
+	if (env[CoreBindings.JSON_LOG_LEVEL] < LogLevel.INFO) return res;
 
 	const url = new URL(req.url);
 	const statusText = (res.statusText.trim() || STATUS_CODES[res.status]) ?? "";
@@ -315,6 +441,9 @@ function maybeLogRequest(
 		colourFromHTTPStatus(res.status)(`${bold(res.status)} ${statusText} `),
 		grey(`(${Date.now() - startTime}ms)`),
 	];
+	if (additionalResponseLog) {
+		lines.push(` ${grey(additionalResponseLog)}`);
+	}
 	const message = reset(lines.join(""));
 
 	ctx.waitUntil(
@@ -324,8 +453,13 @@ function maybeLogRequest(
 			body: message,
 		})
 	);
+
+	return res;
 }
 
+/**
+ * Proxy here refers to the 'magic proxy' used by getPlatformProxy
+ */
 function handleProxy(request: Request, env: Env) {
 	const ns = env[CoreBindings.DURABLE_OBJECT_NAMESPACE_PROXY];
 	// Always use the same singleton Durable Object instance, so we always have
@@ -355,9 +489,33 @@ export default <ExportedHandler<Env>>{
 				};
 		request = new Request(request, { cf });
 
-		// The proxy client will always specify an operation
-		const isProxy = request.headers.get(CoreHeaders.OP) !== null;
-		if (isProxy) return handleProxy(request, env);
+		// Restrict /cdn-cgi/* requests to allowed hostnames.
+		// These endpoints should be served only when the browser-sent Host and
+		// Origin headers match localhost, a configured route, or the configured upstream.
+		// This must happen before getUserRequest() so we validate the
+		// original browser-sent headers, not Miniflare-rewritten ones.
+		const requestUrl = new URL(request.url);
+		try {
+			validateCdnCgiRequest(
+				request,
+				env[CoreBindings.JSON_ROUTES],
+				env[CoreBindings.TEXT_UPSTREAM_URL]
+			);
+		} catch (e) {
+			if (e instanceof HttpError) {
+				return e.toResponse();
+			}
+			throw e;
+		}
+
+		// The magic proxy client (used by getPlatformProxy)
+		if (requestUrl.pathname === CorePaths.PLATFORM_PROXY) {
+			if (request.headers.get(CoreHeaders.OP) !== null) {
+				return handleProxy(request, env);
+			}
+
+			return new Response("Invalid proxy request", { status: 400 });
+		}
 
 		// `dispatchFetch()` will always inject this header. When
 		// calling this function, we never want to display the pretty-error page.
@@ -382,12 +540,28 @@ export default <ExportedHandler<Env>>{
 		}
 
 		try {
+			if (env[CoreBindings.SERVICE_LOCAL_EXPLORER]) {
+				if (
+					url.pathname === CorePaths.EXPLORER ||
+					url.pathname.startsWith(`${CorePaths.EXPLORER}/`)
+				) {
+					return await env[CoreBindings.SERVICE_LOCAL_EXPLORER].fetch(request);
+				}
+			}
+			const imagesDelivery = env[CoreBindings.SERVICE_IMAGES_DELIVERY];
+			if (
+				(url.pathname === CorePaths.IMAGE_DELIVERY ||
+					url.pathname.startsWith(`${CorePaths.IMAGE_DELIVERY}/`)) &&
+				imagesDelivery
+			) {
+				return await imagesDelivery.fetch(request);
+			}
 			if (env[CoreBindings.TRIGGER_HANDLERS]) {
 				if (
-					url.pathname === "/cdn-cgi/handler/scheduled" ||
-					/* legacy URL path */ url.pathname === "/cdn-cgi/mf/scheduled"
+					url.pathname === CorePaths.SCHEDULED ||
+					/* legacy URL path */ url.pathname === CorePaths.LEGACY_SCHEDULED
 				) {
-					if (url.pathname === "/cdn-cgi/mf/scheduled") {
+					if (url.pathname === CorePaths.LEGACY_SCHEDULED) {
 						ctx.waitUntil(
 							env[CoreBindings.SERVICE_LOOPBACK].fetch(
 								"http://localhost/core/log",
@@ -396,7 +570,7 @@ export default <ExportedHandler<Env>>{
 									headers: {
 										[SharedHeaders.LOG_LEVEL]: LogLevel.WARN.toString(),
 									},
-									body: `Triggering scheduled handlers via a request to \`/cdn-cgi/mf/scheduled\` is deprecated, and will be removed in a future version of Miniflare. Instead, send a request to \`/cdn-cgi/handler/scheduled\``,
+									body: `Triggering scheduled handlers via a request to \`${CorePaths.LEGACY_SCHEDULED}\` is deprecated, and will be removed in a future version of Miniflare. Instead, send a request to \`${CorePaths.SCHEDULED}\``,
 								}
 							)
 						);
@@ -404,7 +578,7 @@ export default <ExportedHandler<Env>>{
 					return await handleScheduled(url.searchParams, service);
 				}
 
-				if (url.pathname === "/cdn-cgi/handler/email") {
+				if (url.pathname === CorePaths.EMAIL) {
 					return await handleEmail(
 						url.searchParams,
 						request,
@@ -413,6 +587,22 @@ export default <ExportedHandler<Env>>{
 						ctx
 					);
 				}
+
+				if (url.pathname.startsWith(CorePaths.HANDLER_PREFIX)) {
+					return new Response(
+						`"${url.pathname}" is not a valid handler. Did you mean to use "${CorePaths.SCHEDULED}" or "${CorePaths.EMAIL}"?`,
+						{ status: 404 }
+					);
+				}
+			}
+
+			const streamService = env[CoreBindings.SERVICE_STREAM];
+			if (
+				(url.pathname === CorePaths.STREAM_VIDEO ||
+					url.pathname.startsWith(`${CorePaths.STREAM_VIDEO}/`)) &&
+				streamService
+			) {
+				return await streamService.fetch(request);
 			}
 
 			let response = await service.fetch(request);
@@ -421,7 +611,9 @@ export default <ExportedHandler<Env>>{
 			}
 			response = maybeInjectLiveReload(response, env, ctx);
 			response = ensureAcceptableEncoding(clientAcceptEncoding, response);
-			maybeLogRequest(request, response, env, ctx, startTime);
+			if (env[CoreBindings.LOG_REQUESTS]) {
+				response = maybeLogRequest(request, response, env, ctx, startTime);
+			}
 			return response;
 		} catch (e: any) {
 			return new Response(e?.stack ?? String(e), { status: 500 });

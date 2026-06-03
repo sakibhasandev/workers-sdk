@@ -1,16 +1,18 @@
+import { COMPLIANCE_REGION_CONFIG_PUBLIC } from "@cloudflare/workers-utils";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import WebSocket from "ws";
 import { version as packageVersion } from "../../package.json";
 import { fetchResult } from "../cfetch";
 import { proxy } from "../utils/constants";
 import type { Outcome, TailFilterMessage } from "./filters";
+import type { ComplianceConfig } from "@cloudflare/workers-utils";
 import type { Request } from "undici";
 
 export type { TailCLIFilters } from "./filters";
 export { translateCLICommandToFilterMessage } from "./filters";
 export { jsonPrintLogs, prettyPrintLogs } from "./printing";
 
-const TRACE_VERSION = "trace-v1";
+export const TRACE_VERSION = "trace-v1";
 
 /**
  * When creating a Tail, the response from the API contains
@@ -90,6 +92,7 @@ export async function createPagesTail({
 	debug = false,
 }: CreatePagesTailOptions) {
 	const tailRecord = await fetchResult<TailCreationApiResponse>(
+		COMPLIANCE_REGION_CONFIG_PUBLIC,
 		`/accounts/${accountId}/pages/projects/${projectName}/deployments/${deploymentId}/tails`,
 		{
 			method: "POST",
@@ -99,6 +102,7 @@ export async function createPagesTail({
 
 	const deleteTail = async () =>
 		fetchResult(
+			COMPLIANCE_REGION_CONFIG_PUBLIC,
 			`/accounts/${accountId}/pages/projects/${projectName}/deployments/${deploymentId}/tails/${tailRecord.id}`,
 			{ method: "DELETE" }
 		);
@@ -144,6 +148,7 @@ export async function createPagesTail({
  * @returns a websocket connection, an expiration, and a function to call to delete the tail
  */
 export async function createTail(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	filters: TailFilterMessage,
@@ -160,15 +165,19 @@ export async function createTail(
 		id: tailId,
 		url: websocketUrl,
 		expires_at: expiration,
-	} = await fetchResult<TailCreationApiResponse>(createTailUrl, {
-		method: "POST",
-		body: JSON.stringify(filters),
-	});
+	} = await fetchResult<TailCreationApiResponse>(
+		complianceConfig,
+		createTailUrl,
+		{
+			method: "POST",
+			body: JSON.stringify(filters),
+		}
+	);
 
 	// delete the tail (not yet!)
 	const deleteUrl = makeDeleteTailUrl(accountId, workerName, tailId, env);
 	async function deleteTail() {
-		await fetchResult(deleteUrl, { method: "DELETE" });
+		await fetchResult(complianceConfig, deleteUrl, { method: "DELETE" });
 	}
 
 	const p = proxy ? { agent: new HttpsProxyAgent(proxy) } : {};
@@ -177,7 +186,7 @@ export async function createTail(
 	const tail = new WebSocket(websocketUrl, TRACE_VERSION, {
 		headers: {
 			"Sec-WebSocket-Protocol": TRACE_VERSION, // needs to be `trace-v1` to be accepted
-			"User-Agent": `wrangler-js/${packageVersion}`,
+			"User-Agent": `wrangler/${packageVersion}`,
 		},
 		...p,
 	});
@@ -248,6 +257,11 @@ export type TailEventMessage = {
 		 * When the exception was raised/thrown
 		 */
 		timestamp: number;
+
+		/**
+		 * The stack trace of the exception, sourcemaps are already resolved.
+		 */
+		stack?: string;
 	}[];
 
 	/**
@@ -255,7 +269,7 @@ export type TailEventMessage = {
 	 */
 	logs: {
 		message: unknown[];
-		level: string; // TODO: make this a union of possible values
+		level: "debug" | "info" | "log" | "warn" | "error";
 		timestamp: number;
 	}[];
 

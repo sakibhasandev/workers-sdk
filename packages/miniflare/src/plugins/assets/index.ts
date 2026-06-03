@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path, { join } from "node:path";
 import {
 	CONTENT_HASH_OFFSET,
@@ -27,7 +28,6 @@ import {
 	maybeGetFile,
 } from "@cloudflare/workers-shared/utils/helpers";
 import {
-	AssetConfig,
 	HeadersSchema,
 	RedirectsSchema,
 } from "@cloudflare/workers-shared/utils/types";
@@ -36,12 +36,9 @@ import SCRIPT_ASSETS from "worker:assets/assets";
 import SCRIPT_ASSETS_KV from "worker:assets/assets-kv";
 import SCRIPT_ROUTER from "worker:assets/router";
 import SCRIPT_RPC_PROXY from "worker:assets/rpc-proxy";
-import { z } from "zod";
-import { Service } from "../../runtime";
-import { Log } from "../../shared";
 import { SharedBindings } from "../../workers";
 import { getUserServiceName } from "../core";
-import { Plugin, ProxyNodeBinding } from "../shared";
+import { ProxyNodeBinding } from "../shared";
 import {
 	ASSETS_KV_SERVICE_NAME,
 	ASSETS_PLUGIN_NAME,
@@ -50,6 +47,16 @@ import {
 	RPC_PROXY_SERVICE_NAME,
 } from "./constants";
 import { AssetsOptionsSchema } from "./schema";
+import type { Service } from "../../runtime";
+import type { Plugin } from "../shared";
+import type { Logger } from "@cloudflare/workers-shared";
+import type { AssetConfig } from "@cloudflare/workers-shared/utils/types";
+import type { z } from "zod";
+
+// Cache of temp directories created for missing asset directories, keyed by
+// the Worker's name followed by the assets directory path. Prevents accumulating
+// orphaned temp directories when getServices is called repeatedly
+const tempDirCache = new Map<string, string>();
 
 export const ASSETS_PLUGIN: Plugin<typeof AssetsOptionsSchema> = {
 	options: AssetsOptionsSchema,
@@ -77,43 +84,71 @@ export const ASSETS_PLUGIN: Plugin<typeof AssetsOptionsSchema> = {
 		};
 	},
 
-	async getServices({ options }) {
+	async getServices({ options, log }) {
 		if (!options.assets) {
 			return [];
+		}
+
+		let assetDirectory = options.assets.directory;
+		const directoryStats = await fs.stat(assetDirectory).catch((err) => {
+			if (err?.code === "ENOENT") {
+				return undefined;
+			}
+			throw err;
+		});
+		if (!directoryStats) {
+			// If the assets directory doesn't exist yet (e.g. the build output
+			// hasn't been generated), create an empty temp directory so that the
+			// asset services can still start up with zero assets.
+			// Reuse a previously created temp directory for this path to avoid
+			// accumulating orphaned temp directories on repeated calls.
+			const cacheKey = `${options.assets.workerName}:${assetDirectory}`;
+			const cached = tempDirCache.get(cacheKey);
+			const cachedExists = cached
+				? await fs.stat(cached).catch(() => undefined)
+				: undefined;
+			if (cached && cachedExists) {
+				assetDirectory = cached;
+			} else {
+				assetDirectory = await fs.mkdtemp(
+					path.join(os.tmpdir(), "miniflare-assets-")
+				);
+				tempDirCache.set(cacheKey, assetDirectory);
+			}
 		}
 
 		const storageServiceName = `${ASSETS_PLUGIN_NAME}:storage`;
 		const storageService: Service = {
 			name: storageServiceName,
 			disk: {
-				path: options.assets.directory,
+				path: assetDirectory,
 				writable: true,
 				allowDotfiles: true,
 			},
 		};
 
-		const { encodedAssetManifest, assetsReverseMap } = await buildAssetManifest(
-			options.assets.directory
-		);
+		const { encodedAssetManifest, assetsReverseMap } =
+			await buildAssetManifest(assetDirectory);
 
-		const redirectsFile = join(options.assets.directory, REDIRECTS_FILENAME);
-		const headersFile = join(options.assets.directory, HEADERS_FILENAME);
+		const redirectsFile = join(assetDirectory, REDIRECTS_FILENAME);
+		const headersFile = join(assetDirectory, HEADERS_FILENAME);
 
 		const redirectsContents = maybeGetFile(redirectsFile);
 		const headersContents = maybeGetFile(headersFile);
 
-		const logger = new Log();
 		const assetParserLogger = {
-			debug: (message: string) => logger.debug(message),
-			log: (message: string) => logger.info(message),
-			info: (message: string) => logger.info(message),
-			warn: (message: string) => logger.warn(message),
-			error: (error: Error) => logger.error(error),
-		};
+			debug: (message) => log.debug(message),
+			log: (message) => log.info(message),
+			info: (message) => log.info(message),
+			warn: (message) => log.warn(message),
+			error: (error) => log.error(error),
+		} satisfies Logger;
 
 		let parsedRedirects: AssetConfig["redirects"] | undefined;
 		if (redirectsContents !== undefined) {
-			const redirects = parseRedirects(redirectsContents);
+			const redirects = parseRedirects(redirectsContents, {
+				htmlHandling: options.assets.assetConfig?.html_handling,
+			});
 			parsedRedirects = RedirectsSchema.parse(
 				constructRedirects({
 					redirects,
@@ -141,6 +176,8 @@ export const ASSETS_PLUGIN: Plugin<typeof AssetsOptionsSchema> = {
 			...options.assets.assetConfig,
 			redirects: parsedRedirects,
 			headers: parsedHeaders,
+			debug: true,
+			has_static_routing: Boolean(options.assets.routerConfig?.static_routing),
 		};
 
 		const id = options.assets.workerName;
@@ -174,7 +211,7 @@ export const ASSETS_PLUGIN: Plugin<typeof AssetsOptionsSchema> = {
 			worker: {
 				// TODO: read these from the wrangler.toml
 				compatibilityDate: "2024-07-31",
-				compatibilityFlags: ["nodejs_compat"],
+				compatibilityFlags: ["nodejs_compat", "enable_ctx_exports"],
 				modules: [
 					{
 						name: "asset-worker.mjs",
@@ -205,7 +242,11 @@ export const ASSETS_PLUGIN: Plugin<typeof AssetsOptionsSchema> = {
 			worker: {
 				// TODO: read these from the wrangler.toml
 				compatibilityDate: "2024-07-31",
-				compatibilityFlags: ["nodejs_compat", "no_nodejs_compat_v2"],
+				compatibilityFlags: [
+					"nodejs_compat",
+					"no_nodejs_compat_v2",
+					"enable_ctx_exports",
+				],
 				modules: [
 					{
 						name: "router-worker.mjs",

@@ -1,9 +1,9 @@
-/* eslint-disable turbo/no-undeclared-env-vars */
 import childProcess, { execSync } from "node:child_process";
 import fs, { writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import util from "node:util";
+import { removeDir } from "@cloudflare/workers-utils";
 import getPort from "get-port";
 import treeKill from "tree-kill";
 import { dedent } from "ts-dedent";
@@ -41,8 +41,12 @@ export async function startMockNpmRegistry(...targetPackages: string[]) {
 	);
 
 	console.log(
-		`Starting up local npm registry on http://localhost:${registryPort} at ${registryPath}`
+		`Starting up local npm registry on http://localhost:${registryPort} at ${registryPath} with ${pkgs.size} packages published:`
 	);
+
+	for (const [pkg, pkgPath] of pkgs.entries()) {
+		console.log(` - ${pkg} (${pkgPath})`);
+	}
 
 	let stopServer = await startVerdaccioServer(configPath);
 
@@ -71,6 +75,24 @@ export async function startMockNpmRegistry(...targetPackages: string[]) {
 	const revert_npm_config_registry = overrideProcessEnv(
 		"npm_config_registry",
 		`http://localhost:${registryPort}`
+	);
+	// `pnpm run` exports `npm_config_minimum_release_age` from the workspace
+	// pnpm-workspace.yaml to subprocess env vars, but does NOT export the
+	// matching `minimumReleaseAgeExclude` array. Tests using this mock registry
+	// install freshly-published first-party packages, so the 24h cooldown would
+	// reject them. Set the exclude list as a comma-separated env var so the
+	// constraint still applies to other (third-party) deps pulled via uplinks.
+	const revert_npm_config_minimum_release_age_exclude = overrideProcessEnv(
+		"npm_config_minimum_release_age_exclude",
+		[
+			...pkgs.keys(),
+			// workerd and @cloudflare/workers-types are pulled in transitively
+			// (e.g. via miniflare) and may have been bumped same-day. Keep this
+			// list in sync with `minimumReleaseAgeExclude` in pnpm-workspace.yaml.
+			"workerd",
+			"@cloudflare/workerd-*",
+			"@cloudflare/workers-types",
+		].join(",")
 	);
 
 	if (debugLog.enabled) {
@@ -101,11 +123,12 @@ export async function startMockNpmRegistry(...targetPackages: string[]) {
 		revert_NPM_CONFIG_USERCONFIG();
 		revert_npm_config_registry();
 		revert_npm_config_userconfig();
+		revert_npm_config_minimum_release_age_exclude();
 		if (debugLog.enabled) {
 			debugLog("After");
 			debugLog(execSync("pnpm config list", { encoding: "utf8" }));
 		}
-		await fs.rm(registryPath, { recursive: true, maxRetries: 10 });
+		await removeDir(registryPath);
 	};
 }
 
@@ -132,6 +155,7 @@ async function getPackagesToPublish(names: string[]) {
 				`{ package(name: "${name}") { path, allDependencies { items { name, path } } } }`
 			);
 			const results = JSON.parse(
+				// eslint-disable-next-line workers-sdk/no-unsafe-command-execution -- The following command uses turboQueryPath which is a path we computed so it is safe to run
 				execSync("pnpm exec turbo query " + turboQueryPath, {
 					encoding: "utf8",
 					stdio: "pipe",
@@ -159,7 +183,7 @@ async function getPackagesToPublish(names: string[]) {
 
 		return deployableDeps;
 	} finally {
-		await fs.rm(tmpPath, { recursive: true, maxRetries: 10 });
+		await removeDir(tmpPath);
 	}
 }
 

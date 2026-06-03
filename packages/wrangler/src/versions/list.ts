@@ -1,6 +1,6 @@
-import { logRaw } from "@cloudflare/cli";
+import { logRaw } from "@cloudflare/cli-shared-helpers";
+import { UserError } from "@cloudflare/workers-utils";
 import { createCommand } from "../core/create-command";
-import { UserError } from "../errors";
 import * as metrics from "../metrics";
 import { requireAuth } from "../user";
 import formatLabelledValues from "../utils/render-labelled-values";
@@ -8,6 +8,7 @@ import { fetchDeployableVersions } from "./api";
 import type { ApiVersion, VersionCache } from "./types";
 
 const BLANK_INPUT = "-"; // To be used where optional user-input is displayed and the value is nullish
+const VERSION_LIST_LIMIT = 10;
 
 export const versionsListCommand = createCommand({
 	metadata: {
@@ -25,7 +26,7 @@ export const versionsListCommand = createCommand({
 			requiresArg: true,
 		},
 		json: {
-			describe: "Display output as clean JSON",
+			describe: "Display output as JSON",
 			type: "boolean",
 			default: false,
 		},
@@ -45,16 +46,20 @@ export const versionsListCommand = createCommand({
 		if (workerName === undefined) {
 			throw new UserError(
 				'You need to provide a name of your worker. Either pass it as a cli arg with `--name <name>` or in your config file as `name = "<name>"`',
-				{ telemetryMessage: true }
+				{ telemetryMessage: "versions list missing worker name" }
 			);
 		}
 
 		const versionCache: VersionCache = new Map();
+
+		// The versions API ignores pagination when `deployable=true`, so cap the command output client-side.
 		const versions = (
-			await fetchDeployableVersions(accountId, workerName, versionCache)
-		).sort((a, b) =>
-			a.metadata.created_on.localeCompare(b.metadata.created_on)
-		);
+			await fetchDeployableVersions(config, accountId, workerName, versionCache)
+		)
+			.sort((a, b) =>
+				a.metadata.created_on.localeCompare(b.metadata.created_on)
+			)
+			.slice(-VERSION_LIST_LIMIT);
 
 		if (args.json) {
 			logRaw(JSON.stringify(versions, null, 2));

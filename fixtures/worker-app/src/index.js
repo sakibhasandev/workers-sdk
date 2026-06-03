@@ -1,5 +1,5 @@
+import { randomBytes } from "@fixture/isomorphic-random";
 import cookie from "cookie";
-import { randomBytes } from "isomorphic-random-example";
 import { now } from "./dep";
 import { testExplicitResourceManagement } from "./explicit-resource-management";
 import { logErrors } from "./log";
@@ -25,6 +25,7 @@ export default {
 		const { pathname, origin, hostname, host } = new URL(request.url);
 		if (pathname.startsWith("/fav"))
 			return new Response("Not found", { status: 404 });
+		if (pathname === "/env") return Response.json(env.FOO);
 		if (pathname === "/version_metadata") return Response.json(env.METADATA);
 		if (pathname === "/random") return new Response(hexEncode(randomBytes(8)));
 		if (pathname === "/error") throw new Error("Oops!");
@@ -77,9 +78,9 @@ export default {
 
 		logErrors();
 
-		await fetch(new URL("http://example.com"));
+		await fetch(new URL("https://example.com"));
 		await fetch(
-			new Request("http://example.com", { method: "POST", body: "foo" })
+			new Request("https://example.com", { method: "POST", body: "foo" })
 		);
 
 		console.log("end of request");
@@ -100,5 +101,8 @@ export default {
 	scheduled(event, env, ctx) {
 		ctx.waitUntil(Promise.resolve(event.scheduledTime));
 		ctx.waitUntil(Promise.resolve(event.cron));
+	},
+	tail(events) {
+		console.log("tails", { events });
 	},
 };

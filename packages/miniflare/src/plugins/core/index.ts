@@ -1,71 +1,91 @@
-import assert from "assert";
-import { readFileSync } from "fs";
-import fs from "fs/promises";
-import path from "path";
-import { Readable } from "stream";
-import tls from "tls";
-import { TextEncoder } from "util";
-import { bold } from "kleur/colors";
+import assert from "node:assert";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { Readable } from "node:stream";
+import tls from "node:tls";
+import { TextEncoder } from "node:util";
+import { DEFAULT_CONTAINER_EGRESS_INTERCEPTOR_IMAGE } from "@cloudflare/containers-shared";
+import { getTodaysCompatDate, removeDirSync } from "@cloudflare/workers-utils";
 import { MockAgent } from "undici";
 import SCRIPT_ENTRY from "worker:core/entry";
+import STRIP_CF_CONNECTING_IP from "worker:core/strip-cf-connecting-ip";
 import { z } from "zod";
 import { fetch } from "../../http";
-import {
-	Extension,
-	kVoid,
-	Service,
-	ServiceDesignator,
-	supportedCompatibilityDate,
-	Worker_Binding,
-	Worker_DurableObjectNamespace,
-	Worker_Module,
-} from "../../runtime";
-import {
-	Json,
-	JsonSchema,
-	Log,
-	MiniflareCoreError,
-	PathSchema,
-} from "../../shared";
-import {
-	Awaitable,
-	CoreBindings,
-	CoreHeaders,
-	viewToBuffer,
-} from "../../workers";
+import { kVoid } from "../../runtime";
+import { JsonSchema, Log, MiniflareCoreError, PathSchema } from "../../shared";
+import { CoreBindings, CoreHeaders, viewToBuffer } from "../../workers";
 import { RPC_PROXY_SERVICE_NAME } from "../assets/constants";
 import { getCacheServiceName } from "../cache";
 import { DURABLE_OBJECTS_STORAGE_SERVICE_NAME } from "../do";
+import { IMAGES_PLUGIN_NAME } from "../images";
 import {
+	getUserBindingServiceName,
 	kUnsafeEphemeralUniqueKey,
 	parseRoutes,
-	Plugin,
 	ProxyNodeBinding,
+	remoteProxyClientWorker,
 	SERVICE_LOOPBACK,
 	WORKER_BINDING_SERVICE_LOOPBACK,
 } from "../shared";
+import { STREAM_PLUGIN_NAME } from "../stream";
 import {
 	CUSTOM_SERVICE_KNOWN_OUTBOUND,
 	CustomServiceKind,
 	getBuiltinServiceName,
-	getCustomServiceName,
+	getCustomFetchServiceName,
+	getCustomNodeServiceName,
 	getUserServiceName,
 	SERVICE_ENTRY,
+	SERVICE_LOCAL_EXPLORER,
 } from "./constants";
+import {
+	constructExplorerBindingMap,
+	constructExplorerWorkerOpts,
+	getExplorerServices,
+	wrapDurableObjectModules,
+} from "./explorer";
 import {
 	buildStringScriptPath,
 	convertModuleDefinition,
 	ModuleLocator,
-	SourceOptions,
+	type SourceOptions,
 	SourceOptionsSchema,
 	withSourceURL,
 } from "./modules";
 import { PROXY_SECRET } from "./proxy";
 import {
+	CustomFetchServiceSchema,
 	kCurrentWorker,
 	ServiceDesignatorSchema,
-	ServiceFetchSchema,
 } from "./services";
+import type { PluginWorkerOptions } from "..";
+import type {
+	Extension,
+	Service,
+	ServiceDesignator,
+	Worker_Binding,
+	Worker_ContainerEngine,
+	Worker_DurableObjectNamespace,
+	Worker_Module,
+} from "../../runtime";
+import type { Json } from "../../shared";
+import type { WorkerRegistry } from "../../shared/dev-registry-types";
+import type { Awaitable } from "../../workers";
+import type {
+	WorkflowOption,
+	DurableObjectClassNames,
+	Plugin,
+} from "../shared";
+import type { BindingIdMap } from "./types";
 
 // `workerd`'s `trustBrowserCas` should probably be named `trustSystemCas`.
 // Rather than using a bundled CA store like Node, it uses
@@ -84,15 +104,17 @@ if (process.env.NODE_EXTRA_CA_CERTS !== undefined) {
 		const extra = readFileSync(process.env.NODE_EXTRA_CA_CERTS, "utf8");
 		// Split bundle into individual certificates and add each individually:
 		// https://github.com/cloudflare/miniflare/pull/587/files#r1271579671
-		const pemBegin = "-----BEGIN";
-		for (const cert of extra.split(pemBegin)) {
-			if (cert.trim() !== "") trustedCertificates.push(pemBegin + cert);
+		const certs = extra.match(
+			/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g
+		);
+
+		if (certs !== null) {
+			trustedCertificates.push(...certs);
 		}
 	} catch {}
 }
 
 const encoder = new TextEncoder();
-const numericCompare = new Intl.Collator(undefined, { numeric: true }).compare;
 
 export function createFetchMock() {
 	return new MockAgent();
@@ -110,8 +132,14 @@ const UnusableStringSchema = z.string().transform(() => undefined);
 export const UnsafeDirectSocketSchema = z.object({
 	host: z.ostring(),
 	port: z.onumber(),
+	serviceName: z.ostring(),
 	entrypoint: z.ostring(),
 	proxy: z.oboolean(),
+});
+
+export const ExternalPluginSpecifier = z.object({
+	package: z.string(),
+	name: z.string(),
 });
 
 const CoreOptionsSchemaInput = z.intersection(
@@ -147,6 +175,20 @@ const CoreOptionsSchemaInput = z.intersection(
 		unsafeEphemeralDurableObjects: z.boolean().optional(),
 		unsafeDirectSockets: UnsafeDirectSocketSchema.array().optional(),
 
+		/**
+		 * When sending a request over the dev registry to a Worker's default entrypoint,
+		 * Miniflare _actually_ serves the request from the associated Assets proxy, so
+		 * that Assets can be served in front of the user-worker when configured.
+		 *
+		 * However, @cloudflare/vite-plugin bypasses Miniflare's native Assets handling
+		 * and does everything itself. We still want service bindings to a Vite app to
+		 * serve Assets in front of the worker when appropriate though, and so we let
+		 * the caller specify an alternative worker name whose service handles
+		 * default-entrypoint requests from the dev registry (e.g. a proxy worker
+		 * that serves assets in front of the user worker).
+		 */
+		unsafeOverrideFetchWorker: z.string().optional(),
+
 		unsafeEvalBinding: z.string().optional(),
 		unsafeUseModuleFallbackService: z.boolean().optional(),
 
@@ -155,6 +197,40 @@ const CoreOptionsSchemaInput = z.intersection(
 		 Router Worker)
 		 */
 		hasAssetsAndIsVitest: z.boolean().optional(),
+
+		tails: z.array(ServiceDesignatorSchema).optional(),
+		streamingTails: z.array(ServiceDesignatorSchema).optional(),
+
+		// Strip the CF-Connecting-IP header from outbound fetches
+		stripCfConnectingIp: z.boolean().default(true),
+
+		// Zone to use for the CF-Worker header in outbound fetches
+		// If not specified, defaults to `${worker-name}.example.com`
+		zone: z.string().optional(),
+
+		/** Configuration used to connect to the container engine */
+		containerEngine: z
+			.union([
+				z.object({
+					localDocker: z.object({
+						socketPath: z.string(),
+						containerEgressInterceptorImage: z.string().optional(),
+					}),
+				}),
+				z.string(),
+			])
+			.optional(),
+
+		unsafeBindings: z
+			.array(
+				z.object({
+					name: z.string(),
+					type: z.string(),
+					plugin: ExternalPluginSpecifier,
+					options: z.record(JsonSchema),
+				})
+			)
+			.optional(),
 	})
 );
 export const CoreOptionsSchema = CoreOptionsSchemaInput.transform((value) => {
@@ -176,45 +252,110 @@ export const CoreOptionsSchema = CoreOptionsSchemaInput.transform((value) => {
 	return value;
 });
 
-export const CoreSharedOptionsSchema = z.object({
-	rootPath: UnusableStringSchema.optional(),
+export type WorkerdStructuredLog = z.infer<typeof WorkerdStructuredLogSchema>;
 
-	host: z.string().optional(),
-	port: z.number().optional(),
-
-	https: z.boolean().optional(),
-	httpsKey: z.string().optional(),
-	httpsKeyPath: z.string().optional(),
-	httpsCert: z.string().optional(),
-	httpsCertPath: z.string().optional(),
-
-	inspectorPort: z.number().optional(),
-
-	verbose: z.boolean().optional(),
-
-	log: z.instanceof(Log).optional(),
-	handleRuntimeStdio: z
-		.function(z.tuple([z.instanceof(Readable), z.instanceof(Readable)]))
-		.optional(),
-
-	upstream: z.string().optional(),
-	// TODO: add back validation of cf object
-	cf: z.union([z.boolean(), z.string(), z.record(z.any())]).optional(),
-
-	liveReload: z.boolean().optional(),
-
-	// This is a shared secret between a proxy server and miniflare that can be
-	// passed in a header to prove that the request came from the proxy and not
-	// some malicious attacker.
-	unsafeProxySharedSecret: z.string().optional(),
-	unsafeModuleFallbackService: ServiceFetchSchema.optional(),
-	// Keep blobs when deleting/overwriting keys, required for stacked storage
-	unsafeStickyBlobs: z.boolean().optional(),
-	// Enable directly triggering user Worker handlers with paths like `/cdn-cgi/handler/scheduled`
-	unsafeTriggerHandlers: z.boolean().optional(),
-	// Enable logging requests
-	logRequests: z.boolean().default(true),
+export const WorkerdStructuredLogSchema = z.object({
+	timestamp: z.number(),
+	level: z.string(),
+	message: z.string(),
 });
+
+export const CoreSharedOptionsSchema = z
+	.object({
+		rootPath: UnusableStringSchema.optional(),
+
+		host: z.string().optional(),
+		port: z.number().optional(),
+
+		https: z.boolean().optional(),
+		httpsKey: z.string().optional(),
+		httpsKeyPath: z.string().optional(),
+		httpsCert: z.string().optional(),
+		httpsCertPath: z.string().optional(),
+
+		inspectorPort: z.number().optional(),
+		inspectorHost: z.string().optional(),
+
+		verbose: z.boolean().optional(),
+
+		log: z.instanceof(Log).optional(),
+		handleRuntimeStdio: z
+			.function(z.tuple([z.instanceof(Readable), z.instanceof(Readable)]))
+			.optional(),
+
+		handleStructuredLogs: z
+			.function(z.tuple([WorkerdStructuredLogSchema]))
+			.returns(z.void())
+			.optional(),
+
+		upstream: z.string().optional(),
+		// TODO: add back validation of cf object
+		cf: z.union([z.boolean(), z.string(), z.record(z.any())]).optional(),
+
+		liveReload: z.boolean().optional(),
+
+		// Enable auto service / durable objects discovery with the dev registry
+		unsafeDevRegistryPath: z.string().optional(),
+		// Called when external workers this instance depends on are updated in the dev registry
+		unsafeHandleDevRegistryUpdate: z
+			.function(z.tuple([z.custom<WorkerRegistry>()]))
+			.optional(),
+		// This is a shared secret between a proxy server and miniflare that can be
+		// passed in a header to prove that the request came from the proxy and not
+		// some malicious attacker.
+		unsafeProxySharedSecret: z.string().optional(),
+		unsafeModuleFallbackService: CustomFetchServiceSchema.optional(),
+		// Keep blobs when deleting/overwriting keys, required for stacked storage
+		unsafeStickyBlobs: z.boolean().optional(),
+		// Enable directly triggering user Worker handlers with paths like `/cdn-cgi/handler/scheduled`
+		unsafeTriggerHandlers: z.boolean().optional(),
+		// Extra environment variables to set on the spawned `workerd` subprocess.
+		// Merged on top of `process.env` and Miniflare's own defaults
+		// (e.g. `TZ=UTC`, `FORCE_COLOR`), so callers can override those defaults
+		// (for example, to test timezone-dependent behaviour).
+		unsafeRuntimeEnv: z.record(z.string()).optional(),
+		// Enable the local explorer at /cdn-cgi/explorer
+		unsafeLocalExplorer: z.boolean().optional(),
+		// Enable logging requests
+		logRequests: z.boolean().default(true),
+
+		// Path to the root directory for persisting data
+		// Used as the default for all plugins with the plugin name as the subdirectory name
+		defaultPersistRoot: z.string().optional(),
+		// Strip the MF-DISABLE_PRETTY_ERROR header from user request
+		stripDisablePrettyError: z.boolean().default(true),
+
+		// Whether to get structured logs from workerd or not (defaults to `true` is a
+		// `handleStructuredLogs` is set, to `false` otherwise)
+		// This option is useful in combination with a custom handleRuntimeStdio.
+		structuredWorkerdLogs: z.boolean().optional(),
+
+		// Enable telemetry for the local explorer.
+		telemetry: z
+			.object({
+				enabled: z.boolean().default(false),
+				deviceId: z.string().optional(),
+			})
+			.default({ enabled: false }),
+
+		// The stable, externally-reachable URL for this Miniflare instance
+		// (e.g. the Wrangler proxy URL or Vite dev server URL). Used by
+		// plugins like Stream to generate preview URLs that outlive runtime
+		// restarts. If not set, plugins fall back to the runtime entry URL.
+		publicUrl: z.string().url().optional(),
+	})
+	.refine(
+		({ structuredWorkerdLogs, handleStructuredLogs }) => {
+			if (structuredWorkerdLogs === false && handleStructuredLogs) {
+				return false;
+			}
+			return true;
+		},
+		{
+			message:
+				"A `handleStructuredLogs` has been provided but `structuredWorkerdLogs` is set to `false`",
+		}
+	);
 
 export const CORE_PLUGIN_NAME = "core";
 
@@ -238,10 +379,16 @@ const LIVE_RELOAD_SCRIPT_TEMPLATE = (
 })();
 </script>`;
 
-export const SCRIPT_CUSTOM_SERVICE = `addEventListener("fetch", (event) => {
+export const SCRIPT_CUSTOM_FETCH_SERVICE = `addEventListener("fetch", (event) => {
   const request = new Request(event.request);
-  request.headers.set("${CoreHeaders.CUSTOM_SERVICE}", ${CoreBindings.TEXT_CUSTOM_SERVICE});
+  request.headers.set("${CoreHeaders.CUSTOM_FETCH_SERVICE}", ${CoreBindings.TEXT_CUSTOM_SERVICE});
   request.headers.set("${CoreHeaders.ORIGINAL_URL}", request.url);
+  event.respondWith(${CoreBindings.SERVICE_LOOPBACK}.fetch(request));
+})`;
+
+export const SCRIPT_CUSTOM_NODE_SERVICE = `addEventListener("fetch", (event) => {
+  const request = new Request(event.request);
+  request.headers.set("${CoreHeaders.CUSTOM_NODE_SERVICE}", ${CoreBindings.TEXT_CUSTOM_SERVICE});
   event.respondWith(${CoreBindings.SERVICE_LOOPBACK}.fetch(request));
 })`;
 
@@ -255,12 +402,19 @@ function getCustomServiceDesignator(
 ): ServiceDesignator {
 	let serviceName: string;
 	let entrypoint: string | undefined;
+	let props: { json: string } | undefined;
 	if (typeof service === "function") {
 		// Custom `fetch` function
-		serviceName = getCustomServiceName(workerIndex, kind, name);
+		serviceName = getCustomFetchServiceName(workerIndex, kind, name);
 	} else if (typeof service === "object") {
+		if ("node" in service) {
+			serviceName = getCustomNodeServiceName(workerIndex, kind, name);
+		} else if ("remoteProxyConnectionString" in service) {
+			assert("name" in service && typeof service.name === "string");
+			serviceName = `${CORE_PLUGIN_NAME}:remote-proxy-service:${workerIndex}:${name}`;
+		}
 		// Worker with entrypoint
-		if ("name" in service) {
+		else if ("name" in service) {
 			if (service.name === kCurrentWorker) {
 				// TODO when fetch on WorkerEntrypoints with assets is fixed in dev: point this Router Worker if assets are present.
 				serviceName = getUserServiceName(refererName);
@@ -268,6 +422,9 @@ function getCustomServiceDesignator(
 				serviceName = getUserServiceName(service.name);
 			}
 			entrypoint = service.entrypoint;
+			if (service.props) {
+				props = { json: JSON.stringify(service.props) };
+			}
 		} else {
 			// Builtin workerd service: network, external, disk
 			serviceName = getBuiltinServiceName(workerIndex, kind, name);
@@ -282,7 +439,7 @@ function getCustomServiceDesignator(
 		// Regular user worker
 		serviceName = getUserServiceName(service);
 	}
-	return { name: serviceName, entrypoint };
+	return { name: serviceName, entrypoint, props };
 }
 
 function maybeGetCustomServiceService(
@@ -294,10 +451,28 @@ function maybeGetCustomServiceService(
 	if (typeof service === "function") {
 		// Custom `fetch` function
 		return {
-			name: getCustomServiceName(workerIndex, kind, name),
+			name: getCustomFetchServiceName(workerIndex, kind, name),
 			worker: {
-				serviceWorkerScript: SCRIPT_CUSTOM_SERVICE,
+				serviceWorkerScript: SCRIPT_CUSTOM_FETCH_SERVICE,
 				compatibilityDate: "2022-09-01",
+				compatibilityFlags: ["connect_pass_through"],
+				bindings: [
+					{
+						name: CoreBindings.TEXT_CUSTOM_SERVICE,
+						text: `${workerIndex}/${kind}${name}`,
+					},
+					WORKER_BINDING_SERVICE_LOOPBACK,
+				],
+			},
+		};
+	} else if (typeof service === "object" && "node" in service) {
+		// Custom Node.js style handler
+		return {
+			name: getCustomNodeServiceName(workerIndex, kind, name),
+			worker: {
+				serviceWorkerScript: SCRIPT_CUSTOM_NODE_SERVICE,
+				compatibilityDate: "2022-09-01",
+				compatibilityFlags: ["connect_pass_through"],
 				bindings: [
 					{
 						name: CoreBindings.TEXT_CUSTOM_SERVICE,
@@ -313,42 +488,35 @@ function maybeGetCustomServiceService(
 			name: getBuiltinServiceName(workerIndex, kind, name),
 			...service,
 		};
+	} else if (
+		typeof service === "object" &&
+		service.remoteProxyConnectionString !== undefined
+	) {
+		assert(
+			service.remoteProxyConnectionString &&
+				service.name &&
+				typeof service.name === "string"
+		);
+
+		return {
+			name: `${CORE_PLUGIN_NAME}:remote-proxy-service:${workerIndex}:${name}`,
+			worker: remoteProxyClientWorker(
+				service.remoteProxyConnectionString,
+				name
+			),
+		};
 	}
 }
 
 const FALLBACK_COMPATIBILITY_DATE = "2000-01-01";
 
-function getCurrentCompatibilityDate() {
-	// Get current compatibility date in UTC timezone
-	const now = new Date().toISOString();
-	return now.substring(0, now.indexOf("T"));
-}
-
-function validateCompatibilityDate(log: Log, compatibilityDate: string) {
-	if (numericCompare(compatibilityDate, getCurrentCompatibilityDate()) > 0) {
+function validateCompatibilityDate(compatibilityDate: string) {
+	if (compatibilityDate > getTodaysCompatDate()) {
 		// If this compatibility date is in the future, throw
 		throw new MiniflareCoreError(
 			"ERR_FUTURE_COMPATIBILITY_DATE",
 			`Compatibility date "${compatibilityDate}" is in the future and unsupported`
 		);
-	} else if (
-		numericCompare(compatibilityDate, supportedCompatibilityDate) > 0
-	) {
-		// If this compatibility date is greater than the maximum supported
-		// compatibility date of the runtime, but not in the future, warn,
-		// and use the maximum supported date instead
-		log.warn(
-			[
-				"The latest compatibility date supported by the installed Cloudflare Workers Runtime is ",
-				bold(`"${supportedCompatibilityDate}"`),
-				",\nbut you've requested ",
-				bold(`"${compatibilityDate}"`),
-				". Falling back to ",
-				bold(`"${supportedCompatibilityDate}"`),
-				"...",
-			].join("")
-		);
-		return supportedCompatibilityDate;
 	}
 	return compatibilityDate;
 }
@@ -379,6 +547,26 @@ export function maybeWrappedModuleToWorkerName(
 	if (name.startsWith(WRAPPED_MODULE_PREFIX)) {
 		return name.substring(WRAPPED_MODULE_PREFIX.length);
 	}
+}
+
+function getStripCfConnectingIpName(workerIndex: number) {
+	return `strip-cf-connecting-ip:${workerIndex}`;
+}
+
+function getGlobalOutbound(
+	workerIndex: number,
+	options: z.infer<typeof CORE_PLUGIN.options>
+) {
+	return options.outboundService === undefined
+		? undefined
+		: getCustomServiceDesignator(
+				/* referrer */ options.name,
+				workerIndex,
+				CustomServiceKind.KNOWN,
+				CUSTOM_SERVICE_KNOWN_OUTBOUND,
+				options.outboundService,
+				options.hasAssetsAndIsVitest
+			);
 }
 
 export const CORE_PLUGIN: Plugin<
@@ -525,7 +713,7 @@ export const CORE_PLUGIN: Plugin<
 		return Object.fromEntries(await Promise.all(bindingEntries));
 	},
 	async getServices({
-		log,
+		log: _log,
 		options,
 		sharedOptions,
 		workerBindings,
@@ -533,6 +721,7 @@ export const CORE_PLUGIN: Plugin<
 		wrappedBindingNames,
 		durableObjectClassNames,
 		additionalModules,
+		loopbackHost,
 		loopbackPort,
 	}) {
 		// Define regular user worker
@@ -577,8 +766,27 @@ export const CORE_PLUGIN: Plugin<
 		const classNames = durableObjectClassNames.get(serviceName);
 		const classNamesEntries = Array.from(classNames ?? []);
 
+		// Wrap Durable Object classes for the local explorer
+		// This injects a method onto user defined DO classes to allow
+		// us to introspect the sqlite databases, since these are not
+		// available on the stub.
+		const sqliteClasses = classNamesEntries.filter(
+			([, { enableSql }]) => enableSql
+		);
+		if (
+			sharedOptions.unsafeLocalExplorer &&
+			// service-format workers are not supported
+			"modules" in workerScript &&
+			sqliteClasses.length > 0 &&
+			"esModule" in workerScript.modules[0]
+		) {
+			workerScript.modules = wrapDurableObjectModules(
+				workerScript.modules,
+				sqliteClasses.map(([className]) => className)
+			);
+		}
+
 		const compatibilityDate = validateCompatibilityDate(
-			log,
 			options.compatibilityDate ?? FALLBACK_COMPATIBILITY_DATE
 		);
 
@@ -586,6 +794,7 @@ export const CORE_PLUGIN: Plugin<
 
 		const services: Service[] = [];
 		const extensions: Extension[] = [];
+
 		if (isWrappedBinding) {
 			const stringName = JSON.stringify(name);
 			function invalidWrapped(reason: string): never {
@@ -650,28 +859,32 @@ export const CORE_PLUGIN: Plugin<
 						classNamesEntries.map<Worker_DurableObjectNamespace>(
 							([
 								className,
-								{ enableSql, unsafeUniqueKey, unsafePreventEviction },
-							]) => {
-								if (unsafeUniqueKey === kUnsafeEphemeralUniqueKey) {
-									return {
-										className,
-										enableSql,
-										ephemeralLocal: kVoid,
-										preventEviction: unsafePreventEviction,
-									};
-								} else {
-									return {
-										className,
-										enableSql,
-										// This `uniqueKey` will (among other things) be used as part of the
-										// path when persisting to the file-system. `-` is invalid in
-										// JavaScript class names, but safe on filesystems (incl. Windows).
-										uniqueKey:
-											unsafeUniqueKey ?? `${options.name ?? ""}-${className}`,
-										preventEviction: unsafePreventEviction,
-									};
-								}
-							}
+								{
+									enableSql,
+									unsafeUniqueKey,
+									unsafePreventEviction: preventEviction,
+									container,
+								},
+							]) =>
+								unsafeUniqueKey === kUnsafeEphemeralUniqueKey
+									? {
+											className,
+											enableSql,
+											ephemeralLocal: kVoid,
+											preventEviction,
+											container,
+										}
+									: {
+											className,
+											enableSql,
+											// This `uniqueKey` will (among other things) be used as part of the
+											// path when persisting to the file-system. `-` is invalid in
+											// JavaScript class names, but safe on filesystems (incl. Windows).
+											uniqueKey:
+												unsafeUniqueKey ?? `${options.name ?? ""}-${className}`,
+											preventEviction,
+											container,
+										}
 						),
 					durableObjectStorage:
 						classNamesEntries.length === 0
@@ -679,23 +892,38 @@ export const CORE_PLUGIN: Plugin<
 							: options.unsafeEphemeralDurableObjects
 								? { inMemory: kVoid }
 								: { localDisk: DURABLE_OBJECTS_STORAGE_SERVICE_NAME },
-					globalOutbound:
-						options.outboundService === undefined
-							? undefined
-							: getCustomServiceDesignator(
-									/* referrer */ options.name,
-									workerIndex,
-									CustomServiceKind.KNOWN,
-									CUSTOM_SERVICE_KNOWN_OUTBOUND,
-									options.outboundService,
-									options.hasAssetsAndIsVitest
-								),
+					globalOutbound: options.stripCfConnectingIp
+						? { name: getStripCfConnectingIpName(workerIndex) }
+						: getGlobalOutbound(workerIndex, options),
 					cacheApiOutbound: { name: getCacheServiceName(workerIndex) },
 					moduleFallback:
 						options.unsafeUseModuleFallbackService &&
 						sharedOptions.unsafeModuleFallbackService !== undefined
-							? `localhost:${loopbackPort}`
+							? `${loopbackHost}:${loopbackPort}`
 							: undefined,
+					tails: options.tails?.map<ServiceDesignator>((service) => {
+						return getCustomServiceDesignator(
+							/* referrer */ options.name,
+							workerIndex,
+							CustomServiceKind.UNKNOWN,
+							name,
+							service,
+							options.hasAssetsAndIsVitest
+						);
+					}),
+					streamingTails: options.streamingTails?.map<ServiceDesignator>(
+						(service) => {
+							return getCustomServiceDesignator(
+								/* referrer */ options.name,
+								workerIndex,
+								CustomServiceKind.UNKNOWN,
+								name,
+								service,
+								options.hasAssetsAndIsVitest
+							);
+						}
+					),
+					containerEngine: getContainerEngine(options.containerEngine),
 				},
 			});
 		}
@@ -712,6 +940,27 @@ export const CORE_PLUGIN: Plugin<
 				if (maybeService !== undefined) services.push(maybeService);
 			}
 		}
+
+		for (const service of options.tails ?? []) {
+			const maybeService = maybeGetCustomServiceService(
+				workerIndex,
+				CustomServiceKind.UNKNOWN,
+				name,
+				service
+			);
+			if (maybeService !== undefined) services.push(maybeService);
+		}
+
+		for (const service of options.streamingTails ?? []) {
+			const maybeService = maybeGetCustomServiceService(
+				workerIndex,
+				CustomServiceKind.UNKNOWN,
+				name,
+				service
+			);
+			if (maybeService !== undefined) services.push(maybeService);
+		}
+
 		if (options.outboundService !== undefined) {
 			const maybeService = maybeGetCustomServiceService(
 				workerIndex,
@@ -720,6 +969,32 @@ export const CORE_PLUGIN: Plugin<
 				options.outboundService
 			);
 			if (maybeService !== undefined) services.push(maybeService);
+		}
+
+		if (options.stripCfConnectingIp) {
+			// Use the zone option if provided, otherwise default to `${worker-name}.example.com`
+			const workerName = options.name ?? "worker";
+			const cfWorkerValue = options.zone ?? `${workerName}.example.com`;
+			services.push({
+				name: getStripCfConnectingIpName(workerIndex),
+				worker: {
+					modules: [
+						{
+							name: "index.js",
+							esModule: STRIP_CF_CONNECTING_IP(),
+						},
+					],
+					compatibilityDate: "2025-01-01",
+					compatibilityFlags: ["connect_pass_through", "experimental"],
+					bindings: [
+						{
+							name: "CF_WORKER_ZONE",
+							text: cfWorkerValue,
+						},
+					],
+					globalOutbound: getGlobalOutbound(workerIndex, options),
+				},
+			});
 		}
 
 		return { services, extensions };
@@ -731,16 +1006,28 @@ export interface GlobalServicesOptions {
 	allWorkerRoutes: Map<string, string[]>;
 	fallbackWorkerName: string | undefined;
 	loopbackPort: number;
+	tmpPath: string;
 	log: Log;
+	/** All user workerd-native bindings, used for Miniflare's magic proxy and the local explorer worker */
 	proxyBindings: Worker_Binding[];
+	/** Pass Durable Object configuration for the explorer worker (has more info than proxyBindings)*/
+	durableObjectClassNames: DurableObjectClassNames;
+	/** Pass Workflow configuration for the explorer worker */
+	workflowOptions?: Map<string, WorkflowOption>;
+	/** All worker options for building per-worker resource bindings */
+	allWorkerOpts?: PluginWorkerOptions[];
 }
 export function getGlobalServices({
 	sharedOptions,
 	allWorkerRoutes,
 	fallbackWorkerName,
 	loopbackPort,
+	tmpPath,
 	log,
 	proxyBindings,
+	durableObjectClassNames,
+	workflowOptions,
+	allWorkerOpts,
 }: GlobalServicesOptions): Service[] {
 	// Collect list of workers we could route to, then parse and sort all routes
 	const workerNames = [...allWorkerRoutes.keys()];
@@ -776,9 +1063,56 @@ export function getGlobalServices({
 			name: CoreBindings.DATA_PROXY_SECRET,
 			data: PROXY_SECRET,
 		},
+		{
+			name: CoreBindings.STRIP_DISABLE_PRETTY_ERROR,
+			json: JSON.stringify(sharedOptions.stripDisablePrettyError),
+		},
 		// Add `proxyBindings` here, they'll be added to the `ProxyServer` `env`
 		...proxyBindings,
+		// Add cache service binding for purgeCache() API
+		{
+			name: CoreBindings.SERVICE_CACHE,
+			service: { name: getCacheServiceName(0) },
+		},
 	];
+	if (sharedOptions.unsafeLocalExplorer) {
+		serviceEntryBindings.push({
+			name: CoreBindings.SERVICE_LOCAL_EXPLORER,
+			service: {
+				name: SERVICE_LOCAL_EXPLORER,
+			},
+		});
+	}
+	const streamServiceEnabled = allWorkerOpts?.some(
+		(worker) =>
+			worker.stream?.stream !== undefined &&
+			!worker.stream.stream.remoteProxyConnectionString
+	);
+	if (streamServiceEnabled) {
+		serviceEntryBindings.push({
+			name: CoreBindings.SERVICE_STREAM,
+			service: {
+				name: getUserBindingServiceName(STREAM_PLUGIN_NAME, "service"),
+				entrypoint: "StreamBinding",
+			},
+		});
+	}
+	const imagesBinding = allWorkerOpts
+		?.map((worker) => worker.images?.images)
+		.find(
+			(images) => images !== undefined && !images.remoteProxyConnectionString
+		);
+	if (imagesBinding) {
+		serviceEntryBindings.push({
+			name: CoreBindings.SERVICE_IMAGES_DELIVERY,
+			service: {
+				name: getUserBindingServiceName(
+					IMAGES_PLUGIN_NAME,
+					imagesBinding.binding
+				),
+			},
+		});
+	}
 	if (sharedOptions.upstream !== undefined) {
 		serviceEntryBindings.push({
 			name: CoreBindings.TEXT_UPSTREAM_URL,
@@ -798,7 +1132,8 @@ export function getGlobalServices({
 			data: encoder.encode(liveReloadScript),
 		});
 	}
-	return [
+
+	const services: Service[] = [
 		{
 			name: SERVICE_LOOPBACK,
 			external: { http: { cfBlobHeader: CoreHeaders.CF_BLOB } },
@@ -844,6 +1179,119 @@ export function getGlobalServices({
 			},
 		},
 	];
+
+	if (sharedOptions.unsafeLocalExplorer) {
+		const localExplorerUiPath = resolveLocalExplorerUi(tmpPath);
+		const IDToBindingMap: BindingIdMap = constructExplorerBindingMap(
+			proxyBindings,
+			durableObjectClassNames,
+			workflowOptions
+		);
+		const hasDurableObjects = Object.keys(IDToBindingMap.do).length > 0;
+
+		const explorerWorkerOpts = constructExplorerWorkerOpts(
+			allWorkerOpts ?? [],
+			durableObjectClassNames
+		);
+		services.push(
+			...getExplorerServices({
+				localExplorerUiPath,
+				proxyBindings,
+				bindingIdMap: IDToBindingMap,
+				hasDurableObjects,
+				workerNames,
+				explorerWorkerOpts,
+				telemetry: sharedOptions.telemetry,
+			})
+		);
+	}
+
+	return services;
+}
+
+/**
+ * workerd's disk service needs a real filesystem directory. Under Yarn PnP,
+ * these bundled assets can live inside a real `.yarn/cache/*.zip` archive.
+ * Node can still read those paths through Yarn's patched filesystem hooks, but
+ * workerd can't mount a directory from inside the zip as a disk service.
+ */
+function resolveLocalExplorerUi(tmpPath: string) {
+	const bundledLocalExplorerUiPath = path.join(
+		__dirname,
+		"../local-explorer-ui"
+	);
+	if (!existsSync(bundledLocalExplorerUiPath)) {
+		throw new MiniflareCoreError(
+			"ERR_MISSING_EXPLORER_UI",
+			`Local Explorer UI assets not found at expected path: ${bundledLocalExplorerUiPath}`
+		);
+	}
+	if (!isPathInsideZip(bundledLocalExplorerUiPath)) {
+		return bundledLocalExplorerUiPath;
+	}
+
+	const localExplorerUiPath = path.join(
+		tmpPath,
+		CORE_PLUGIN_NAME,
+		"local-explorer-ui"
+	);
+	if (!existsSync(localExplorerUiPath)) {
+		const localExplorerUiRoot = path.dirname(localExplorerUiPath);
+		const stagedLocalExplorerUiPath = path.join(
+			localExplorerUiRoot,
+			`local-explorer-ui-staging-${process.pid}-${Date.now()}`
+		);
+
+		mkdirSync(localExplorerUiRoot, { recursive: true });
+		try {
+			copyDirectorySync(bundledLocalExplorerUiPath, stagedLocalExplorerUiPath);
+			renameSync(stagedLocalExplorerUiPath, localExplorerUiPath);
+		} catch (error) {
+			removeDirSync(stagedLocalExplorerUiPath);
+			throw error;
+		}
+	}
+
+	return localExplorerUiPath;
+}
+
+function isPathInsideZip(filePath: string) {
+	let currentPath = path.dirname(filePath);
+
+	while (currentPath !== path.dirname(currentPath)) {
+		if (path.extname(currentPath) === ".zip") {
+			const zipStats = statSync(currentPath, { throwIfNoEntry: false });
+			if (zipStats?.isFile()) {
+				return true;
+			}
+		}
+
+		currentPath = path.dirname(currentPath);
+	}
+
+	return false;
+}
+
+/**
+ * `cpSync()` treats the zip-backed PnP source path like a normal on-disk
+ * directory and hits `ENOTDIR` when that path actually points inside a `.zip`
+ * archive.
+ * `readdirSync()`, `statSync()`, and `readFileSync()` still work through
+ * Yarn's patched fs hooks, so copy the tree entry-by-entry instead.
+ */
+function copyDirectorySync(sourcePath: string, destinationPath: string) {
+	mkdirSync(destinationPath, { recursive: true });
+	for (const entry of readdirSync(sourcePath)) {
+		const sourceEntryPath = path.join(sourcePath, entry);
+		const destinationEntryPath = path.join(destinationPath, entry);
+		const sourceEntryStats = statSync(sourceEntryPath);
+
+		if (sourceEntryStats.isDirectory()) {
+			copyDirectorySync(sourceEntryPath, destinationEntryPath);
+		} else {
+			writeFileSync(destinationEntryPath, readFileSync(sourceEntryPath));
+		}
+	}
 }
 
 function getWorkerScript(
@@ -899,6 +1347,57 @@ function getWorkerScript(
 		code = withSourceURL(code, scriptPath);
 		return { serviceWorkerScript: code };
 	}
+}
+
+/**
+ * Returns the default containerEgressInterceptorImage. It's used for
+ * container network interception for local dev.
+ */
+function getContainerEgressInterceptorImage(): string {
+	return (
+		process.env.MINIFLARE_CONTAINER_EGRESS_IMAGE ??
+		DEFAULT_CONTAINER_EGRESS_INTERCEPTOR_IMAGE
+	);
+}
+
+/**
+ * Returns the Container engine configuration
+ * @param engineOrSocketPath Either a full engine config or a unix socket
+ * @returns The container engine, defaulting to the default docker socket located on linux/macOS at `unix:///var/run/docker.sock`
+ */
+function getContainerEngine(
+	engineOrSocketPath: Worker_ContainerEngine | string | undefined
+): Worker_ContainerEngine {
+	if (!engineOrSocketPath) {
+		// TODO: workerd does not support win named pipes
+		engineOrSocketPath =
+			process.platform === "win32"
+				? "//./pipe/docker_engine"
+				: "unix:///var/run/docker.sock";
+	}
+
+	// Egress interceptor is to support direct connectivity between the Container and Workers,
+	// it spawns a container in the same network namespace as the local dev container and
+	// intercepts traffic to redirect to Workerd.
+	const egressImage = getContainerEgressInterceptorImage();
+
+	if (typeof engineOrSocketPath === "string") {
+		return {
+			localDocker: {
+				socketPath: engineOrSocketPath,
+				containerEgressInterceptorImage: egressImage,
+			},
+		};
+	}
+
+	return {
+		localDocker: {
+			...engineOrSocketPath.localDocker,
+			containerEgressInterceptorImage:
+				engineOrSocketPath.localDocker.containerEgressInterceptorImage ??
+				egressImage,
+		},
+	};
 }
 
 export * from "./errors";

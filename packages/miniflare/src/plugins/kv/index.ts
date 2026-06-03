@@ -1,23 +1,19 @@
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 import SCRIPT_KV_NAMESPACE_OBJECT from "worker:kv/namespace";
 import { z } from "zod";
-import {
-	Service,
-	Worker_Binding,
-	Worker_Binding_DurableObjectNamespaceDesignator,
-} from "../../runtime";
 import { PathSchema } from "../../shared";
 import { SharedBindings } from "../../workers";
 import {
 	getMiniflareObjectBindings,
 	getPersistPath,
+	getUserBindingServiceName,
 	migrateDatabase,
 	namespaceEntries,
 	namespaceKeys,
 	objectEntryWorker,
 	PersistenceSchema,
-	Plugin,
 	ProxyNodeBinding,
+	remoteProxyClientWorker,
 	SERVICE_LOOPBACK,
 } from "../shared";
 import { KV_PLUGIN_NAME } from "./constants";
@@ -25,11 +21,32 @@ import {
 	getSitesBindings,
 	getSitesNodeBindings,
 	getSitesServices,
-	SitesOptions,
 } from "./sites";
+import type {
+	Service,
+	Worker_Binding,
+	Worker_Binding_DurableObjectNamespaceDesignator,
+} from "../../runtime";
+import type { Plugin, RemoteProxyConnectionString } from "../shared";
+import type { SitesOptions } from "./sites";
 
 export const KVOptionsSchema = z.object({
-	kvNamespaces: z.union([z.record(z.string()), z.string().array()]).optional(),
+	kvNamespaces: z
+		.union([
+			z.record(
+				z.union([
+					z.string(),
+					z.object({
+						id: z.string(),
+						remoteProxyConnectionString: z
+							.custom<RemoteProxyConnectionString>()
+							.optional(),
+					}),
+				])
+			),
+			z.string().array(),
+		])
+		.optional(),
 
 	// Workers Sites
 	sitePath: PathSchema.optional(),
@@ -42,7 +59,7 @@ export const KVSharedOptionsSchema = z.object({
 
 const SERVICE_NAMESPACE_PREFIX = `${KV_PLUGIN_NAME}:ns`;
 const KV_STORAGE_SERVICE_NAME = `${KV_PLUGIN_NAME}:storage`;
-const KV_NAMESPACE_OBJECT_CLASS_NAME = "KVNamespaceObject";
+export const KV_NAMESPACE_OBJECT_CLASS_NAME = "KVNamespaceObject";
 const KV_NAMESPACE_OBJECT: Worker_Binding_DurableObjectNamespaceDesignator = {
 	serviceName: SERVICE_NAMESPACE_PREFIX,
 	className: KV_NAMESPACE_OBJECT_CLASS_NAME,
@@ -62,9 +79,15 @@ export const KV_PLUGIN: Plugin<
 	sharedOptions: KVSharedOptionsSchema,
 	async getBindings(options) {
 		const namespaces = namespaceEntries(options.kvNamespaces);
-		const bindings = namespaces.map<Worker_Binding>(([name, id]) => ({
+		const bindings = namespaces.map<Worker_Binding>(([name, namespace]) => ({
 			name,
-			kvNamespace: { name: `${SERVICE_NAMESPACE_PREFIX}:${id}` },
+			kvNamespace: {
+				name: getUserBindingServiceName(
+					SERVICE_NAMESPACE_PREFIX,
+					namespace.id,
+					namespace.remoteProxyConnectionString
+				),
+			},
 		}));
 
 		if (isWorkersSitesEnabled(options)) {
@@ -91,19 +114,33 @@ export const KV_PLUGIN: Plugin<
 		options,
 		sharedOptions,
 		tmpPath,
+		defaultPersistRoot,
 		log,
 		unsafeStickyBlobs,
 	}) {
 		const persist = sharedOptions.kvPersist;
 		const namespaces = namespaceEntries(options.kvNamespaces);
-		const services = namespaces.map<Service>(([_, id]) => ({
-			name: `${SERVICE_NAMESPACE_PREFIX}:${id}`,
-			worker: objectEntryWorker(KV_NAMESPACE_OBJECT, id),
-		}));
+		const services = namespaces.map<Service>(
+			([name, { id, remoteProxyConnectionString }]) => ({
+				name: getUserBindingServiceName(
+					SERVICE_NAMESPACE_PREFIX,
+					id,
+					remoteProxyConnectionString
+				),
+				worker: remoteProxyConnectionString
+					? remoteProxyClientWorker(remoteProxyConnectionString, name)
+					: objectEntryWorker(KV_NAMESPACE_OBJECT, id),
+			})
+		);
 
 		if (services.length > 0) {
 			const uniqueKey = `miniflare-${KV_NAMESPACE_OBJECT_CLASS_NAME}`;
-			const persistPath = getPersistPath(KV_PLUGIN_NAME, tmpPath, persist);
+			const persistPath = getPersistPath(
+				KV_PLUGIN_NAME,
+				tmpPath,
+				defaultPersistRoot,
+				persist
+			);
 			await fs.mkdir(persistPath, { recursive: true });
 			const storageService: Service = {
 				name: KV_STORAGE_SERVICE_NAME,
@@ -147,7 +184,7 @@ export const KV_PLUGIN: Plugin<
 			// databases from the old location to the new location. Blobs are still
 			// stored in the same location.
 			for (const namespace of namespaces) {
-				await migrateDatabase(log, uniqueKey, persistPath, namespace[1]);
+				await migrateDatabase(log, uniqueKey, persistPath, namespace[1].id);
 			}
 		}
 
@@ -159,7 +196,7 @@ export const KV_PLUGIN: Plugin<
 	},
 
 	getPersistPath({ kvPersist }, tmpPath) {
-		return getPersistPath(KV_PLUGIN_NAME, tmpPath, kvPersist);
+		return getPersistPath(KV_PLUGIN_NAME, tmpPath, undefined, kvPersist);
 	},
 };
 

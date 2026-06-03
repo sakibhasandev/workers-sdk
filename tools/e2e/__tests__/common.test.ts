@@ -4,11 +4,13 @@ import {
 	deleteDatabase,
 	deleteKVNamespace,
 	deleteProject,
+	deleteR2Bucket,
 	deleteWorker,
 	listTmpDatabases,
 	listTmpE2EProjects,
 	listTmpE2EWorkers,
 	listTmpKVNamespaces,
+	listTmpR2Buckets,
 } from "../common";
 
 const originalAccountID = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -46,7 +48,6 @@ describe("listTmpE2EProjects()", () => {
 			.intercept({
 				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/pages/projects`,
 				query: {
-					per_page: 10,
 					page: 1,
 				},
 			})
@@ -65,6 +66,13 @@ describe("listTmpE2EProjects()", () => {
 						{ name: "pages-project-5", created_on: nowStr },
 						{ name: "pages-project-6", created_on: oldTimeStr },
 					],
+					result_info: {
+						page: 1,
+						per_page: 10,
+						count: 10,
+						total_count: 12,
+						total_pages: 2,
+					},
 				})
 			);
 
@@ -73,7 +81,6 @@ describe("listTmpE2EProjects()", () => {
 			.intercept({
 				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/pages/projects`,
 				query: {
-					per_page: 10,
 					page: 2,
 				},
 			})
@@ -84,6 +91,13 @@ describe("listTmpE2EProjects()", () => {
 						{ name: "tmp-e2e-project-5", created_on: nowStr },
 						{ name: "tmp-e2e-project-6", created_on: oldTimeStr },
 					],
+					result_info: {
+						page: 2,
+						per_page: 10,
+						count: 2,
+						total_count: 12,
+						total_pages: 2,
+					},
 				})
 			);
 
@@ -99,6 +113,7 @@ describe("listTmpE2EProjects()", () => {
 });
 
 describe("deleteProject()", () => {
+	// eslint-disable-next-line jest/expect-expect -- assertions are implicit via undici mock agent interceptors
 	it("makes a REST request to delete the given project", async () => {
 		const MOCK_PROJECT = "mock-pages-project";
 		agent
@@ -122,10 +137,7 @@ describe("listTmpKVNamespaces()", () => {
 				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces`,
 				method: "GET",
 				query: {
-					per_page: 100,
 					page: 1,
-					direction: "asc",
-					order: "title",
 				},
 			})
 			.reply(
@@ -144,6 +156,13 @@ describe("listTmpKVNamespaces()", () => {
 						{ id: "kv-10", title: "kv-10" },
 						...Array(90).fill({ id: "kv-10", title: "kv-10" }),
 					],
+					result_info: {
+						page: 1,
+						per_page: 10,
+						count: 10,
+						total_count: 11,
+						total_pages: 2,
+					},
 				})
 			);
 		agent
@@ -152,16 +171,20 @@ describe("listTmpKVNamespaces()", () => {
 				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces`,
 				method: "GET",
 				query: {
-					per_page: 100,
 					page: 2,
-					direction: "asc",
-					order: "title",
 				},
 			})
 			.reply(
 				200,
 				JSON.stringify({
 					result: [{ id: "kv-tmp-e2e-11", title: "kv-11" }],
+					result_info: {
+						page: 2,
+						per_page: 10,
+						count: 2,
+						total_count: 12,
+						total_pages: 2,
+					},
 				})
 			);
 
@@ -172,6 +195,7 @@ describe("listTmpKVNamespaces()", () => {
 });
 
 describe("deleteKVNamespace()", () => {
+	// eslint-disable-next-line jest/expect-expect -- assertions are implicit via undici mock agent interceptors
 	it("makes a REST request to delete the given project", async () => {
 		const MOCK_KV = "tmp_e2e_kv";
 		agent
@@ -195,7 +219,6 @@ describe("listTmpDatabases()", () => {
 				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/d1/database`,
 				method: "GET",
 				query: {
-					per_page: 100,
 					page: 1,
 				},
 			})
@@ -219,6 +242,13 @@ describe("listTmpDatabases()", () => {
 							created_at: oldTimeStr,
 						}),
 					],
+					result_info: {
+						page: 1,
+						per_page: 10,
+						count: 50,
+						total_count: 12,
+						total_pages: 2,
+					},
 				})
 			);
 		agent
@@ -227,7 +257,6 @@ describe("listTmpDatabases()", () => {
 				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/d1/database`,
 				method: "GET",
 				query: {
-					per_page: 100,
 					page: 2,
 				},
 			})
@@ -238,6 +267,13 @@ describe("listTmpDatabases()", () => {
 						{ uuid: "11", name: "db-11", created_at: nowStr },
 						{ uuid: "12", name: "db-12", created_at: oldTimeStr },
 					],
+					result_info: {
+						page: 2,
+						per_page: 10,
+						count: 2,
+						total_count: 12,
+						total_pages: 2,
+					},
 				})
 			);
 
@@ -253,6 +289,7 @@ describe("listTmpDatabases()", () => {
 });
 
 describe("deleteDatabase()", () => {
+	// eslint-disable-next-line jest/expect-expect -- assertions are implicit via undici mock agent interceptors
 	it("makes a REST request to delete the given project", async () => {
 		const MOCK_DB = "tmp-e2e-db";
 		agent
@@ -274,6 +311,7 @@ describe("listTmpE2EWorkers()", () => {
 			.get("https://api.cloudflare.com")
 			.intercept({
 				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/workers/scripts`,
+				query: { page: 1 },
 				method: "GET",
 			})
 			.reply(
@@ -298,14 +336,18 @@ describe("listTmpE2EWorkers()", () => {
 
 		expect(result.map((p) => p.id)).toMatchInlineSnapshot(`
 			[
+			  "wprker-2",
 			  "tmp-e2e-worker-2",
+			  "wprker-4",
 			  "tmp-e2e-worker-4",
+			  "wprker-6",
 			]
 		`);
 	});
 });
 
 describe("deleteWorker()", () => {
+	// eslint-disable-next-line jest/expect-expect -- assertions are implicit via undici mock agent interceptors
 	it("makes a REST request to delete the given project", async () => {
 		const MOCK_WORKER = "mock-worker";
 		agent
@@ -316,5 +358,64 @@ describe("deleteWorker()", () => {
 			})
 			.reply(200, JSON.stringify({ result: [] }));
 		await deleteWorker(MOCK_WORKER);
+	});
+});
+
+describe("listTmpR2Buckets()", () => {
+	it("makes a REST request and returns a filtered list of R2 buckets", async ({
+		expect,
+	}) => {
+		agent
+			.get("https://api.cloudflare.com")
+			.intercept({
+				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/r2/buckets`,
+				method: "GET",
+			})
+			.reply(
+				200,
+				JSON.stringify({
+					result: {
+						buckets: [
+							{ name: "my-bucket-1", creation_date: nowStr },
+							{ name: "my-bucket-2", creation_date: oldTimeStr },
+							{
+								name: "tmp-e2e-abc123-next--workers-opennext-cache",
+								creation_date: nowStr,
+							},
+							{
+								name: "tmp-e2e-def456-next--workers-opennext-cache",
+								creation_date: oldTimeStr,
+							},
+							{ name: "tmp-e2e-project-1", creation_date: nowStr },
+							{ name: "tmp-e2e-project-2", creation_date: oldTimeStr },
+						],
+					},
+					success: true,
+				})
+			);
+
+		const result = await listTmpR2Buckets();
+
+		expect(result.map((b) => b.name)).toMatchInlineSnapshot(`
+			[
+			  "tmp-e2e-def456-next--workers-opennext-cache",
+			  "tmp-e2e-project-2",
+			]
+		`);
+	});
+});
+
+describe("deleteR2Bucket()", () => {
+	// eslint-disable-next-line jest/expect-expect -- assertions are implicit via undici mock agent interceptors
+	it("makes a REST request to delete the given R2 bucket", async () => {
+		const MOCK_BUCKET = "tmp-e2e-abc123-next--workers-opennext-cache";
+		agent
+			.get("https://api.cloudflare.com")
+			.intercept({
+				path: `/client/v4/accounts/${MOCK_CLOUDFLARE_ACCOUNT_ID}/r2/buckets/${MOCK_BUCKET}`,
+				method: "DELETE",
+			})
+			.reply(200, JSON.stringify({ result: [] }));
+		await deleteR2Bucket(MOCK_BUCKET);
 	});
 });

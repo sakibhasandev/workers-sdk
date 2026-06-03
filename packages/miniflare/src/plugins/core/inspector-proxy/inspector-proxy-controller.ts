@@ -1,11 +1,11 @@
 import crypto from "node:crypto";
-import { createServer, IncomingMessage, Server } from "node:http";
-import getPort from "get-port";
+import { createServer } from "node:http";
 import { DeferredPromise } from "miniflare:shared";
 import WebSocket, { WebSocketServer } from "ws";
 import { version as miniflareVersion } from "../../../../package.json";
-import { Log } from "../../../shared";
 import { InspectorProxy } from "./inspector-proxy";
+import type { Log } from "../../../shared";
+import type { IncomingMessage, Server } from "node:http";
 
 /**
  * An `InspectorProxyController` connects to the various runtime (/workerd) inspector servers and exposes through the user specified
@@ -17,31 +17,34 @@ import { InspectorProxy } from "./inspector-proxy";
  *  - when a web socket connection is requested for a worker it passes such request to the appropriate proxy
  */
 export class InspectorProxyController {
-	#runtimeConnectionEstablished: DeferredPromise<void>;
+	#runtimeConnectionEstablished = new DeferredPromise<void>();
 
 	#proxies: InspectorProxy[] = [];
 
 	#server: Promise<Server>;
 
-	#inspectorPort: Promise<number>;
+	async #getInspectorPort() {
+		const server = await this.#server;
+		const address = server.address();
+		if (address && typeof address !== "string") {
+			return address.port;
+		} else {
+			throw new Error(
+				`Unable to acquire a port to listen on - address: "${address}"`
+			);
+		}
+	}
 
 	constructor(
 		private inspectorPortOption: number,
+		private inspectorHostOption: string = "127.0.0.1",
 		private log: Log,
 		private workerNamesToProxy: Set<string>
 	) {
-		this.#inspectorPort = this.#getInspectorPortToUse();
-		this.#server = this.#initializeServer();
-		this.#runtimeConnectionEstablished = new DeferredPromise();
+		this.#server = this.#createServer();
 	}
 
-	async #getInspectorPortToUse() {
-		return this.inspectorPortOption !== 0
-			? this.inspectorPortOption
-			: await getPort();
-	}
-
-	async #initializeServer() {
+	async #createServer() {
 		const server = createServer(async (req, res) => {
 			const maybeJson = await this.#handleDevToolsJsonRequest(
 				req.headers.host ?? "localhost",
@@ -60,27 +63,47 @@ export class InspectorProxyController {
 
 		this.#initializeWebSocketServer(server);
 
-		const listeningPromise = new Promise<void>((resolve) =>
-			server.once("listening", resolve)
-		);
-		server.listen(await this.#inspectorPort);
-
-		await listeningPromise;
+		await this.#startListening(server);
 
 		return server;
 	}
 
 	async #restartServer() {
 		const server = await this.#server;
-		server.closeAllConnections();
-		await new Promise<void>((resolve, reject) => {
-			server.close((err) => (err ? reject(err) : resolve()));
-		});
-		const listeningPromise = new Promise<void>((resolve) =>
-			server.once("listening", resolve)
+		await this.#closeServer(server);
+		await this.#startListening(server);
+	}
+
+	/**
+	 * Try to start listening on a the chosen port (or any port if none-chosen).
+	 *
+	 * @param server the server to start listening.
+	 */
+	async #startListening(server: Server): Promise<void> {
+		this.log.debug(
+			`Trying to listen on ${this.inspectorHostOption}:${this.inspectorPortOption}`
 		);
-		server.listen(await this.#inspectorPort);
-		await listeningPromise;
+		return new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(
+				this.inspectorPortOption,
+				this.inspectorHostOption,
+				resolve
+			);
+		});
+	}
+
+	async #closeServer(server: Server) {
+		server.closeAllConnections();
+		return await new Promise<void>((resolve) => {
+			// We'll resolve whether or not the close had an error.
+			server.close((err) => {
+				if (err) {
+					this.log.error(err);
+				}
+				resolve();
+			});
+		});
 	}
 
 	#initializeWebSocketServer(server: Server) {
@@ -119,7 +142,12 @@ export class InspectorProxyController {
 		if (hostHeader == null) return { statusText: null, status: 400 };
 		try {
 			const host = new URL(`http://${hostHeader}`);
-			if (!ALLOWED_HOST_HOSTNAMES.includes(host.hostname)) {
+			// Allow the configured inspector host in addition to the default allowed hostnames
+			const allowedHostnames = [
+				...ALLOWED_HOST_HOSTNAMES,
+				this.inspectorHostOption,
+			];
+			if (!allowedHostnames.includes(host.hostname)) {
 				return { statusText: "Disallowed `Host` header", status: 401 };
 			}
 		} catch {
@@ -232,16 +260,25 @@ export class InspectorProxyController {
 	}
 
 	async getInspectorURL(): Promise<URL> {
-		return getWebsocketURL(await this.#inspectorPort);
+		return getWebsocketURL(
+			this.inspectorHostOption,
+			await this.#getInspectorPort()
+		);
 	}
 
 	async updateConnection(
 		inspectorPortOption: number,
-		runtimeInspectorPort: number
+		inspectorHostOption: string,
+		runtimeInspectorPort: number,
+		workerNamesToProxy: Set<string>
 	) {
-		if (this.inspectorPortOption !== inspectorPortOption) {
+		this.workerNamesToProxy = workerNamesToProxy;
+		if (
+			this.inspectorPortOption !== inspectorPortOption ||
+			this.inspectorHostOption !== inspectorHostOption
+		) {
 			this.inspectorPortOption = inspectorPortOption;
-			this.#inspectorPort = this.#getInspectorPortToUse();
+			this.inspectorHostOption = inspectorHostOption;
 
 			await this.#restartServer();
 		}
@@ -251,6 +288,10 @@ export class InspectorProxyController {
 		).then((resp) => resp.json())) as {
 			id: string;
 		}[];
+
+		// Dispose old proxies before replacing them, so their runtime WebSocket
+		// connections and keepalive intervals are properly cleaned up.
+		await Promise.all(this.#proxies.map((proxy) => proxy.dispose()));
 
 		this.#proxies = workerdInspectorJson
 			.map(({ id }) => {
@@ -265,6 +306,7 @@ export class InspectorProxyController {
 				}
 
 				return new InspectorProxy(
+					this.log,
 					workerName,
 					new WebSocket(`ws://127.0.0.1:${runtimeInspectorPort}/${id}`)
 				);
@@ -286,19 +328,27 @@ export class InspectorProxyController {
 		await Promise.all(this.#proxies.map((proxy) => proxy.dispose()));
 
 		const server = await this.#server;
+		// Force-close active connections so server.close() resolves immediately.
+		// Without this, active HTTP keep-alive or WebSocket connections prevent
+		// the close callback from firing, hanging the dispose.
+		server.closeAllConnections();
 		return new Promise((resolve, reject) => {
 			server.close((err) => (err ? reject(err) : resolve()));
 		});
 	}
 }
 
-function getWebsocketURL(port: number): URL {
-	return new URL(`ws://127.0.0.1:${port}`);
+function getWebsocketURL(host: string, port: number): URL {
+	return new URL(`ws://${host}:${port}`);
 }
 
 const ALLOWED_HOST_HOSTNAMES = ["127.0.0.1", "[::1]", "localhost"];
 const ALLOWED_ORIGIN_HOSTNAMES = [
 	"devtools.devprod.cloudflare.dev",
+	// Workers + Assets (current deployment)
+	"cloudflare-devtools.devprod.workers.dev",
+	/^[a-z0-9]+-cloudflare-devtools\.devprod\.workers\.dev$/,
+	// Cloudflare Pages (legacy deployment)
 	"cloudflare-devtools.pages.dev",
 	/^[a-z0-9]+\.cloudflare-devtools\.pages\.dev$/,
 	"127.0.0.1",

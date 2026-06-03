@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
-import { defineWorkersProject } from "@cloudflare/vitest-pool-workers/config";
+import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { importPKCS8, SignJWT } from "jose";
 import { Request, Response } from "miniflare";
+import { defineProject, mergeConfig } from "vitest/config";
+import configShared from "../../../vitest.shared";
 
 // Generate RSA keypair for signing/verifying JWTs
 const authKeypair = crypto.generateKeyPairSync("rsa", {
@@ -56,15 +58,14 @@ async function handleAuthServiceOutbound(request: Request): Promise<Response> {
 	return new Response("Not Found", { status: 404 });
 }
 
-export default defineWorkersProject({
-	test: {
-		globalSetup: ["./global-setup.ts"],
-		poolOptions: {
-			workers: {
-				singleWorker: true,
+export default mergeConfig(
+	configShared,
+	defineProject({
+		plugins: [
+			cloudflareTest({
 				// Configuration for the test runner and "API service" Worker
 				wrangler: {
-					configPath: "./api-service/wrangler.toml",
+					configPath: "./api-service/wrangler.jsonc",
 				},
 				miniflare: {
 					bindings: {
@@ -94,9 +95,29 @@ export default defineWorkersProject({
 							compatibilityFlags: ["nodejs_compat"],
 							kvNamespaces: ["KV_NAMESPACE"],
 						},
+						{
+							name: "tail-consumer",
+							modules: [
+								{
+									path: "index.js",
+									type: "ESModule",
+									contents: /* javascript */ `
+                                export default {
+                                    tail(event) {
+                                    console.log("tail event received")
+                                    }
+                                }
+                                `,
+								},
+							],
+							compatibilityDate: "2024-01-01",
+						},
 					],
 				},
-			},
+			}),
+		],
+		test: {
+			globalSetup: ["./global-setup.ts"],
 		},
-	},
-});
+	})
+);

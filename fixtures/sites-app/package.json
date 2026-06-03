@@ -1,5 +1,5 @@
 {
-	"name": "sites-app",
+	"name": "@fixture/sites-basic",
 	"private": true,
 	"description": "",
 	"keywords": [],
@@ -8,8 +8,5 @@
 	"main": "index.js",
 	"devDependencies": {
 		"@cloudflare/kv-asset-handler": "workspace:*"
-	},
-	"volta": {
-		"extends": "../../package.json"
 	}
 }

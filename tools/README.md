@@ -11,6 +11,9 @@ Tools for helping with CI
 - `deployments/validate-changesets.ts` - Validate that changesets are formatted correctly.
   Used by the changesets.yml and test-and-check.yml GitHub Action workflows.
 
+- `deployments/validate-pinned-dependencies.ts` - Ensures all non-bundled dependencies of published packages (and all pnpm catalog entries) are pinned to exact versions.
+  Used by the test-and-check.yml GitHub Action workflow, as part of the `check` npm script (`pnpm check:pinned-deps`).
+
 - `dependabot/generate-dependabot-pr-changesets.ts` - Generates and commits a changeset for a Dependabot PR.
   Used by the c3-dependabot-versioning-prs.yml and miniflare-dependabot-versioning-prs.yml GitHub Action workflows.
 
@@ -19,3 +22,5 @@ Tools for helping with CI
 - `e2e/runIndividualE2EFiles.ts` - Used to shard the e2e tests into separately cache-able Turbo runs, which helps with flakey tests.
 
 - `test/run-test-file.ts` - Used by in VS Code configuration to launch a debug session to run a single test file.
+
+- `test-workers/` - Contains worker definitions used by CI tests. Each worker has its own subdirectory with `index.js` and `wrangler.jsonc` files. See `test-workers/README.md` for details.

@@ -2,22 +2,30 @@ import { Blob } from "node:buffer";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as stream from "node:stream";
-import prettyBytes from "pretty-bytes";
+import {
+	bucketFormatMessage,
+	CommandLineArgsError,
+	FatalError,
+	isValidR2BucketName,
+	UserError,
+} from "@cloudflare/workers-utils";
+import PQueue from "p-queue";
 import { readConfig } from "../config";
 import { createCommand, createNamespace } from "../core/create-command";
-import { CommandLineArgsError, FatalError, UserError } from "../errors";
+import { confirm } from "../dialogs";
 import { logger } from "../logger";
 import { requireAuth } from "../user";
 import { isLocal } from "../utils/is-local";
-import { MAX_UPLOAD_SIZE } from "./constants";
+import { logBulkProgress, validateBulkPutFile } from "./helpers/bulk";
+import { isDataCatalogConflict } from "./helpers/misc";
 import {
-	bucketAndKeyFromObjectPath,
-	createFileReadableStream,
 	deleteR2Object,
 	getR2Object,
-	putR2Object,
+	putRemoteObject,
 	usingLocalBucket,
-} from "./helpers";
+	validateAndReturnBucketAndKey,
+	validateUploadSize,
+} from "./helpers/object";
 import type { R2PutOptions } from "@cloudflare/workers-types/experimental";
 
 export const r2ObjectNamespace = createNamespace({
@@ -25,6 +33,15 @@ export const r2ObjectNamespace = createNamespace({
 		description: `Manage R2 objects`,
 		status: "stable",
 		owner: "Product: R2",
+	},
+});
+
+export const r2BulkNamespace = createNamespace({
+	metadata: {
+		description: `Interact with multiple R2 objects at once`,
+		status: "experimental",
+		owner: "Product: R2",
+		hidden: true,
 	},
 });
 
@@ -75,6 +92,9 @@ export const r2ObjectGetCommand = createCommand({
 		},
 	},
 	behaviour: {
+		printBanner({ pipe }) {
+			return !pipe;
+		},
 		printResourceLocation(args) {
 			return !args?.pipe;
 		},
@@ -83,7 +103,7 @@ export const r2ObjectGetCommand = createCommand({
 	async handler(objectGetYargs, { config }) {
 		const localMode = isLocal(objectGetYargs);
 		const { objectPath, pipe, jurisdiction } = objectGetYargs;
-		const { bucket, key } = bucketAndKeyFromObjectPath(objectPath);
+		const { bucket, key } = validateAndReturnBucketAndKey(objectPath);
 		let fullBucketName = bucket;
 		if (jurisdiction !== undefined) {
 			fullBucketName += ` (${jurisdiction})`;
@@ -112,7 +132,9 @@ export const r2ObjectGetCommand = createCommand({
 				async (r2Bucket) => {
 					const object = await r2Bucket.get(key);
 					if (object === null) {
-						throw new UserError("The specified key does not exist.");
+						throw new UserError("The specified key does not exist.", {
+							telemetryMessage: "r2 object get local key not found",
+						});
 					}
 					// Note `object.body` is only valid inside this closure
 					await stream.promises.pipeline(object.body, output);
@@ -120,9 +142,17 @@ export const r2ObjectGetCommand = createCommand({
 			);
 		} else {
 			const accountId = await requireAuth(config);
-			const input = await getR2Object(accountId, bucket, key, jurisdiction);
+			const input = await getR2Object(
+				config,
+				accountId,
+				bucket,
+				key,
+				jurisdiction
+			);
 			if (input === null) {
-				throw new UserError("The specified key does not exist.");
+				throw new UserError("The specified key does not exist.", {
+					telemetryMessage: "r2 object get remote key not found",
+				});
 			}
 			await stream.promises.pipeline(input, output);
 		}
@@ -131,6 +161,79 @@ export const r2ObjectGetCommand = createCommand({
 		}
 	},
 });
+
+/**
+ * Common arguments for R2 object put commands (single & bulk).
+ */
+const commonPutArguments = {
+	"content-type": {
+		describe: "A standard MIME type describing the format of the object data",
+		alias: "ct",
+		requiresArg: true,
+		type: "string",
+	},
+	"content-disposition": {
+		describe: "Specifies presentational information for the object",
+		alias: "cd",
+		requiresArg: true,
+		type: "string",
+	},
+	"content-encoding": {
+		describe:
+			"Specifies what content encodings have been applied to the object and thus what decoding mechanisms must be applied to obtain the media-type referenced by the Content-Type header field",
+		alias: "ce",
+		requiresArg: true,
+		type: "string",
+	},
+	"content-language": {
+		describe: "The language the content is in",
+		alias: "cl",
+		requiresArg: true,
+		type: "string",
+	},
+	"cache-control": {
+		describe: "Specifies caching behavior along the request/reply chain",
+		alias: "cc",
+		requiresArg: true,
+		type: "string",
+	},
+	expires: {
+		describe: "The date and time at which the object is no longer cacheable",
+		requiresArg: true,
+		type: "string",
+	},
+	local: {
+		type: "boolean",
+		describe: "Interact with local storage",
+	},
+	remote: {
+		type: "boolean",
+		describe: "Interact with remote storage",
+		conflicts: "local",
+	},
+	"persist-to": {
+		type: "string",
+		describe: "Directory for local persistence",
+	},
+	jurisdiction: {
+		describe: "The jurisdiction where the object will be created",
+		alias: "J",
+		requiresArg: true,
+		type: "string",
+	},
+	"storage-class": {
+		describe: "The storage class of the object to be created",
+		alias: "s",
+		requiresArg: false,
+		type: "string",
+	},
+	force: {
+		describe: "Skip data catalog validation prompt",
+		type: "boolean",
+		alias: "y",
+		default: false,
+	},
+} as const;
 
 export const r2ObjectPutCommand = createCommand({
 	metadata: {
@@ -145,6 +248,7 @@ export const r2ObjectPutCommand = createCommand({
 			type: "string",
 			demandOption: true,
 		},
+		...commonPutArguments,
 		file: {
 			describe: "The path of the file to upload",
 			alias: "f",
@@ -159,97 +263,51 @@ export const r2ObjectPutCommand = createCommand({
 			conflicts: "file",
 			type: "boolean",
 		},
-		"content-type": {
-			describe: "A standard MIME type describing the format of the object data",
-			alias: "ct",
-			requiresArg: true,
-			type: "string",
-		},
-		"content-disposition": {
-			describe: "Specifies presentational information for the object",
-			alias: "cd",
-			requiresArg: true,
-			type: "string",
-		},
-		"content-encoding": {
-			describe:
-				"Specifies what content encodings have been applied to the object and thus what decoding mechanisms must be applied to obtain the media-type referenced by the Content-Type header field",
-			alias: "ce",
-			requiresArg: true,
-			type: "string",
-		},
-		"content-language": {
-			describe: "The language the content is in",
-			alias: "cl",
-			requiresArg: true,
-			type: "string",
-		},
-		"cache-control": {
-			describe: "Specifies caching behavior along the request/reply chain",
-			alias: "cc",
-			requiresArg: true,
-			type: "string",
-		},
-		expires: {
-			describe: "The date and time at which the object is no longer cacheable",
-			alias: "e",
-			requiresArg: true,
-			type: "string",
-		},
-		local: {
-			type: "boolean",
-			describe: "Interact with local storage",
-		},
-		remote: {
-			type: "boolean",
-			describe: "Interact with remote storage",
-			conflicts: "local",
-		},
-		"persist-to": {
-			type: "string",
-			describe: "Directory for local persistence",
-		},
-		jurisdiction: {
-			describe: "The jurisdiction where the object will be created",
-			alias: "J",
-			requiresArg: true,
-			type: "string",
-		},
-		"storage-class": {
-			describe: "The storage class of the object to be created",
-			alias: "s",
-			requiresArg: false,
-			type: "string",
-		},
 	},
 	behaviour: {
 		printResourceLocation(args) {
 			return !args?.pipe;
 		},
 	},
-	async handler(objectPutYargs, { config }) {
-		const {
-			objectPath,
-			file,
-			pipe,
-			persistTo,
-			jurisdiction,
-			storageClass,
-			...options
-		} = objectPutYargs;
-		const localMode = isLocal(objectPutYargs);
-		const { bucket, key } = bucketAndKeyFromObjectPath(objectPath);
+	async handler(yArgs, { config }) {
+		const { file, pipe } = yArgs;
 		if (!file && !pipe) {
 			throw new CommandLineArgsError(
-				"Either the --file or --pipe options are required."
+				"Either the --file or --pipe options are required.",
+				{ telemetryMessage: "r2 object put missing file or pipe" }
 			);
 		}
-		let object: ReadableStream;
-		let objectSize: number;
+
+		const { bucket, key } = validateAndReturnBucketAndKey(yArgs.objectPath);
+
+		let objectStream: ReadableStream;
+		let sizeBytes: number;
+		let objectBlob: Blob | undefined;
 		if (file) {
-			object = await createFileReadableStream(file);
-			const stats = fs.statSync(file);
-			objectSize = stats.size;
+			try {
+				const stats = fs.statSync(file, { throwIfNoEntry: false });
+				if (!stats) {
+					throw new UserError(`The file "${file}" does not exist.`, {
+						telemetryMessage: "r2 object put file not found",
+					});
+				}
+				sizeBytes = stats.size;
+
+				objectStream = stream.Readable.toWeb(fs.createReadStream(file));
+			} catch (err) {
+				if (err instanceof UserError) {
+					throw err;
+				}
+				throw new UserError(
+					`An error occurred while trying to read the file "${file}": ${
+						(err as Error).message
+					}`,
+					{
+						cause: err,
+						telemetryMessage: "r2 object put file read failed",
+					}
+				);
+			}
 		} else {
 			const buffer = await new Promise<Buffer>((resolve, reject) => {
 				const stdin = process.stdin;
@@ -258,68 +316,57 @@ export const r2ObjectPutCommand = createCommand({
 				stdin.on("end", () => resolve(Buffer.concat(chunks)));
 				stdin.on("error", (err) =>
 					reject(
-						new CommandLineArgsError(`Could not pipe. Reason: "${err.message}"`)
+						new CommandLineArgsError(
+							`Could not pipe. Reason: "${err.message}"`,
+							{
+								telemetryMessage: "r2 object put pipe read failed",
+							}
+						)
 					)
 				);
 			});
-			const blob = new Blob([buffer]);
-			object = blob.stream();
-			objectSize = blob.size;
-		}
-
-		if (objectSize > MAX_UPLOAD_SIZE && !localMode) {
-			throw new FatalError(
-				`Error: Wrangler only supports uploading files up to ${prettyBytes(
-					MAX_UPLOAD_SIZE,
-					{ binary: true }
-				)} in size\n${key} is ${prettyBytes(objectSize, {
-					binary: true,
-				})} in size`,
-				1
-			);
+			objectBlob = new Blob([buffer]);
+			objectStream = objectBlob.stream();
+			sizeBytes = objectBlob.size;
 		}
 
 		let fullBucketName = bucket;
-		if (jurisdiction !== undefined) {
-			fullBucketName += ` (${jurisdiction})`;
+		if (yArgs.jurisdiction !== undefined) {
+			fullBucketName += ` (${yArgs.jurisdiction})`;
 		}
 
 		let storageClassLog = ``;
-		if (storageClass !== undefined) {
-			storageClassLog = ` with ${storageClass} storage class`;
+		if (yArgs.storageClass !== undefined) {
+			storageClassLog = ` with ${yArgs.storageClass} storage class`;
 		}
+
 		logger.log(
 			`Creating object "${key}"${storageClassLog} in bucket "${fullBucketName}".`
 		);
 
-		if (localMode) {
+		const isLocalMode = isLocal(yArgs);
+
+		if (isLocalMode) {
 			await usingLocalBucket(
-				persistTo,
+				yArgs.persistTo,
 				config,
 				bucket,
-				async (r2Bucket, mf) => {
+				async (_bucket, mf) => {
 					const putOptions: R2PutOptions = {
 						httpMetadata: {
-							contentType: options.contentType,
-							contentDisposition: options.contentDisposition,
-							contentEncoding: options.contentEncoding,
-							contentLanguage: options.contentLanguage,
-							cacheControl: options.cacheControl,
+							contentType: yArgs.contentType,
+							contentDisposition: yArgs.contentDisposition,
+							contentEncoding: yArgs.contentEncoding,
+							contentLanguage: yArgs.contentLanguage,
+							cacheControl: yArgs.cacheControl,
 							// @ts-expect-error `@cloudflare/workers-types` is wrong
 							//  here, `number`'s are allowed for `Date`s
 							// TODO(now): fix
 							cacheExpiry:
-								options.expires === undefined
+								yArgs.expires === undefined
 									? undefined
-									: parseInt(options.expires),
+									: parseInt(yArgs.expires),
 						},
-						customMetadata: undefined,
-						sha1: undefined,
-						sha256: undefined,
-						onlyIf: undefined,
-						md5: undefined,
-						sha384: undefined,
-						sha512: undefined,
 					};
 					// We can't use `r2Bucket.put()` here as `R2Bucket#put()`
 					// requires a known length stream, and Miniflare's magic proxy
@@ -328,29 +375,76 @@ export const r2ObjectPutCommand = createCommand({
 					// for writing to a local bucket.
 					await mf.dispatchFetch(`http://localhost/${key}`, {
 						method: "PUT",
-						body: object,
+						body: objectStream,
 						duplex: "half",
 						headers: {
-							"Content-Length": objectSize.toString(),
+							"Content-Length": String(sizeBytes),
 							"Wrangler-R2-Put-Options": JSON.stringify(putOptions),
 						},
 					});
 				}
 			);
 		} else {
+			validateUploadSize(key, sizeBytes);
+
 			const accountId = await requireAuth(config);
-			await putR2Object(
-				accountId,
-				bucket,
-				key,
-				object,
-				{
-					...options,
-					"content-length": `${objectSize}`,
-				},
-				jurisdiction,
-				storageClass
-			);
+			const putHeaders = {
+				"content-type": yArgs.contentType,
+				"content-disposition": yArgs.contentDisposition,
+				"content-encoding": yArgs.contentEncoding,
+				"content-language": yArgs.contentLanguage,
+				"cache-control": yArgs.cacheControl,
+				"content-length": String(sizeBytes),
+				expires: yArgs.expires,
+			};
+			try {
+				await putRemoteObject(
+					config,
+					accountId,
+					bucket,
+					key,
+					objectStream,
+					putHeaders,
+					yArgs.force,
+					yArgs.jurisdiction,
+					yArgs.storageClass
+				);
+			} catch (error) {
+				if (!yArgs.force && isDataCatalogConflict(error)) {
+					const confirmed = await confirm(
+						"Data catalog is enabled for this bucket. " +
+							"Proceeding may leave the data catalog in an invalid state. Continue?",
+						{ defaultValue: false, fallbackValue: true }
+					);
+					if (!confirmed) {
+						logger.log("Operation cancelled.");
+						return;
+					}
+					// Re-create the stream since the original was consumed
+					// by the failed request.
+					let retryStream: ReadableStream;
+					if (file) {
+						retryStream = stream.Readable.toWeb(fs.createReadStream(file));
+					} else if (objectBlob) {
+						retryStream = objectBlob.stream();
+					} else {
+						throw error;
+					}
+					await putRemoteObject(
+						config,
+						accountId,
+						bucket,
+						key,
+						retryStream,
+						putHeaders,
+						true, // force=true on retry (skip header)
+						yArgs.jurisdiction,
+						yArgs.storageClass
+					);
+				} else {
+					throw error;
+				}
+			}
 		}
 
 		logger.log("Upload complete.");
@@ -389,6 +483,12 @@ export const r2ObjectDeleteCommand = createCommand({
 			requiresArg: true,
 			type: "string",
 		},
+		force: {
+			describe: "Skip data catalog validation prompt",
+			type: "boolean",
+			alias: "y",
+			default: false,
+		},
 	},
 	behaviour: {
 		printResourceLocation: true,
@@ -398,7 +498,7 @@ export const r2ObjectDeleteCommand = createCommand({
 
 		const { objectPath, jurisdiction } = args;
 		const config = readConfig(args);
-		const { bucket, key } = bucketAndKeyFromObjectPath(objectPath);
+		const { bucket, key } = validateAndReturnBucketAndKey(objectPath);
 		let fullBucketName = bucket;
 		if (jurisdiction !== undefined) {
 			fullBucketName += ` (${jurisdiction})`;
@@ -412,9 +512,246 @@ export const r2ObjectDeleteCommand = createCommand({
 			);
 		} else {
 			const accountId = await requireAuth(config);
-			await deleteR2Object(accountId, bucket, key, jurisdiction);
+			try {
+				await deleteR2Object(
+					config,
+					accountId,
+					bucket,
+					key,
+					args.force,
+					jurisdiction
+				);
+			} catch (error) {
+				if (!args.force && isDataCatalogConflict(error)) {
+					const confirmed = await confirm(
+						"Data catalog is enabled for this bucket. " +
+							"Proceeding may leave the data catalog in an invalid state. Continue?",
+						{ defaultValue: false, fallbackValue: true }
+					);
+					if (!confirmed) {
+						logger.log("Operation cancelled.");
+						return;
+					}
+					await deleteR2Object(
+						config,
+						accountId,
+						bucket,
+						key,
+						true,
+						jurisdiction
+					);
+				} else {
+					throw error;
+				}
+			}
 		}
 
 		logger.log("Delete complete.");
+	},
+});
+
+// Bulk operations
+
+export const r2BulkPutCommand = createCommand({
+	metadata: {
+		description: "Create objects in an R2 bucket",
+		status: "experimental",
+		owner: "Product: R2",
+		hidden: true,
+	},
+	positionalArgs: ["bucket"],
+	args: {
+		bucket: {
+			describe: "The name of the new bucket",
+			type: "string",
+			demandOption: true,
+		},
+		...commonPutArguments,
+		// TODO: add a mutually exclusive option to specify a directory to upload
+		filename: {
+			describe: "The file containing the key/file pairs to write",
+			alias: "f",
+			requiresArg: true,
+			type: "string",
+		},
+		concurrency: {
+			describe: "The number of concurrent uploads to perform",
+			type: "number",
+			default: 20,
+		},
+	},
+	behaviour: {
+		printResourceLocation: true,
+	},
+	async handler(yArgs, { config }) {
+		if (!isValidR2BucketName(yArgs.bucket)) {
+			throw new UserError(
+				`The bucket name "${yArgs.bucket}" is invalid. ${bucketFormatMessage}`,
+				{ telemetryMessage: "r2 object bulk put invalid bucket name" }
+			);
+		}
+
+		if (!yArgs.filename) {
+			throw new UserError(
+				"The --filename argument is required for bulk put operations.",
+				{ telemetryMessage: "r2 object bulk put missing filename" }
+			);
+		}
+
+		const entries = validateBulkPutFile(yArgs.filename);
+
+		const isLocalMode = isLocal(yArgs);
+
+		let fullBucketName = yArgs.bucket;
+		if (yArgs.jurisdiction !== undefined) {
+			fullBucketName += ` (${yArgs.jurisdiction})`;
+		}
+
+		let storageClassLog = ``;
+		if (yArgs.storageClass !== undefined) {
+			storageClassLog = ` with ${yArgs.storageClass} storage class`;
+		}
+
+		const concurrency = Math.max(1, yArgs.concurrency);
+
+		logger.log(
+			`Starting bulk upload of ${entries.length} objects to bucket ${fullBucketName}${storageClassLog} using a concurrency of ${concurrency}`
+		);
+
+		if (isLocalMode) {
+			await usingLocalBucket(
+				yArgs.persistTo,
+				config,
+				yArgs.bucket,
+				async (_bucket, mf) => {
+					const putOptions: R2PutOptions = {
+						httpMetadata: {
+							contentType: yArgs.contentType,
+							contentDisposition: yArgs.contentDisposition,
+							contentEncoding: yArgs.contentEncoding,
+							contentLanguage: yArgs.contentLanguage,
+							cacheControl: yArgs.cacheControl,
+							// @ts-expect-error `@cloudflare/workers-types` is wrong
+							//  here, `number`'s are allowed for `Date`s
+							// TODO(now): fix
+							cacheExpiry:
+								yArgs.expires === undefined
+									? undefined
+									: parseInt(yArgs.expires),
+						},
+					};
+
+					const queue = new PQueue({ concurrency });
+					const jsonPutOptions = JSON.stringify(putOptions);
+
+					await queue.addAll(
+						entries.map((entry, index) => async () => {
+							if ((index + 1) % 100 === 0 || index + 1 === entries.length) {
+								logBulkProgress("Uploaded", index + 1, entries.length);
+							}
+							// We can't use `r2Bucket.put()` here as `R2Bucket#put()`
+							// requires a known length stream, and Miniflare's magic proxy
+							// currently doesn't support sending these. Instead,
+							// `usingLocalBucket()` provides a single `PUT` endpoint
+							// for writing to a local bucket.
+							await mf.dispatchFetch(`http://localhost/${entry.key}`, {
+								method: "PUT",
+								body: stream.Readable.toWeb(fs.createReadStream(entry.file)),
+								duplex: "half",
+								headers: {
+									"Content-Length": String(entry.size),
+									"Wrangler-R2-Put-Options": jsonPutOptions,
+								},
+							});
+						})
+					);
+
+					try {
+						await Promise.race([queue.onError(), queue.onIdle()]);
+					} catch (error) {
+						queue.pause();
+						throw new FatalError(`R2 bulk upload failed\n${error}`, {
+							telemetryMessage: "r2 object bulk upload failed",
+						});
+					}
+				}
+			);
+		} else {
+			// Cloudflare API rate limits
+			// 1200 requests per 5 minutes
+			// We add some headroom (100 requests) for other API usage
+			// ref: https://developers.cloudflare.com/fundamentals/api/reference/limits/
+			const API_RATE_LIMIT_WINDOWS_MS = 5 * 60 * 1_000; // 5 minutes
+			const API_RATE_LIMIT_REQUESTS = 1_200 - 100;
+
+			const accountId = await requireAuth(config);
+
+			// Upfront data catalog warning for bulk operations.
+			// Unlike individual commands, we don't use the API-level catalog check
+			// header because the PQueue concurrency model makes mid-batch
+			// prompting unreliable (in-flight requests can't be paused).
+			let forceBulk = yArgs.force;
+			if (!forceBulk) {
+				const confirmed = await confirm(
+					"Bulk upload may overwrite existing objects. If this bucket has " +
+						"data catalog enabled, this operation could leave the catalog " +
+						"in an invalid state. Continue?",
+					{ defaultValue: false, fallbackValue: true }
+				);
+				if (!confirmed) {
+					logger.log("Bulk upload cancelled.");
+					return;
+				}
+				forceBulk = true;
+			}
+
+			const queue = new PQueue({
+				concurrency,
+				interval: API_RATE_LIMIT_WINDOWS_MS,
+				intervalCap: API_RATE_LIMIT_REQUESTS,
+			});
+
+			await queue.addAll(
+				entries.map((entry, index) => async () => {
+					try {
+						if ((index + 1) % 10 === 0 || index + 1 === entries.length) {
+							logBulkProgress("Uploaded", index + 1, entries.length);
+						}
+						await putRemoteObject(
+							config,
+							accountId,
+							yArgs.bucket,
+							entry.key,
+							stream.Readable.toWeb(fs.createReadStream(entry.file)),
+							{
+								"cache-control": yArgs.cacheControl,
+								"content-disposition": yArgs.contentDisposition,
+								"content-encoding": yArgs.contentEncoding,
+								"content-language": yArgs.contentLanguage,
+								"content-type": yArgs.contentType,
+								"content-length": String(entry.size),
+								expires: yArgs.expires,
+							},
+							forceBulk, // Always true after prompt (no header sent)
+							yArgs.jurisdiction,
+							yArgs.storageClass
+						);
+					} catch (e) {
+						throw new FatalError(`Error uploading "${entry.file}"\n${e}`, {
+							telemetryMessage: "r2 object bulk upload object failed",
+						});
+					}
+				})
+			);
+
+			try {
+				await Promise.race([queue.onError(), queue.onIdle()]);
+			} catch (error) {
+				queue.pause();
+				throw new FatalError(`R2 bulk upload failed\n${error}`, {
+					telemetryMessage: "r2 object bulk upload failed",
+				});
+			}
+		}
 	},
 });

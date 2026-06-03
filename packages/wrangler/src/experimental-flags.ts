@@ -1,9 +1,10 @@
-import { AsyncLocalStorage } from "async_hooks";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger } from "./logger";
 
 export type ExperimentalFlags = {
 	MULTIWORKER: boolean;
 	RESOURCES_PROVISION: boolean;
+	AUTOCREATE_RESOURCES: boolean;
 };
 
 const flags = new AsyncLocalStorage<ExperimentalFlags>();

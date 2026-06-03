@@ -1,47 +1,10 @@
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
-import { extractAccountTag, hasMorePages } from "../cfetch";
+import { describe, it } from "vitest";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { createFetchResult, msw } from "./helpers/msw";
-import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
-
-/**
-hasMorePages is a function that returns a boolean based on the result_info object returned from the cloudflare v4 API - if the current page is less than the total number of pages, it returns true, otherwise false.
-*/
-
-describe("hasMorePages", () => {
-	it("should handle result_info not having enough results to paginate", () => {
-		expect(
-			hasMorePages({
-				page: 1,
-				per_page: 10,
-				count: 5,
-				total_count: 5,
-			})
-		).toBe(false);
-	});
-	it("should return true if the current page is less than the total number of pages", () => {
-		expect(
-			hasMorePages({
-				page: 1,
-				per_page: 10,
-				count: 10,
-				total_count: 100,
-			})
-		).toBe(true);
-	});
-	it("should return false if we are on the last page of results", () => {
-		expect(
-			hasMorePages({
-				page: 10,
-				per_page: 10,
-				count: 10,
-				total_count: 100,
-			})
-		).toBe(false);
-	});
-});
 
 describe("throwFetchError", () => {
 	mockAccountId();
@@ -49,7 +12,9 @@ describe("throwFetchError", () => {
 	runInTempDir();
 	const std = mockConsoleMethods();
 
-	it("should include api errors, messages and documentation_url in error", async () => {
+	it("should include api errors, messages and documentation_url in error", async ({
+		expect,
+	}) => {
 		msw.use(
 			http.get("*/user", () => {
 				return HttpResponse.json(
@@ -75,6 +40,9 @@ describe("throwFetchError", () => {
 						["message one", "message two"]
 					)
 				);
+			}),
+			http.get("*/user/tokens/verify", () => {
+				return HttpResponse.json(createFetchResult([]));
 			})
 		);
 		await expect(runWrangler("whoami")).rejects.toMatchObject({
@@ -98,7 +66,7 @@ describe("throwFetchError", () => {
 		});
 	});
 
-	it("nested", async () => {
+	it("nested", async ({ expect }) => {
 		msw.use(
 			http.get("*/user", () => {
 				return HttpResponse.json(
@@ -135,16 +103,19 @@ describe("throwFetchError", () => {
 						["message one", "message two"]
 					)
 				);
+			}),
+			http.get("*/user/tokens/verify", () => {
+				return HttpResponse.json(createFetchResult([]));
 			})
 		);
 		await expect(runWrangler("whoami")).rejects.toMatchInlineSnapshot(
 			`[APIError: A request to the Cloudflare API (/user) failed.]`
 		);
 
-		expect(std.out).toMatchInlineSnapshot(`
-			"Getting User settings...
-
-			[31mX [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/user) failed.[0m
+		expect(std).toMatchInlineSnapshot(`
+			{
+			  "debug": "",
+			  "err": "[31mX [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/user) failed.[0m
 
 			  error one [code: 10001]
 			  To learn more about this error, visit: [4mhttps://example.com/1[0m
@@ -163,11 +134,19 @@ describe("throwFetchError", () => {
 			  If you think this is a bug, please open an issue at:
 			  [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
 
-			"
+			",
+			  "info": "",
+			  "out": "
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Getting User settings...
+			",
+			  "warn": "",
+			}
 		`);
 	});
 
-	it("should include api errors without messages", async () => {
+	it("should include api errors without messages", async ({ expect }) => {
 		msw.use(
 			http.get("*/user", () => {
 				return HttpResponse.json({
@@ -182,6 +161,9 @@ describe("throwFetchError", () => {
 						{ code: 10001, message: "error 1" },
 					],
 				});
+			}),
+			http.get("*/user/tokens/verify", () => {
+				return HttpResponse.json(createFetchResult([]));
 			})
 		);
 		await expect(runWrangler("whoami")).rejects.toMatchObject({
@@ -193,18 +175,5 @@ describe("throwFetchError", () => {
 				{ text: "error 1 [code: 10001]" },
 			],
 		});
-	});
-});
-
-describe("extractAccountTag", () => {
-	it("should return undefined when resource does not have it", () => {
-		expect(extractAccountTag("/accounts")).toBeUndefined();
-		expect(extractAccountTag("/accounts/")).toBeUndefined();
-		expect(extractAccountTag("/accounts//more")).toBeUndefined();
-	});
-	it("should return tag when resource has it", () => {
-		expect(extractAccountTag("/accounts/foo")).toBe("foo");
-		expect(extractAccountTag("/accounts/bar/")).toBe("bar");
-		expect(extractAccountTag("/accounts/baz/more")).toBe("baz");
 	});
 });

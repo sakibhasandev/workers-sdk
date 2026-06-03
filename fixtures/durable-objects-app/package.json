@@ -1,5 +1,5 @@
 {
-	"name": "do-worker-app",
+	"name": "@fixture/worker-durable-objects",
 	"private": true,
 	"description": "",
 	"license": "ISC",
@@ -16,8 +16,5 @@
 		"undici": "catalog:default",
 		"vitest": "catalog:default",
 		"wrangler": "workspace:*"
-	},
-	"volta": {
-		"extends": "../../package.json"
 	}
 }

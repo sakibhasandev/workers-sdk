@@ -1,12 +1,12 @@
-import http from "http";
-import { AddressInfo } from "net";
-import { URL } from "url";
-import { ExecutionContext } from "ava";
+import http from "node:http";
+import { URL } from "node:url";
 import stoppable from "stoppable";
-import NodeWebSocket, { WebSocketServer } from "ws";
+import { onTestFinished } from "vitest";
+import { WebSocketServer } from "ws";
+import type { AddressInfo } from "node:net";
+import type NodeWebSocket from "ws";
 
 export async function useServer(
-	t: ExecutionContext,
 	listener: http.RequestListener,
 	webSocketListener?: (socket: NodeWebSocket, req: http.IncomingMessage) => void
 ): Promise<{ http: URL; ws: URL }> {
@@ -19,7 +19,7 @@ export async function useServer(
 		}
 		// 0 binds to random unused port
 		server.listen(0, () => {
-			t.teardown(() => {
+			onTestFinished(() => {
 				return new Promise((resolve, reject) =>
 					server.stop((err) => (err ? reject(err) : resolve()))
 				);

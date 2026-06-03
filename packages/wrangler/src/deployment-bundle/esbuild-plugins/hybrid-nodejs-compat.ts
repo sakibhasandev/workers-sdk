@@ -1,5 +1,4 @@
 import assert from "node:assert";
-import { builtinModules } from "node:module";
 import nodePath from "node:path";
 import dedent from "ts-dedent";
 import { getBasePath } from "../../paths";
@@ -11,43 +10,68 @@ const REQUIRED_UNENV_ALIAS_NAMESPACE = "required-unenv-alias";
 /**
  * ESBuild plugin to apply the unenv preset.
  *
- * @param _unenvResolvePaths Root paths used to resolve absolute paths.
  * @returns ESBuild plugin
  */
-export async function nodejsHybridPlugin(
-	_unenvResolvePaths?: string[]
-): Promise<Plugin> {
-	// `unenv` and `@cloudflare/unenv-preset` only publish esm
-	const { defineEnv } = await import("unenv");
-	const { cloudflare } = await import("@cloudflare/unenv-preset");
-	const { alias, inject, external, polyfill } = defineEnv({
-		presets: [cloudflare],
-		npmShims: true,
-	}).env;
-
+export function nodejsHybridPlugin({
+	compatibilityDate,
+	compatibilityFlags,
+}: {
+	compatibilityDate?: string;
+	compatibilityFlags?: string[];
+}): Plugin {
 	return {
 		name: "hybrid-nodejs_compat",
-		setup(build) {
-			errorOnServiceWorkerFormat(build);
-			handleRequireCallsToNodeJSBuiltins(build);
+		async setup(build) {
+			// `unenv` and `@cloudflare/unenv-preset` only publish esm
+			const { defineEnv } = await import("unenv");
+			const { getCloudflarePreset, nonPrefixedNodeModules } =
+				await import("@cloudflare/unenv-preset");
+			const { alias, inject, external, polyfill } = defineEnv({
+				presets: [
+					getCloudflarePreset({
+						compatibilityDate,
+						compatibilityFlags,
+					}),
+					{
+						alias: {
+							// Force esbuild to use the node implementation of debug instead of unenv's no-op stub.
+							// The alias is processed by handleUnenvAliasedPackages which uses require.resolve().
+							debug: "debug",
+						},
+					},
+				],
+				npmShims: true,
+			}).env;
+
+			// RegExp to match Node.js built-in modules with and without the `node:` prefix
+			const nodeJsModuleRegexp = new RegExp(
+				`^(${nonPrefixedNodeModules.join("|")}|node:.+)$`
+			);
+
+			errorOnServiceWorkerFormat(build, nodeJsModuleRegexp);
+			handleRequireCallsToNodeJSBuiltins(build, nodeJsModuleRegexp);
 			handleUnenvAliasedPackages(build, alias, external);
 			handleNodeJSGlobals(build, inject, polyfill);
 		},
 	};
 }
 
-const NODEJS_MODULES_RE = new RegExp(`^(node:)?(${builtinModules.join("|")})$`);
-
 /**
  * If we are bundling a "Service Worker" formatted Worker, imports of external modules,
  * which won't be inlined/bundled by esbuild, are invalid.
  *
  * This `onResolve()` handler will error if it identifies node.js external imports.
+ *
+ * @param build ESBuild PluginBuild.
+ * @param nodeJsModuleRegexp RegExp matching Node.js built-in modules.
  */
-function errorOnServiceWorkerFormat(build: PluginBuild) {
+function errorOnServiceWorkerFormat(
+	build: PluginBuild,
+	nodeJsModuleRegexp: RegExp
+): void {
 	const paths = new Set();
 	build.onStart(() => paths.clear());
-	build.onResolve({ filter: NODEJS_MODULES_RE }, (args) => {
+	build.onResolve({ filter: nodeJsModuleRegexp }, (args) => {
 		paths.add(args.path);
 		return null;
 	});
@@ -66,7 +90,7 @@ function errorOnServiceWorkerFormat(build: PluginBuild) {
 							Your worker has no default export, which means it is assumed to be a Service Worker format Worker.
 							Did you mean to create a ES Module format Worker?
 							If so, try adding \`export default { ... }\` in your entry-point.
-							See https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/.
+							See https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/
 						`,
 					},
 				],
@@ -79,9 +103,15 @@ function errorOnServiceWorkerFormat(build: PluginBuild) {
  * We must convert `require()` calls for Node.js modules to a virtual ES Module that can be imported avoiding the require calls.
  * We do this by creating a special virtual ES module that re-exports the library in an onLoad handler.
  * The onLoad handler is triggered by matching the "namespace" added to the resolve.
+ *
+ * @param build ESBuild PluginBuild.
+ * @param nodeJsModuleRegexp RegExp matching Node.js built-in modules.
  */
-function handleRequireCallsToNodeJSBuiltins(build: PluginBuild) {
-	build.onResolve({ filter: NODEJS_MODULES_RE }, (args) => {
+function handleRequireCallsToNodeJSBuiltins(
+	build: PluginBuild,
+	nodeJsModuleRegexp: RegExp
+): void {
+	build.onResolve({ filter: nodeJsModuleRegexp }, (args) => {
 		if (args.kind === "require-call") {
 			return {
 				path: args.path,
@@ -119,7 +149,7 @@ function handleUnenvAliasedPackages(
 	for (const [module, unresolvedAlias] of Object.entries(alias)) {
 		try {
 			aliasAbsolute[module] = require.resolve(unresolvedAlias);
-		} catch (e) {
+		} catch {
 			// this is an alias for package that is not installed in the current app => ignore
 		}
 	}
@@ -212,8 +242,9 @@ function handleNodeJSGlobals(
 				module
 			);
 		}
-		// eslint-disable-next-line  @typescript-eslint/no-non-null-assertion
-		injectsByModule.get(module)!.push({ injectedName, exportName, importName });
+		const moduleInjects = injectsByModule.get(module);
+		assert(moduleInjects);
+		moduleInjects.push({ injectedName, exportName, importName });
 	}
 
 	build.initialOptions.inject = [

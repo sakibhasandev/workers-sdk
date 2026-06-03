@@ -1,34 +1,37 @@
-import {
-	buildCommand,
-	buildYargs,
-	pushCommand,
-	pushYargs,
-} from "../cloudchamber/build";
-import { handleFailure } from "../cloudchamber/common";
-import { imagesCommand } from "../cloudchamber/images/list";
-import type { CommonYargsArgvJSON, CommonYargsOptions } from "../yargs-types";
-import type { CommandModule } from "yargs";
+import { createNamespace } from "../core/create-command";
 
-export const containers = (
-	yargs: CommonYargsArgvJSON,
-	subHelp: CommandModule<CommonYargsOptions, CommonYargsOptions>
-) => {
-	return yargs
-		.command(
-			"build [PATH]",
-			"build a dockerfile",
-			(args) => buildYargs(args),
-			(args) => handleFailure(buildCommand)(args)
-		)
-		.command(
-			"push [TAG]",
-			"push a tagged image to a Cloudflare managed registry, which is automatically integrated with your account",
-			(args) => pushYargs(args),
-			(args) => handleFailure(pushCommand)(args)
-		)
-		.command(
-			"images",
-			"perform operations on images in your Cloudflare managed registry",
-			(args) => imagesCommand(args).command(subHelp)
-		);
-};
+export const containersScope = "containers:write" as const;
+
+// --- Namespace definition ---
+export const containersNamespace = createNamespace({
+	metadata: {
+		description: "📦 Manage Containers",
+		status: "stable",
+		owner: "Product: Cloudchamber",
+	},
+});
+
+// --- Re-export commands from their respective files ---
+export { containersListCommand } from "./list";
+export { containersInfoCommand, containersDeleteCommand } from "./containers";
+
+export { containersInstancesCommand } from "./instances";
+export { containersSshCommand } from "./ssh";
+
+export {
+	containersRegistriesNamespace,
+	containersRegistriesConfigureCommand,
+	containersRegistriesListCommand,
+	containersRegistriesDeleteCommand,
+	containersRegistriesCredentialsCommand,
+} from "./registries";
+
+// Build and push commands
+export { containersBuildCommand, containersPushCommand } from "./build";
+
+// Images commands
+export {
+	containersImagesNamespace,
+	containersImagesListCommand,
+	containersImagesDeleteCommand,
+} from "./images";

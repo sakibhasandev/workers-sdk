@@ -1,10 +1,15 @@
-import { Logger } from "../logger";
+import { error, logRaw, setLogLevel } from "@cloudflare/cli-shared-helpers";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import { Logger, shouldLogToDisk } from "../logger";
+import { mockCLIOutput } from "./helpers/mock-cli-output";
 import { mockConsoleMethods } from "./helpers/mock-console";
 
 describe("logger", () => {
 	const std = mockConsoleMethods();
 
-	it("should add colored markers to error and warning messages", () => {
+	it("should add colored markers to error and warning messages", ({
+		expect,
+	}) => {
 		const logger = new Logger();
 		logger.loggerLevel = "debug";
 		logger.debug("This is a debug message");
@@ -27,7 +32,9 @@ describe("logger", () => {
 	});
 
 	describe("loggerLevel=debug", () => {
-		it("should render messages that are at or above the log level set in the logger", () => {
+		it("should render messages that are at or above the log level set in the logger", ({
+			expect,
+		}) => {
 			const logger = new Logger();
 			logger.loggerLevel = "debug";
 			logger.debug("This is a debug message");
@@ -51,7 +58,9 @@ describe("logger", () => {
 	});
 
 	describe("loggerLevel=log", () => {
-		it("should render messages that are at or above the log level set in the logger", () => {
+		it("should render messages that are at or above the log level set in the logger", ({
+			expect,
+		}) => {
 			const logger = new Logger();
 			logger.loggerLevel = "log";
 			logger.debug("This is a debug message");
@@ -75,7 +84,9 @@ describe("logger", () => {
 	});
 
 	describe("loggerLevel=warn", () => {
-		it("should render messages that are at or above the log level set in the logger", () => {
+		it("should render messages that are at or above the log level set in the logger", ({
+			expect,
+		}) => {
 			const logger = new Logger();
 			logger.loggerLevel = "warn";
 			logger.debug("This is a debug message");
@@ -99,7 +110,9 @@ describe("logger", () => {
 	});
 
 	describe("loggerLevel=error", () => {
-		it("should render messages that are at or above the log level set in the logger", () => {
+		it("should render messages that are at or above the log level set in the logger", ({
+			expect,
+		}) => {
 			const logger = new Logger();
 			logger.loggerLevel = "error";
 			logger.debug("This is a debug message");
@@ -123,7 +136,9 @@ describe("logger", () => {
 			vi.stubEnv("WRANGLER_LOG", "error");
 		});
 
-		it("should render messages that are at or above the log level set in the env var", () => {
+		it("should render messages that are at or above the log level set in the env var", ({
+			expect,
+		}) => {
 			const logger = new Logger();
 			logger.debug("This is a debug message");
 			logger.log("This is a log message");
@@ -149,7 +164,9 @@ describe("logger", () => {
 			vi.stubEnv("WRANGLER_LOG", "");
 		});
 
-		it("should render messages that are at or above the log level set in the env var", () => {
+		it("should render messages that are at or above the log level set in the env var", ({
+			expect,
+		}) => {
 			const logger = new Logger();
 			logger.debug("This is a debug message");
 			logger.log("This is a log message");
@@ -179,7 +196,9 @@ describe("logger", () => {
 			vi.stubEnv("WRANGLER_LOG", "");
 		});
 
-		it("should render messages that are at or above the log level set in the env var", () => {
+		it("should render messages that are at or above the log level set in the env var", ({
+			expect,
+		}) => {
 			const logger = new Logger();
 			logger.debug("This is a debug message");
 			logger.log("This is a log message");
@@ -189,7 +208,7 @@ describe("logger", () => {
 			expect(std.debug).toMatchInlineSnapshot(`""`);
 			expect(std.out).toMatchInlineSnapshot(`"This is a log message"`);
 			expect(std.warn).toMatchInlineSnapshot(`
-				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mUnrecognised WRANGLER_LOG value \\"everything\\", expected \\"none\\" | \\"error\\" | \\"warn\\" | \\"info\\" | \\"log\\" | \\"debug\\", defaulting to \\"log\\"...[0m
+				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mUnrecognised WRANGLER_LOG value "everything", expected "none" | "error" | "warn" | "info" | "log" | "debug", defaulting to "log"...[0m
 
 
 				[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mThis is a warn message[0m
@@ -205,7 +224,7 @@ describe("logger", () => {
 	});
 
 	describe("once", () => {
-		it("should only log the same message once", () => {
+		it("should only log the same message once", ({ expect }) => {
 			const logger = new Logger();
 			logger.once.warn("This is a once.warn message");
 			logger.once.warn("This is a once.warn message");
@@ -220,7 +239,7 @@ describe("logger", () => {
 			`);
 		});
 
-		it("should log once per log level", () => {
+		it("should log once per log level", ({ expect }) => {
 			const logger = new Logger();
 			logger.once.warn("This is a once message");
 			logger.once.info("This is a once message");
@@ -237,5 +256,121 @@ describe("logger", () => {
 			`);
 			expect(std.info).toMatchInlineSnapshot(`"This is a once message"`);
 		});
+	});
+
+	describe("@cloudflare/cli-shared-helpers logRaw", () => {
+		const cliOut = mockCLIOutput();
+
+		it("should output at log level", ({ expect }) => {
+			setLogLevel("log");
+			logRaw("This is a logRaw message");
+			expect(cliOut.stdout).toMatchInlineSnapshot(
+				`"This is a logRaw message\n"`
+			);
+		});
+
+		it("should not output when log level is set to warn", ({ expect }) => {
+			setLogLevel("warn");
+			logRaw("This is a logRaw message");
+			expect(cliOut.stdout).toMatchInlineSnapshot(`""`);
+		});
+
+		it("should not output when log level is set to error", ({ expect }) => {
+			setLogLevel("error");
+			logRaw("This is a logRaw message");
+			expect(cliOut.stdout).toMatchInlineSnapshot(`""`);
+		});
+
+		it("should not output when log level is set to none", ({ expect }) => {
+			setLogLevel("none");
+			logRaw("This is a logRaw message");
+			expect(cliOut.stdout).toMatchInlineSnapshot(`""`);
+		});
+
+		it("should output when log level is set to debug", ({ expect }) => {
+			setLogLevel("debug");
+			logRaw("This is a logRaw message");
+			expect(cliOut.stdout).toMatchInlineSnapshot(
+				`"This is a logRaw message\n"`
+			);
+		});
+	});
+
+	describe("@cloudflare/cli-shared-helpers error", () => {
+		const cliOut = mockCLIOutput();
+
+		it("should output at error level", ({ expect }) => {
+			setLogLevel("error");
+			error("This is an error message");
+			expect(cliOut.stderr).toMatchInlineSnapshot(
+				`"╰  ERROR  This is an error message\n"`
+			);
+		});
+
+		it("should not output when log level is set to none", ({ expect }) => {
+			setLogLevel("none");
+			error("This is an error message");
+			expect(cliOut.stderr).toMatchInlineSnapshot(`""`);
+		});
+
+		it("should output when log level is set to warn", ({ expect }) => {
+			setLogLevel("warn");
+			error("This is an error message");
+			expect(cliOut.stderr).toMatchInlineSnapshot(
+				`"╰  ERROR  This is an error message\n"`
+			);
+		});
+
+		it("should output when log level is set to log", ({ expect }) => {
+			setLogLevel("log");
+			error("This is an error message");
+			expect(cliOut.stderr).toMatchInlineSnapshot(
+				`"╰  ERROR  This is an error message\n"`
+			);
+		});
+
+		it("should output when log level is set to debug", ({ expect }) => {
+			setLogLevel("debug");
+			error("This is an error message");
+			expect(cliOut.stderr).toMatchInlineSnapshot(
+				`"╰  ERROR  This is an error message\n"`
+			);
+		});
+	});
+});
+
+describe("shouldLogToDisk", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it("should return false in test environments by default", ({ expect }) => {
+		expect(shouldLogToDisk()).toBe(false);
+	});
+
+	it("should return true outside test environments when WRANGLER_WRITE_LOGS is not set", ({
+		expect,
+	}) => {
+		expect(shouldLogToDisk(false)).toBe(true);
+	});
+
+	it("should return false when WRANGLER_WRITE_LOGS=false", ({ expect }) => {
+		vi.stubEnv("WRANGLER_WRITE_LOGS", "false");
+		expect(shouldLogToDisk(false)).toBe(false);
+	});
+
+	it("should be case-insensitive (WRANGLER_WRITE_LOGS=FALSE)", ({ expect }) => {
+		vi.stubEnv("WRANGLER_WRITE_LOGS", "FALSE");
+		expect(shouldLogToDisk(false)).toBe(false);
+	});
+
+	it("should return false when WRANGLER_WRITE_LOGS=0", ({ expect }) => {
+		vi.stubEnv("WRANGLER_WRITE_LOGS", "0");
+		expect(shouldLogToDisk(false)).toBe(false);
+	});
+
+	it("should return true for any other value", ({ expect }) => {
+		vi.stubEnv("WRANGLER_WRITE_LOGS", "true");
+		expect(shouldLogToDisk(false)).toBe(true);
 	});
 });

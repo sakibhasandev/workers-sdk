@@ -1,5 +1,5 @@
-import { spawnSync } from "child_process";
-import { writeFileSync } from "fs";
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import dedent from "ts-dedent";
 import { beforeEach, describe, it, vitest } from "vitest";
 import {
@@ -89,25 +89,52 @@ describe("parseDiffForChanges()", () => {
 });
 
 describe("generateChangesetHeader()", () => {
-	it("should return a header with the given package name and 'patch' version bump", ({
+	it("should return a header with a single package and 'patch' version bump", ({
 		expect,
 	}) => {
-		const header = generateChangesetHeader("package-name");
+		const header = generateChangesetHeader(["package-name"]);
 		expect(header).toMatchInlineSnapshot(`
 			"---
 			"package-name": patch
 			---"
 		`);
 	});
+
+	it("should return a header with multiple packages and 'patch' version bump", ({
+		expect,
+	}) => {
+		const header = generateChangesetHeader(["package-name", "another-package"]);
+		expect(header).toMatchInlineSnapshot(`
+			"---
+			"package-name": patch
+			"another-package": patch
+			---"
+		`);
+	});
 });
 
 describe("generateCommitMessage()", () => {
-	it("should return a commit message about the changed package", ({
+	it("should return a commit message about a single changed package", ({
 		expect,
 	}) => {
-		const message = generateCommitMessage("@namespace/package", new Map());
+		const message = generateCommitMessage(["@namespace/package"], new Map());
 		expect(message).toMatchInlineSnapshot(`
-			"chore: update dependencies of "@namespace/package" package
+			"Update dependencies of "@namespace/package"
+
+			The following dependency versions have been updated:
+
+			| Dependency | From | To |
+			| ---------- | ---- | -- |"
+		`);
+	});
+
+	it("should return a commit message about multiple packages", ({ expect }) => {
+		const message = generateCommitMessage(
+			["@namespace/package", "another-package"],
+			new Map()
+		);
+		expect(message).toMatchInlineSnapshot(`
+			"Update dependencies of "@namespace/package", "another-package"
 
 			The following dependency versions have been updated:
 
@@ -120,7 +147,7 @@ describe("generateCommitMessage()", () => {
 		expect,
 	}) => {
 		const message = generateCommitMessage(
-			"package-name",
+			["package-name"],
 			new Map([
 				["some-package", { from: "^0.0.1", to: "^0.0.2" }],
 				["@namespace/some-package", { from: "1.3.4", to: "1.4.5" }],
@@ -128,7 +155,7 @@ describe("generateCommitMessage()", () => {
 		);
 
 		expect(message).toMatchInlineSnapshot(`
-			"chore: update dependencies of "package-name" package
+			"Update dependencies of "package-name"
 
 			The following dependency versions have been updated:
 
@@ -181,6 +208,7 @@ describe("writeChangeSet()", () => {
 
 describe("commitAndPush()", () => {
 	it("should call spawnSync with appropriate git commands", ({ expect }) => {
+		(spawnSync as Mock).mockClear();
 		(spawnSync as Mock).mockReturnValue({ output: [] });
 		const commitMessage = dedent`
 			chore: update dependencies of "@namespace/package" package

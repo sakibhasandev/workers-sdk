@@ -1,11 +1,9 @@
-import { bgGreen, bgRed, bgYellow } from "@cloudflare/cli/colors";
-import { type PlacementStatusHealth } from "../client";
-
-export function capitalize<S extends string>(str: S): Capitalize<S> {
-	return (
-		str.length > 0 ? str[0].toUpperCase() + str.substring(1) : str
-	) as Capitalize<S>;
-}
+import {
+	bgGreen,
+	bgRed,
+	bgYellow,
+} from "@cloudflare/cli-shared-helpers/colors";
+import { type PlacementStatusHealth } from "@cloudflare/containers-shared";
 
 export function statusToColored(status?: PlacementStatusHealth): string {
 	if (!status) {
@@ -13,14 +11,12 @@ export function statusToColored(status?: PlacementStatusHealth): string {
 	}
 
 	const mappings: Record<PlacementStatusHealth, (_: string) => string> = {
-		pending: bgYellow,
 		placed: bgYellow,
 		running: bgGreen,
 		stopped: bgYellow,
 		stopping: bgYellow,
 		failed: bgRed,
 		unhealthy: bgRed,
-		complete: bgGreen,
 	};
 
 	if (!(status in mappings)) {

@@ -1,11 +1,16 @@
+import { randomUUID } from "node:crypto";
+
+// Worker names
 export const ROUTER_WORKER_NAME = "__router-worker__";
 export const ASSET_WORKER_NAME = "__asset-worker__";
-export const ASSET_WORKERS_COMPATIBILITY_DATE = "2024-10-04";
+export const VITE_PROXY_WORKER_NAME = "__vite_proxy_worker__";
 
-export const ADDITIONAL_MODULE_TYPES = [
-	"CompiledWasm",
-	"Data",
-	"Text",
-] as const;
+export const PROXY_SHARED_SECRET = randomUUID();
 
-export const DEFAULT_INSPECTOR_PORT = 9229;
+export const kRequestType = Symbol("kRequestType");
+
+declare module "http" {
+	interface IncomingMessage {
+		[kRequestType]?: "asset";
+	}
+}

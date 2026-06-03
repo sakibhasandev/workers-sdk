@@ -1,264 +1,74 @@
-/* Based heavily on code from https://github.com/BitySA/oauth2-auth-code-pkce */
-
-/*
-
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "[]"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright [yyyy] [name of copyright owner]
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-  */
+// The OAuth-2.0-with-PKCE flow (login / logout / refresh / token persistence /
+// callback server / Cloudflare Access detection) previously lived in this file.
+//
+// What remains here:
+//   - Cloudflare credential resolution from environment variables
+//   - The OAuth scope catalog (Cloudflare-specific; passed into the OAuth flow
+//     as a generic string[])
+//   - Cloudflare account selection (resolves to an `account_id` from config,
+//     env, cache, or interactive `select` prompt)
+//   - `requireAuth` / `requireApiToken` — the high-level entry points used by
+//     wrangler's commands
 
 import assert from "node:assert";
-import { webcrypto as crypto } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import http from "node:http";
-import path from "node:path";
-import url from "node:url";
-import { TextEncoder } from "node:util";
-import TOML from "@iarna/toml";
-import { fetch } from "undici";
-import { configFileName } from "../config";
-import {
-	getConfigCache,
-	purgeConfigCaches,
-	saveToConfigCache,
-} from "../config-cache";
+import { readStoredAuthState } from "@cloudflare/workers-auth";
+import { createOAuthFlow } from "@cloudflare/workers-auth";
+import { configFileName, UserError } from "@cloudflare/workers-utils";
+import ci from "ci-info";
+import { getConfigCache, saveToConfigCache } from "../config-cache";
+import { purgeConfigCaches } from "../config-cache";
 import { NoDefaultValueProvided, select } from "../dialogs";
-import { getCloudflareApiEnvironmentFromEnv } from "../environment-variables/misc-variables";
-import { UserError } from "../errors";
-import { getGlobalWranglerConfigPath } from "../global-wrangler-config-path";
 import { isNonInteractiveOrCI } from "../is-interactive";
 import { logger } from "../logger";
 import openInBrowser from "../open-in-browser";
-import { parseTOML, readFileSync } from "../parse";
-import { domainUsesAccess } from "./access";
 import {
-	getAuthDomainFromEnv,
-	getAuthUrlFromEnv,
-	getClientIdFromEnv,
-	getCloudflareAccessToken,
 	getCloudflareAccountIdFromEnv,
 	getCloudflareAPITokenFromEnv,
 	getCloudflareGlobalAuthEmailFromEnv,
 	getCloudflareGlobalAuthKeyFromEnv,
-	getRevokeUrlFromEnv,
-	getTokenUrlFromEnv,
 } from "./auth-variables";
-import { getAccountChoices } from "./choose-account";
+import { fetchAllAccounts } from "./fetch-accounts";
 import { generateAuthUrl } from "./generate-auth-url";
 import { generateRandomState } from "./generate-random-state";
-import type { ChooseAccountItem } from "./choose-account";
-import type { ParsedUrlQuery } from "node:querystring";
-import type { Response } from "undici";
-
-export type ApiCredentials =
-	| {
-			apiToken: string;
-	  }
-	| {
-			authKey: string;
-			authEmail: string;
-	  };
+import type { Account } from "./shared";
+import type { LoginProps } from "@cloudflare/workers-auth";
+import type {
+	ApiCredentials,
+	ComplianceConfig,
+} from "@cloudflare/workers-utils";
 
 /**
- * Try to read an API token or Global Auth from the environment.
+ * The single wrangler-wide OAuth flow instance.
+ *
+ * Wires the OAuth-flow primitives in `@cloudflare/workers-auth` to wrangler's
+ * logger, browser opener, interactivity detector, and config cache.
+ *
+ * The `generateAuthUrl` and `generateRandomState` overrides come from
+ * wrangler's local re-export shims so that the existing `vi.mock(...)` calls
+ * in `vitest.setup.ts` (which produce deterministic snapshot URLs) continue to
+ * apply — the mocked versions are injected via the context here and used
+ * internally by `@cloudflare/workers-auth`.
+ */
+const oauthFlow = createOAuthFlow({
+	logger,
+	isNonInteractiveOrCI,
+	openInBrowser,
+	hasEnvCredentials: () => getAuthFromEnv() !== undefined,
+	purgeOnLoginOrLogout: purgeConfigCaches,
+	generateAuthUrl,
+	generateRandomState,
+});
+
+/**
+ * Try to read API credentials from environment variables.
+ *
+ * Authentication priority (highest to lowest):
+ * 1. Global API Key + Email (CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL)
+ * 2. API Token (CLOUDFLARE_API_TOKEN)
+ * 3. OAuth token from local state (via `wrangler login`) - not handled here
+ *
+ * Note: Global API Key + Email requires two headers (X-Auth-Key + X-Auth-Email),
+ * while API Token and OAuth token are both used as Bearer tokens.
  */
 export function getAuthFromEnv(): ApiCredentials | undefined {
 	const globalApiKey = getCloudflareGlobalAuthKeyFromEnv();
@@ -272,64 +82,9 @@ export function getAuthFromEnv(): ApiCredentials | undefined {
 	}
 }
 
-/**
- * An implementation of rfc6749#section-4.1 and rfc7636.
- */
-
-interface PKCECodes {
-	codeChallenge: string;
-	codeVerifier: string;
-}
-
-/**
- * The module level state of the authentication flow.
- */
-interface State extends AuthTokens {
-	authorizationCode?: string;
-	codeChallenge?: string;
-	codeVerifier?: string;
-	hasAuthCodeBeenExchangedForAccessToken?: boolean;
-	stateQueryParam?: string;
-	scopes?: Scope[];
-}
-
-/**
- * The tokens related to authentication.
- */
-interface AuthTokens {
-	accessToken?: AccessToken;
-	refreshToken?: RefreshToken;
-	scopes?: Scope[];
-	/** @deprecated - this field was only provided by the deprecated v1 `wrangler config` command. */
-	apiToken?: string;
-}
-
-/**
- * The path to the config file that holds user authentication data,
- * relative to the user's home directory.
- */
-const USER_AUTH_CONFIG_PATH = "config";
-
-/**
- * The data that may be read from the `USER_CONFIG_FILE`.
- */
-export interface UserAuthConfig {
-	oauth_token?: string;
-	refresh_token?: string;
-	expiration_time?: string;
-	scopes?: string[];
-	/** @deprecated - this field was only provided by the deprecated v1 `wrangler config` command. */
-	api_token?: string;
-}
-
-interface RefreshToken {
-	value: string;
-}
-
-interface AccessToken {
-	value: string;
-	expiry: string;
-}
+// ---------------------------------------------------------------------------
+// Scope catalog
+// ---------------------------------------------------------------------------
 
 const DefaultScopes = {
 	"account:read":
@@ -351,28 +106,36 @@ const DefaultScopes = {
 	"zone:read": "Grants read level access to account zone.",
 	"ssl_certs:write": "See and manage mTLS certificates for your account",
 	"ai:write": "See and change Workers AI catalog and assets",
+	"ai-search:write": "See and change AI Search data",
+	"ai-search:run": "Run search queries on your AI Search instances",
+	"websearch.run": "Run search queries against Cloudflare Web Search",
+	"agent-memory:write":
+		"See and change Agent Memory data such as keys and namespaces.",
 	"queues:write": "See and change Cloudflare Queues settings and data",
 	"pipelines:write":
 		"See and change Cloudflare Pipelines configurations and data",
 	"secrets_store:write":
 		"See and change secrets + stores within the Secrets Store",
-} as const;
-
-const OptionalScopes = {
+	"artifacts:write":
+		"See and change Cloudflare Artifacts data such as registries and artifacts",
+	"flagship:write": "See and change Flagship feature flags and apps",
+	"containers:write": "Manage Workers Containers",
 	"cloudchamber:write": "Manage Cloudchamber",
+	"connectivity:admin":
+		"See, change, and bind to Connectivity Directory services, including creating services targeting Cloudflare Tunnel.",
+	"email_routing:write":
+		"See and change Email Routing settings, rules, and destination addresses.",
+	"email_sending:write":
+		"See and change Email Sending settings and configuration.",
+	"browser:write": "See and manage Browser Run sessions",
 } as const;
-
-const AllScopes = {
-	...DefaultScopes,
-	...OptionalScopes,
-};
 
 /**
  * The possible keys for a Scope.
  *
  * "offline_access" is automatically included.
  */
-export type Scope = keyof typeof AllScopes;
+export type Scope = keyof typeof DefaultScopes;
 
 export let DefaultScopeKeys = Object.keys(DefaultScopes) as Scope[];
 
@@ -386,804 +149,184 @@ export function validateScopeKeys(
 	return scopes.every((scope) => scope in DefaultScopes);
 }
 
-const CALLBACK_URL = "http://localhost:8976/oauth/callback";
-
-let LocalState: State = {
-	...getAuthTokens(),
-};
-
-/**
- * Compute the current auth tokens.
- */
-function getAuthTokens(config?: UserAuthConfig): AuthTokens | undefined {
-	// get refreshToken/accessToken from fs if exists
-	try {
-		// if the environment variable is available, we don't need to do anything here
-		if (getAuthFromEnv()) {
-			return;
-		}
-
-		// otherwise try loading from the user auth config file.
-		const { oauth_token, refresh_token, expiration_time, scopes, api_token } =
-			config || readAuthConfigFile();
-
-		if (oauth_token) {
-			return {
-				accessToken: {
-					value: oauth_token,
-					// If there is no `expiration_time` field then set it to an old date, to cause it to expire immediately.
-					expiry: expiration_time ?? "2000-01-01:00:00:00+00:00",
-				},
-				refreshToken: { value: refresh_token ?? "" },
-				scopes: scopes as Scope[],
-			};
-		} else if (api_token) {
-			logger.warn(
-				"It looks like you have used Wrangler v1's `config` command to login with an API token.\n" +
-					"This is no longer supported in the current version of Wrangler.\n" +
-					"If you wish to authenticate via an API token then please set the `CLOUDFLARE_API_TOKEN` environment variable."
-			);
-			return { apiToken: api_token };
-		}
-	} catch {
-		return undefined;
-	}
+export function listScopes(message = "💁 Available scopes:"): void {
+	logger.log(message);
+	printScopes(DefaultScopeKeys);
 }
 
 /**
- * Run the initialization of the auth state, in the case that something changed.
- *
- * This runs automatically whenever `writeAuthConfigFile` is run, so generally
- * you won't need to call it yourself.
+ * Get the scopes granted to the current OAuth token. Returns undefined when
+ * the user is not logged in via OAuth (e.g. env-based auth).
  */
-export function reinitialiseAuthTokens(): void;
-
-/**
- * Reinitialise auth state from an in-memory config, skipping
- * over the part where we write a file and then read it back into memory
- */
-export function reinitialiseAuthTokens(config: UserAuthConfig): void;
-
-export function reinitialiseAuthTokens(config?: UserAuthConfig): void {
-	LocalState = {
-		...getAuthTokens(config),
-	};
+export function getScopes(): Scope[] | undefined {
+	return readStoredAuthState({ warningLogger: logger }).scopes as
+		| Scope[]
+		| undefined;
 }
+
+export function printScopes(scopes: Scope[]) {
+	const data = scopes.map((scope: Scope) => ({
+		Scope: scope,
+		Description: DefaultScopes[scope],
+	}));
+
+	logger.table(data);
+}
+
+// ---------------------------------------------------------------------------
+// Credential resolution (combines env + stored OAuth token)
+// ---------------------------------------------------------------------------
 
 export function getAPIToken(): ApiCredentials | undefined {
-	if (LocalState.apiToken) {
-		return { apiToken: LocalState.apiToken };
+	const envAuth = getAuthFromEnv();
+	if (envAuth) {
+		return envAuth;
 	}
 
-	const localAPIToken = getAuthFromEnv();
-	if (localAPIToken) {
-		return localAPIToken;
+	const stored = readStoredAuthState({ warningLogger: logger });
+	if (stored.deprecatedApiToken) {
+		return { apiToken: stored.deprecatedApiToken };
 	}
-
-	const storedAccessToken = LocalState.accessToken?.value;
-	if (storedAccessToken) {
-		return { apiToken: storedAccessToken };
+	if (stored.accessToken?.value) {
+		return { apiToken: stored.accessToken.value };
 	}
 
 	return undefined;
 }
 
-interface AccessContext {
-	token?: AccessToken;
-	scopes?: Scope[];
-	refreshToken?: RefreshToken;
-}
-
 /**
- * A list of OAuth2AuthCodePKCE errors.
+ * Throw an error if there is no API token available.
  */
-// To "namespace" all errors.
-class ErrorOAuth2 extends UserError {
-	toString(): string {
-		return "ErrorOAuth2";
-	}
-}
-
-// For really unknown errors.
-class ErrorUnknown extends Error {
-	toString(): string {
-		return "ErrorUnknown";
-	}
-}
-
-// Some generic, internal errors that can happen.
-class ErrorNoAuthCode extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorNoAuthCode";
-	}
-}
-class ErrorInvalidReturnedStateParam extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorInvalidReturnedStateParam";
-	}
-}
-class ErrorInvalidJson extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorInvalidJson";
-	}
-}
-
-// Errors that occur across many endpoints
-class ErrorInvalidScope extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorInvalidScope";
-	}
-}
-class ErrorInvalidRequest extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorInvalidRequest";
-	}
-}
-class ErrorInvalidToken extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorInvalidToken";
-	}
-}
-
-/**
- * Possible authorization grant errors given by the redirection from the
- * authorization server.
- */
-class ErrorAuthenticationGrant extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorAuthenticationGrant";
-	}
-}
-class ErrorUnauthorizedClient extends ErrorAuthenticationGrant {
-	toString(): string {
-		return "ErrorUnauthorizedClient";
-	}
-}
-class ErrorAccessDenied extends ErrorAuthenticationGrant {
-	toString(): string {
-		return "ErrorAccessDenied";
-	}
-}
-class ErrorUnsupportedResponseType extends ErrorAuthenticationGrant {
-	toString(): string {
-		return "ErrorUnsupportedResponseType";
-	}
-}
-class ErrorServerError extends ErrorAuthenticationGrant {
-	toString(): string {
-		return "ErrorServerError";
-	}
-}
-class ErrorTemporarilyUnavailable extends ErrorAuthenticationGrant {
-	toString(): string {
-		return "ErrorTemporarilyUnavailable";
-	}
-}
-
-/**
- * A list of possible access token response errors.
- */
-class ErrorAccessTokenResponse extends ErrorOAuth2 {
-	toString(): string {
-		return "ErrorAccessTokenResponse";
-	}
-}
-class ErrorInvalidClient extends ErrorAccessTokenResponse {
-	toString(): string {
-		return "ErrorInvalidClient";
-	}
-}
-class ErrorInvalidGrant extends ErrorAccessTokenResponse {
-	toString(): string {
-		return "ErrorInvalidGrant";
-	}
-}
-class ErrorUnsupportedGrantType extends ErrorAccessTokenResponse {
-	toString(): string {
-		return "ErrorUnsupportedGrantType";
-	}
-}
-
-const RawErrorToErrorClassMap: { [_: string]: typeof ErrorOAuth2 } = {
-	invalid_request: ErrorInvalidRequest,
-	invalid_grant: ErrorInvalidGrant,
-	unauthorized_client: ErrorUnauthorizedClient,
-	access_denied: ErrorAccessDenied,
-	unsupported_response_type: ErrorUnsupportedResponseType,
-	invalid_scope: ErrorInvalidScope,
-	server_error: ErrorServerError,
-	temporarily_unavailable: ErrorTemporarilyUnavailable,
-	invalid_client: ErrorInvalidClient,
-	unsupported_grant_type: ErrorUnsupportedGrantType,
-	invalid_json: ErrorInvalidJson,
-	invalid_token: ErrorInvalidToken,
-};
-
-/**
- * Translate the raw error strings returned from the server into error classes.
- */
-function toErrorClass(rawError: string): ErrorOAuth2 {
-	return new (RawErrorToErrorClassMap[rawError] || ErrorUnknown)();
-}
-
-/**
- * The maximum length for a code verifier for the best security we can offer.
- * Please note the NOTE section of RFC 7636 § 4.1 - the length must be >= 43,
- * but <= 128, **after** base64 url encoding. This means 32 code verifier bytes
- * encoded will be 43 bytes, or 96 bytes encoded will be 128 bytes. So 96 bytes
- * is the highest valid value that can be used.
- */
-const RECOMMENDED_CODE_VERIFIER_LENGTH = 96;
-
-/**
- * A sensible length for the state's length, for anti-csrf.
- */
-const RECOMMENDED_STATE_LENGTH = 32;
-
-/**
- * Character set to generate code verifier defined in rfc7636.
- */
-export const PKCE_CHARSET =
-	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-
-/**
- * OAuth 2.0 client that ONLY supports authorization code flow, with PKCE.
- */
-
-/**
- * If there is an error, it will be passed back as a rejected Promise.
- * If there is no code, the user should be redirected via
- * [fetchAuthorizationCode].
- */
-function isReturningFromAuthServer(query: ParsedUrlQuery): boolean {
-	if (query.error) {
-		if (Array.isArray(query.error)) {
-			throw toErrorClass(query.error[0]);
-		}
-		throw toErrorClass(query.error);
-	}
-
-	const code = query.code;
-	if (!code) {
-		return false;
-	}
-
-	const state = LocalState;
-
-	const stateQueryParam = query.state;
-	if (stateQueryParam !== state.stateQueryParam) {
-		logger.warn(
-			"Received query string parameter doesn't match the one sent! Possible malicious activity somewhere."
-		);
-		throw new ErrorInvalidReturnedStateParam();
-	}
-	assert(!Array.isArray(code));
-	state.authorizationCode = code;
-	state.hasAuthCodeBeenExchangedForAccessToken = false;
-	return true;
-}
-
-async function getAuthURL(scopes: string[], clientId: string): Promise<string> {
-	const { codeChallenge, codeVerifier } = await generatePKCECodes();
-	const stateQueryParam = generateRandomState(RECOMMENDED_STATE_LENGTH);
-
-	Object.assign(LocalState, {
-		codeChallenge,
-		codeVerifier,
-		stateQueryParam,
-	});
-
-	return generateAuthUrl({
-		authUrl: getAuthUrlFromEnv(),
-		clientId,
-		callbackUrl: CALLBACK_URL,
-		scopes,
-		stateQueryParam,
-		codeChallenge,
-	});
-}
-
-type TokenResponse =
-	| {
-			access_token: string;
-			expires_in: number;
-			refresh_token: string;
-			scope: string;
-	  }
-	| {
-			error: string;
-	  };
-
-/**
- * Refresh an access token from the remote service.
- */
-async function exchangeRefreshTokenForAccessToken(): Promise<AccessContext> {
-	if (!LocalState.refreshToken) {
-		logger.warn("No refresh token is present.");
-	}
-
-	const params = new URLSearchParams({
-		grant_type: "refresh_token",
-		refresh_token: LocalState.refreshToken?.value ?? "",
-		client_id: getClientIdFromEnv(),
-	});
-
-	const response = await fetchAuthToken(params);
-
-	if (response.status >= 400) {
-		let tokenExchangeResErr = undefined;
-
-		try {
-			tokenExchangeResErr = await response.text();
-			tokenExchangeResErr = JSON.parse(tokenExchangeResErr);
-		} catch (e) {
-			// If it can't parse to JSON ignore the error
-		}
-
-		if (tokenExchangeResErr !== undefined) {
-			// We will throw the parsed error if it parsed correctly, otherwise we throw an unknown error.
-			throw typeof tokenExchangeResErr === "string"
-				? new Error(tokenExchangeResErr)
-				: tokenExchangeResErr;
-		} else {
-			throw new ErrorUnknown(
-				"Failed to parse Error from exchangeRefreshTokenForAccessToken"
-			);
-		}
-	} else {
-		try {
-			const json = (await getJSONFromResponse(response)) as TokenResponse;
-			if ("error" in json) {
-				throw json.error;
-			}
-
-			const { access_token, expires_in, refresh_token, scope } = json;
-			let scopes: Scope[] = [];
-
-			const accessToken: AccessToken = {
-				value: access_token,
-				expiry: new Date(Date.now() + expires_in * 1000).toISOString(),
-			};
-			LocalState.accessToken = accessToken;
-
-			if (refresh_token) {
-				LocalState.refreshToken = {
-					value: refresh_token,
-				};
-			}
-
-			if (scope) {
-				// Multiple scopes are passed and delimited by spaces,
-				// despite using the singular name "scope".
-				scopes = scope.split(" ") as Scope[];
-				LocalState.scopes = scopes;
-			}
-
-			const accessContext: AccessContext = {
-				token: accessToken,
-				scopes,
-				refreshToken: LocalState.refreshToken,
-			};
-			return accessContext;
-		} catch (error) {
-			if (typeof error === "string") {
-				throw toErrorClass(error);
-			} else {
-				throw error;
-			}
-		}
-	}
-}
-
-/**
- * Fetch an access token from the remote service.
- */
-async function exchangeAuthCodeForAccessToken(): Promise<AccessContext> {
-	const { authorizationCode, codeVerifier = "" } = LocalState;
-
-	if (!codeVerifier) {
-		logger.warn("No code verifier is being sent.");
-	} else if (!authorizationCode) {
-		logger.warn("No authorization grant code is being passed.");
-	}
-
-	const params = new URLSearchParams({
-		grant_type: `authorization_code`,
-		code: authorizationCode ?? "",
-		redirect_uri: CALLBACK_URL,
-		client_id: getClientIdFromEnv(),
-		code_verifier: codeVerifier,
-	});
-
-	const response = await fetchAuthToken(params);
-	if (!response.ok) {
-		const { error } = (await getJSONFromResponse(response)) as {
-			error: string;
-		};
-		// .catch((_) => ({ error: "invalid_json" }));
-		if (error === "invalid_grant") {
-			logger.log("Expired! Auth code or refresh token needs to be renewed.");
-			// alert("Redirecting to auth server to obtain a new auth grant code.");
-			// TODO: return refreshAuthCodeOrRefreshToken();
-		}
-		throw toErrorClass(error);
-	}
-	const json = (await getJSONFromResponse(response)) as TokenResponse;
-	if ("error" in json) {
-		throw new Error(json.error);
-	}
-	const { access_token, expires_in, refresh_token, scope } = json;
-	let scopes: Scope[] = [];
-	LocalState.hasAuthCodeBeenExchangedForAccessToken = true;
-
-	const expiryDate = new Date(Date.now() + expires_in * 1000);
-	const accessToken: AccessToken = {
-		value: access_token,
-		expiry: expiryDate.toISOString(),
-	};
-	LocalState.accessToken = accessToken;
-
-	if (refresh_token) {
-		LocalState.refreshToken = {
-			value: refresh_token,
-		};
-	}
-
-	if (scope) {
-		// Multiple scopes are passed and delimited by spaces,
-		// despite using the singular name "scope".
-		scopes = scope.split(" ") as Scope[];
-		LocalState.scopes = scopes;
-	}
-
-	const accessContext: AccessContext = {
-		token: accessToken,
-		scopes,
-		refreshToken: LocalState.refreshToken,
-	};
-	return accessContext;
-}
-
-/**
- * Implements *base64url-encode* (RFC 4648 § 5) without padding, which is NOT
- * the same as regular base64 encoding.
- */
-function base64urlEncode(value: string): string {
-	let base64 = btoa(value);
-	base64 = base64.replace(/\+/g, "-");
-	base64 = base64.replace(/\//g, "_");
-	base64 = base64.replace(/=/g, "");
-	return base64;
-}
-
-/**
- * Generates a code_verifier and code_challenge, as specified in rfc7636.
- */
-
-async function generatePKCECodes(): Promise<PKCECodes> {
-	const output = new Uint32Array(RECOMMENDED_CODE_VERIFIER_LENGTH);
-	crypto.getRandomValues(output);
-	const codeVerifier = base64urlEncode(
-		Array.from(output)
-			.map((num: number) => PKCE_CHARSET[num % PKCE_CHARSET.length])
-			.join("")
-	);
-	const buffer = await crypto.subtle.digest(
-		"SHA-256",
-		new TextEncoder().encode(codeVerifier)
-	);
-	const hash = new Uint8Array(buffer);
-	let binary = "";
-	const hashLength = hash.byteLength;
-	for (let i = 0; i < hashLength; i++) {
-		binary += String.fromCharCode(hash[i]);
-	}
-	const codeChallenge = base64urlEncode(binary);
-	return { codeChallenge, codeVerifier };
-}
-
-export function getAuthConfigFilePath() {
-	const environment = getCloudflareApiEnvironmentFromEnv();
-	const filePath = `${USER_AUTH_CONFIG_PATH}/${environment === "production" ? "default.toml" : `${environment}.toml`}`;
-
-	return path.join(getGlobalWranglerConfigPath(), filePath);
-}
-
-/**
- * Writes a a wrangler config file (auth credentials) to disk,
- * and updates the user auth state with the new credentials.
- */
-export function writeAuthConfigFile(config: UserAuthConfig) {
-	const configPath = getAuthConfigFilePath();
-
-	mkdirSync(path.dirname(configPath), {
-		recursive: true,
-	});
-	writeFileSync(path.join(configPath), TOML.stringify(config as TOML.JsonMap), {
-		encoding: "utf-8",
-	});
-
-	reinitialiseAuthTokens();
-}
-
-export function readAuthConfigFile(): UserAuthConfig {
-	const toml = parseTOML(readFileSync(getAuthConfigFilePath()));
-	return toml;
-}
-
-type LoginProps = {
-	scopes?: Scope[];
-	browser: boolean;
-};
-
-export async function loginOrRefreshIfRequired(
-	props?: LoginProps
-): Promise<boolean> {
-	// TODO: if there already is a token, then try refreshing
-	// TODO: ask permission before opening browser
-	if (!getAPIToken()) {
-		// Not logged in.
-		// If we are not interactive, we cannot ask the user to login
-		return !isNonInteractiveOrCI() && (await login(props));
-	} else if (isAccessTokenExpired()) {
-		// We're logged in, but the refresh token seems to have expired,
-		// so let's try to refresh it
-		const didRefresh = await refreshToken();
-		if (didRefresh) {
-			// The token was refreshed, so we're done here
-			return true;
-		} else {
-			// If the refresh token isn't valid, then we ask the user to login again
-			return !isNonInteractiveOrCI() && (await login(props));
-		}
-	} else {
-		return true;
-	}
-}
-
-export async function getOauthToken(options: {
-	browser: boolean;
-	scopes: string[];
-	clientId: string;
-	denied: {
-		url: string;
-		error: string;
-	};
-	granted: {
-		url: string;
-	};
-}): Promise<AccessContext> {
-	const urlToOpen = await getAuthURL(options.scopes, options.clientId);
-	let server: http.Server;
-	let loginTimeoutHandle: ReturnType<typeof setTimeout>;
-	const timerPromise = new Promise<AccessContext>((_, reject) => {
-		loginTimeoutHandle = setTimeout(() => {
-			server.close();
-			clearTimeout(loginTimeoutHandle);
-			reject(
-				new UserError(
-					"Timed out waiting for authorization code, please try again."
-				)
-			);
-		}, 120000); // wait for 120 seconds for the user to authorize
-	});
-
-	const loginPromise = new Promise<AccessContext>((resolve, reject) => {
-		server = http.createServer(async (req, res) => {
-			function finish(token: null, error: Error): void;
-			function finish(token: AccessContext): void;
-			function finish(token: AccessContext | null, error?: Error) {
-				clearTimeout(loginTimeoutHandle);
-				server.close((closeErr?: Error) => {
-					if (error || closeErr) {
-						reject(error || closeErr);
-					} else {
-						assert(token);
-						resolve(token);
-					}
-				});
-			}
-
-			assert(req.url, "This request doesn't have a URL"); // This should never happen
-			const { pathname, query } = url.parse(req.url, true);
-			if (req.method !== "GET") {
-				return res.end("OK");
-			}
-			switch (pathname) {
-				case "/oauth/callback": {
-					let hasAuthCode = false;
-					try {
-						hasAuthCode = isReturningFromAuthServer(query);
-					} catch (err: unknown) {
-						if (err instanceof ErrorAccessDenied) {
-							res.writeHead(307, {
-								Location: options.denied.url,
-							});
-							res.end(() => {
-								finish(null, new UserError(options.denied.error));
-							});
-
-							return;
-						} else {
-							finish(null, err as Error);
-							return;
-						}
-					}
-					if (!hasAuthCode) {
-						// render an error page here
-						finish(null, new ErrorNoAuthCode());
-						return;
-					} else {
-						const exchange = await exchangeAuthCodeForAccessToken();
-						res.writeHead(307, {
-							Location: options.granted.url,
-						});
-						res.end(() => {
-							finish(exchange);
-						});
-
-						return;
-					}
-				}
-			}
+export function requireApiToken(): ApiCredentials {
+	const credentials = getAPIToken();
+	if (!credentials) {
+		throw new UserError("No API token found.", {
+			telemetryMessage: "user auth missing api token",
 		});
-
-		server.listen(8976, "localhost");
-	});
-	if (options.browser) {
-		logger.log(`Opening a link in your default browser: ${urlToOpen}`);
-		await openInBrowser(urlToOpen);
-	} else {
-		logger.log(`Visit this link to authenticate: ${urlToOpen}`);
 	}
+	return credentials;
+}
 
-	return Promise.race([timerPromise, loginPromise]);
+// ---------------------------------------------------------------------------
+// Thin wrappers around the OAuth flow that supply default scopes from the
+// wrangler-side catalog. Preserves the historical call signatures.
+// ---------------------------------------------------------------------------
+
+type WranglerLoginProps = {
+	scopes?: Scope[];
+	browser?: boolean;
+	callbackHost?: string;
+	callbackPort?: number;
+};
+
+function withDefaultScopes(
+	complianceConfig: ComplianceConfig,
+	props: WranglerLoginProps | undefined
+): LoginProps {
+	return {
+		complianceConfig,
+		scopes: props?.scopes ?? DefaultScopeKeys,
+		browser: props?.browser ?? true,
+		callbackHost: props?.callbackHost ?? "localhost",
+		callbackPort: props?.callbackPort ?? 8976,
+	};
 }
 
 export async function login(
-	props: LoginProps = { browser: true }
+	complianceConfig: ComplianceConfig,
+	props?: WranglerLoginProps
 ): Promise<boolean> {
-	const authFromEnv = getAuthFromEnv();
-	if (authFromEnv) {
-		// Auth from env overrides any login details, so no point in allowing the user to login.
-		logger.error(
-			"You are logged in with an API Token. Unset the CLOUDFLARE_API_TOKEN in the " +
-				"environment to log in via OAuth."
-		);
-		return false;
-	}
-
-	logger.log("Attempting to login via OAuth...");
-
-	const oauth = await getOauthToken({
-		browser: !!props.browser,
-		scopes: props.scopes ?? DefaultScopeKeys,
-		clientId: getClientIdFromEnv(),
-		denied: {
-			url: "https://welcome.developers.workers.dev/wrangler-oauth-consent-denied",
-			error:
-				"Error: Consent denied. You must grant consent to Wrangler in order to login.\n" +
-				"If you don't want to do this consider passing an API token via the `CLOUDFLARE_API_TOKEN` environment variable",
-		},
-		granted: {
-			url: "https://welcome.developers.workers.dev/wrangler-oauth-consent-granted",
-		},
-	});
-
-	writeAuthConfigFile({
-		oauth_token: oauth.token?.value ?? "",
-		expiration_time: oauth.token?.expiry,
-		refresh_token: oauth.refreshToken?.value,
-		scopes: oauth.scopes,
-	});
-
-	logger.log(`Successfully logged in.`);
-
-	purgeConfigCaches();
-
-	return true;
-}
-
-/**
- * Checks to see if the access token has expired.
- */
-function isAccessTokenExpired(): boolean {
-	const { accessToken } = LocalState;
-	return Boolean(accessToken && new Date() >= new Date(accessToken.expiry));
-}
-
-async function refreshToken(): Promise<boolean> {
-	// refresh
-	try {
-		const {
-			token: { value: oauth_token, expiry: expiration_time } = {
-				value: "",
-				expiry: "",
-			},
-			refreshToken: { value: refresh_token } = {},
-			scopes,
-		} = await exchangeRefreshTokenForAccessToken();
-		writeAuthConfigFile({
-			oauth_token,
-			expiration_time,
-			refresh_token,
-			scopes,
-		});
-		return true;
-	} catch (err) {
-		return false;
-	}
+	return oauthFlow.login(withDefaultScopes(complianceConfig, props));
 }
 
 export async function logout(): Promise<void> {
-	const authFromEnv = getAuthFromEnv();
-	if (authFromEnv) {
-		// Auth from env overrides any login details, so we cannot log out.
-		logger.log(
-			"You are logged in with an API Token. Unset the CLOUDFLARE_API_TOKEN in the " +
-				"environment to log out."
-		);
-		return;
-	}
-
-	if (!LocalState.accessToken) {
-		if (!LocalState.refreshToken) {
-			logger.log("Not logged in, exiting...");
-			return;
-		}
-
-		const body =
-			`client_id=${encodeURIComponent(getClientIdFromEnv())}&` +
-			`token_type_hint=refresh_token&` +
-			`token=${encodeURIComponent(LocalState.refreshToken?.value || "")}`;
-
-		const response = await fetch(getRevokeUrlFromEnv(), {
-			method: "POST",
-			body,
-			headers: {
-				"Content-Type": "application/x-www-form-urlencoded",
-			},
-		});
-		await response.text(); // blank text? would be nice if it was something meaningful
-		logger.log(
-			"💁  Wrangler is configured with an OAuth token. The token has been successfully revoked"
-		);
-	}
-	const body =
-		`client_id=${encodeURIComponent(getClientIdFromEnv())}&` +
-		`token_type_hint=refresh_token&` +
-		`token=${encodeURIComponent(LocalState.refreshToken?.value || "")}`;
-
-	const response = await fetch(getRevokeUrlFromEnv(), {
-		method: "POST",
-		body,
-		headers: {
-			"Content-Type": "application/x-www-form-urlencoded",
-		},
-	});
-	await response.text(); // blank text? would be nice if it was something meaningful
-	rmSync(getAuthConfigFilePath());
-	logger.log(`Successfully logged out.`);
+	return oauthFlow.logout();
 }
 
-export function listScopes(message = "💁 Available scopes:"): void {
-	logger.log(message);
-	const data = DefaultScopeKeys.map((scope: Scope) => ({
-		Scope: scope,
-		Description: AllScopes[scope],
-	}));
-	logger.table(data);
-	// TODO: maybe a good idea to show usage here
+export async function loginOrRefreshIfRequired(
+	complianceConfig: ComplianceConfig,
+	props?: WranglerLoginProps
+): Promise<boolean> {
+	return oauthFlow.loginOrRefreshIfRequired(
+		withDefaultScopes(complianceConfig, props)
+	);
 }
 
-export async function getAccountId(): Promise<string> {
-	// check if we have a cached value
-	const cachedAccount = getAccountFromCache();
-	if (cachedAccount && !getCloudflareAccountIdFromEnv()) {
-		return cachedAccount.id;
+export async function getOAuthTokenFromLocalState(): Promise<
+	string | undefined
+> {
+	return oauthFlow.getOAuthTokenFromLocalState();
+}
+
+// Re-export the auth-config-file pure helpers from the package so the
+// historical `from "../user"` import paths keep working.
+export {
+	getAuthConfigFilePath,
+	readAuthConfigFile,
+	writeAuthConfigFile,
+} from "@cloudflare/workers-auth";
+export type { UserAuthConfig } from "@cloudflare/workers-auth";
+// `PKCE_CHARSET` is re-exported for any external consumers that used to
+// import it from this barrel.
+export { PKCE_CHARSET } from "@cloudflare/workers-auth";
+
+// ---------------------------------------------------------------------------
+// Account selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the active account ID without side effects.
+ *
+ * Resolves the account ID from static sources only — no API calls, no
+ * interactive prompts. Tries the following sources in order:
+ * 1. `config.account_id` from the wrangler configuration file
+ * 2. `CLOUDFLARE_ACCOUNT_ID` environment variable
+ * 3. Cached account from a previous interactive selection
+ *
+ * @param config - The config object potentially containing an `account_id`
+ * @returns The active account ID, or `undefined` if none can be determined
+ */
+export function getActiveAccountId(config: {
+	account_id?: string;
+}): string | undefined {
+	if (config.account_id) {
+		return config.account_id;
+	}
+	const envAccountId = getCloudflareAccountIdFromEnv();
+	if (envAccountId) {
+		return envAccountId;
+	}
+	return getAccountFromCache()?.id;
+}
+
+/**
+ * Resolves the account ID to use for API requests.
+ *
+ * First tries static sources via {@link getActiveAccountId} (config, env var,
+ * cache). If none are available, falls back to fetching accounts from the API:
+ * - Auto-selects if only one account is available
+ * - Prompts the user to select an account interactively if multiple are available
+ *
+ * When an account is resolved via API fetch or interactive prompt,
+ * it is cached for subsequent calls.
+ *
+ * @param config - Configuration containing an optional `account_id` and compliance settings
+ * @returns The resolved account ID
+ * @throws {UserError} If in a non-interactive environment and multiple accounts are
+ *   available (the user must set `account_id` in config or `CLOUDFLARE_ACCOUNT_ID` env var)
+ * @throws {UserError} If no accounts are found for the authenticated user
+ */
+export async function getOrSelectAccountId(
+	config: ComplianceConfig & { account_id?: string }
+): Promise<string> {
+	// TODO: v5 we should prioritise the env var instead of the config value here,
+	// for consistency with other env vars.
+	const activeAccountId = getActiveAccountId(config);
+	if (activeAccountId) {
+		return activeAccountId;
 	}
 
-	const accounts = await getAccountChoices();
+	const accounts = await fetchAllAccounts(config);
 	if (accounts.length === 1) {
 		saveAccountToCache({ id: accounts[0].id, name: accounts[0].name });
 		return accounts[0].id;
@@ -1196,21 +339,29 @@ export async function getAccountId(): Promise<string> {
 				value: account.id,
 			})),
 		});
-		const account = accounts.find(
-			(a) => a.id === accountID
-		) as ChooseAccountItem;
+		const account = accounts.find((a) => a.id === accountID);
+		assert(account, "Selected account not found in accounts list");
 		saveAccountToCache({ id: account.id, name: account.name });
 		return accountID;
 	} catch (e) {
 		// Did we try to select an account in CI or a non-interactive terminal?
 		if (e instanceof NoDefaultValueProvided) {
+			// Redact account names (which may contain email addresses) in CI
+			// to avoid leaking sensitive information in public CI logs.
+			// Non-interactive terminals (agents, piped commands) still need
+			// to see account names to identify which account to configure.
+			const redactAccountName = ci.isCI;
 			throw new UserError(
 				`More than one account available but unable to select one in non-interactive mode.
 Please set the appropriate \`account_id\` in your ${configFileName(undefined)} file or assign it to the \`CLOUDFLARE_ACCOUNT_ID\` environment variable.
 Available accounts are (\`<name>\`: \`<account_id>\`):
 ${accounts
-	.map((account) => `  \`${account.name}\`: \`${account.id}\``)
-	.join("\n")}`
+	.map(
+		(account: Account) =>
+			`  \`${redactAccountName ? "(redacted)" : account.name}\`: \`${account.id}\``
+	)
+	.join("\n")}`,
+				{ telemetryMessage: "user account selection unavailable" }
 			);
 		}
 		throw e;
@@ -1218,111 +369,59 @@ ${accounts
 }
 
 /**
- * Ensure that a user is logged in, and a valid account_id is available.
+ * Ensures the user is logged in and resolves a valid account ID.
+ *
+ * First checks/refreshes authentication, then delegates to
+ * {@link getOrSelectAccountId} to resolve the account.
+ *
+ * @param config - Configuration containing an optional `account_id` and compliance settings
+ * @returns The resolved account ID
+ * @throws {UserError} If the user is not logged in and cannot authenticate
+ * @throws {UserError} If no account ID can be resolved (see {@link getOrSelectAccountId})
  */
-export async function requireAuth(config: {
-	account_id?: string;
-}): Promise<string> {
-	const loggedIn = await loginOrRefreshIfRequired();
+export async function requireAuth(
+	config: ComplianceConfig & {
+		account_id?: string;
+	}
+): Promise<string> {
+	const loggedIn = await loginOrRefreshIfRequired(config);
 	if (!loggedIn) {
 		if (isNonInteractiveOrCI()) {
 			throw new UserError(
-				"In a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN environment variable for wrangler to work. Please go to https://developers.cloudflare.com/fundamentals/api/get-started/create-token/ for instructions on how to create an api token, and assign its value to CLOUDFLARE_API_TOKEN."
+				"In a non-interactive environment, it's necessary to set a CLOUDFLARE_API_TOKEN environment variable for wrangler to work. Please go to https://developers.cloudflare.com/fundamentals/api/get-started/create-token/ for instructions on how to create an api token, and assign its value to CLOUDFLARE_API_TOKEN.",
+				{ telemetryMessage: "user auth missing api token non interactive" }
 			);
 		} else {
 			// didn't login, let's just quit
-			throw new UserError("Did not login, quitting...");
+			throw new UserError("Did not login, quitting...", {
+				telemetryMessage: "user login cancelled",
+			});
 		}
 	}
-	const accountId = config.account_id || (await getAccountId());
+	const accountId = await getOrSelectAccountId(config);
 	if (!accountId) {
-		throw new UserError("No account id found, quitting...");
+		throw new UserError("No account id found, quitting...", {
+			telemetryMessage: "user auth missing account id",
+		});
 	}
 
 	return accountId;
 }
 
 /**
- * Throw an error if there is no API token available.
- */
-export function requireApiToken(): ApiCredentials {
-	const credentials = getAPIToken();
-	if (!credentials) {
-		throw new UserError("No API token found.");
-	}
-	return credentials;
-}
-
-/**
- * Save the given account details to a cache
- */
-function saveAccountToCache(account: { id: string; name: string }): void {
-	saveToConfigCache<{ account: { id: string; name: string } }>(
-		"wrangler-account.json",
-		{ account }
-	);
-}
-
-/**
- * Fetch the given account details from a cache if available
- */
-export function getAccountFromCache():
-	| undefined
-	| { id: string; name: string } {
-	return getConfigCache<{ account: { id: string; name: string } }>(
-		"wrangler-account.json"
-	).account;
-}
-
-/**
- * Get the scopes of the following token, will only return scopes
- * if the token is an OAuth token.
- */
-export function getScopes(): Scope[] | undefined {
-	return LocalState.scopes;
-}
-
-/**
- * Make a request to the Cloudflare OAuth endpoint to get a token.
+ * Saves the given account details to the filesystem cache.
  *
- * Note that the `body` of the POST request is form-urlencoded so
- * can be represented by a URLSearchParams object.
+ * @param account The account to save
  */
-async function fetchAuthToken(body: URLSearchParams) {
-	const headers: Record<string, string> = {
-		"Content-Type": "application/x-www-form-urlencoded",
-	};
-	if (await domainUsesAccess(getAuthDomainFromEnv())) {
-		// We are trying to access the staging API so we need an "access token".
-		headers["Cookie"] = `CF_Authorization=${await getCloudflareAccessToken()}`;
-	}
-	return await fetch(getTokenUrlFromEnv(), {
-		method: "POST",
-		body: body.toString(),
-		headers,
-	});
+function saveAccountToCache(account: Account): void {
+	saveToConfigCache<{ account: Account }>("wrangler-account.json", { account });
 }
 
-async function getJSONFromResponse(response: Response) {
-	const text = await response.text();
-	try {
-		return JSON.parse(text);
-	} catch (e) {
-		// Sometime we get an error response where the body is HTML
-		if (text.match(/<!DOCTYPE html>/)) {
-			logger.error(
-				"The body of the response was HTML rather than JSON. Check the debug logs to see the full body of the response."
-			);
-			if (text.match(/challenge-platform/)) {
-				logger.error(
-					`It looks like you might have hit a bot challenge page. This may be transient but if not, please contact Cloudflare to find out what can be done. When you contact Cloudflare, please provide your Ray ID: ${response.headers.get("cf-ray")}`
-				);
-			}
-		}
-		logger.debug("Full body of response\n\n", text);
-		throw new Error(
-			`Invalid JSON in response: status: ${response.status} ${response.statusText}`,
-			{ cause: e }
-		);
-	}
+/**
+ * Retrieves the account details from the filesystem cache.
+ *
+ * @returns The cached account if present, `undefined` otherwise
+ */
+export function getAccountFromCache(): undefined | Account {
+	return getConfigCache<{ account: Account }>("wrangler-account.json").account;
 }

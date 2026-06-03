@@ -1,23 +1,28 @@
+import {
+	COMPLIANCE_REGION_CONFIG_PUBLIC,
+	configFileName,
+	FatalError,
+	findWranglerConfig,
+	UserError,
+} from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import { fetchResult } from "../../cfetch";
-import { configFileName, readPagesConfig } from "../../config";
+import { readPagesConfig } from "../../config";
 import { getConfigCache } from "../../config-cache";
-import { findWranglerConfig } from "../../config/config-helpers";
+import { createCommand, createNamespace } from "../../core/create-command";
 import { confirm, prompt } from "../../dialogs";
-import { FatalError } from "../../errors";
 import isInteractive from "../../is-interactive";
 import { logger } from "../../logger";
 import * as metrics from "../../metrics";
 import { parseBulkInputToObject } from "../../secret";
 import { requireAuth } from "../../user";
+import { getCloudflareAccountIdFromEnv } from "../../user/auth-variables";
 import { readFromStdin, trimTrailingWhitespace } from "../../utils/std";
-import { printWranglerBanner } from "../../wrangler-banner";
 import { PAGES_CONFIG_CACHE_FILENAME } from "../constants";
 import { EXIT_CODE_INVALID_PAGES_CONFIG } from "../errors";
-import type { Config } from "../../config";
-import type { CommonYargsArgv, SubHelp } from "../../yargs-types";
 import type { PagesProject } from "../download-config";
 import type { PagesConfigCache } from "../types";
+import type { Config } from "@cloudflare/workers-utils";
 
 function isPagesEnv(env: string): env is "production" | "preview" {
 	return ["production", "preview"].includes(env);
@@ -34,9 +39,9 @@ async function pagesProject(
 }> {
 	env ??= "production";
 	if (!isPagesEnv(env)) {
-		throw new FatalError(
-			`Pages does not support the "${env}" named environment. Please specify "production" (default) or "preview"`,
-			1
+		throw new UserError(
+			`Pages does not support the "${env}" environment. Only "production" and "preview" are valid. Use --env production or --env preview.`,
+			{ telemetryMessage: "pages secret env unsupported" }
 		);
 	}
 	let config: Config | undefined;
@@ -76,7 +81,8 @@ async function pagesProject(
 	const configCache = getConfigCache<PagesConfigCache>(
 		PAGES_CONFIG_CACHE_FILENAME
 	);
-	const accountId = await requireAuth(configCache);
+	const accountId =
+		getCloudflareAccountIdFromEnv() ?? (await requireAuth(configCache));
 
 	const projectName =
 		cliProjectName ?? config?.name ?? configCache.project_name;
@@ -86,248 +92,313 @@ async function pagesProject(
 	if (projectName) {
 		try {
 			project = await fetchResult<PagesProject>(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
 				`/accounts/${accountId}/pages/projects/${projectName}`
 			);
 		} catch (err) {
 			// code `8000007` corresponds to project not found
 			if ((err as { code: number }).code === 8000007) {
-				throw new FatalError(`Project "${projectName}" does not exist.`, 1);
+				throw new FatalError(`Project "${projectName}" does not exist.`, {
+					code: 1,
+					telemetryMessage: "pages secret project not found",
+				});
 			}
 			throw err;
 		}
 	} else {
-		throw new FatalError("Must specify a project name.", 1);
+		throw new UserError(
+			"Missing Pages project name. Use --project-name <name> to specify which project to manage secrets for.",
+			{ telemetryMessage: "pages secret missing project name" }
+		);
 	}
 	return { env, project, accountId, config };
 }
 
-export const secret = (secretYargs: CommonYargsArgv, subHelp: SubHelp) => {
-	return secretYargs
-		.command(subHelp)
-		.command(
-			"put <key>",
-			"Create or update a secret variable for a Pages project",
-			(yargs) => {
-				return yargs
-					.positional("key", {
-						describe: "The variable name to be accessible in the Pages project",
-						type: "string",
-					})
-					.option("project-name", {
-						type: "string",
-						alias: ["project"],
-						description: "The name of your Pages project",
-					});
-			},
-			async (args) => {
-				await printWranglerBanner();
-				const { env, project, accountId, config } = await pagesProject(
-					args.env,
-					args.projectName
-				);
+export const pagesSecretNamespace = createNamespace({
+	metadata: {
+		description: "Generate a secret that can be referenced in a Pages project",
+		status: "stable",
+		owner: "Workers: Authoring and Testing",
+		hideGlobalFlags: ["config", "env"],
+	},
+});
 
-				const secretValue = trimTrailingWhitespace(
-					isInteractive()
-						? await prompt("Enter a secret value:", { isSecret: true })
-						: await readFromStdin()
-				);
+export const pagesSecretPutCommand = createCommand({
+	metadata: {
+		description: "Create or update a secret variable for a Pages project",
+		status: "stable",
+		owner: "Workers: Authoring and Testing",
+		hideGlobalFlags: ["config", "env"],
+	},
+	behaviour: {
+		provideConfig: false,
+	},
+	args: {
+		key: {
+			type: "string",
+			description: "The variable name to be accessible in the Pages project",
+			demandOption: true,
+		},
+		"project-name": {
+			type: "string",
+			alias: ["project"],
+			description: "The name of your Pages project",
+		},
+	},
+	positionalArgs: ["key"],
+	async handler(args) {
+		const { env, project, accountId, config } = await pagesProject(
+			args.env,
+			args.projectName
+		);
 
-				logger.log(
-					`🌀 Creating the secret for the Pages project "${project.name}" (${env})`
-				);
+		const secretValue = trimTrailingWhitespace(
+			isInteractive()
+				? await prompt("Enter a secret value:", { isSecret: true })
+				: await readFromStdin()
+		);
 
-				await fetchResult<PagesProject>(
-					`/accounts/${accountId}/pages/projects/${project.name}`,
-					{
-						method: "PATCH",
-						body: JSON.stringify({
-							deployment_configs: {
-								[env]: {
-									env_vars: {
-										[args.key as string]: {
-											value: secretValue,
-											type: "secret_text",
-										},
-									},
-									wrangler_config_hash:
-										project.deployment_configs[env].wrangler_config_hash,
+		logger.log(
+			`🌀 Creating the secret for the Pages project "${project.name}" (${env})`
+		);
+
+		await fetchResult<PagesProject>(
+			COMPLIANCE_REGION_CONFIG_PUBLIC,
+			`/accounts/${accountId}/pages/projects/${project.name}`,
+			{
+				method: "PATCH",
+				body: JSON.stringify({
+					deployment_configs: {
+						[env]: {
+							env_vars: {
+								[args.key as string]: {
+									value: secretValue,
+									type: "secret_text",
 								},
 							},
-						}),
-					}
-				);
-
-				metrics.sendMetricsEvent("create pages encrypted variable", {
-					sendMetrics: config?.send_metrics,
-				});
-
-				logger.log(`✨ Success! Uploaded secret ${args.key}`);
-			}
-		)
-		.command(
-			"bulk [file]",
-			"Bulk upload secrets for a Pages project",
-			(yargs) => {
-				return yargs
-					.positional("file", {
-						describe: `The file of key-value pairs to upload, as JSON in form {"key": value, ...} or .dev.vars file in the form KEY=VALUE`,
-						type: "string",
-					})
-					.option("project-name", {
-						type: "string",
-						alias: ["project"],
-						description: "The name of your Pages project",
-					});
-			},
-			async (args) => {
-				await printWranglerBanner();
-				const { env, project, accountId } = await pagesProject(
-					args.env,
-					args.projectName
-				);
-
-				logger.log(
-					`🌀 Creating the secrets for the Pages project "${project.name}" (${env})`
-				);
-				const content = await parseBulkInputToObject(args.file);
-
-				if (!content) {
-					throw new FatalError(`🚨 No content found in file or piped input.`);
-				}
-
-				const upsertBindings = Object.fromEntries(
-					Object.entries(content).map(([key, value]) => {
-						return [
-							key,
-							{
-								type: "secret_text",
-								value: value,
-							},
-						];
-					})
-				);
-				try {
-					await fetchResult<PagesProject>(
-						`/accounts/${accountId}/pages/projects/${project.name}`,
-						{
-							method: "PATCH",
-							body: JSON.stringify({
-								deployment_configs: {
-									[env]: {
-										env_vars: {
-											...upsertBindings,
-										},
-										wrangler_config_hash:
-											project.deployment_configs[env].wrangler_config_hash,
-									},
-								},
-							}),
-						}
-					);
-					logger.log("Finished processing secrets file:");
-					logger.log(
-						`✨ ${
-							Object.keys(upsertBindings).length
-						} secrets successfully uploaded`
-					);
-				} catch (err) {
-					logger.log(`🚨 Secrets failed to upload`);
-					throw err;
-				}
-			}
-		)
-		.command(
-			"delete <key>",
-			"Delete a secret variable from a Pages project",
-			async (yargs) => {
-				return yargs
-					.positional("key", {
-						describe: "The variable name to be accessible in the Pages project",
-						type: "string",
-					})
-					.option("project-name", {
-						type: "string",
-						alias: ["project"],
-						description: "The name of your Pages project",
-					});
-			},
-			async (args) => {
-				await printWranglerBanner();
-				const { env, project, accountId, config } = await pagesProject(
-					args.env,
-					args.projectName
-				);
-
-				if (
-					await confirm(
-						`Are you sure you want to permanently delete the secret ${args.key} on the Pages project ${project.name} (${env})?`
-					)
-				) {
-					logger.log(
-						`🌀 Deleting the secret ${args.key} on the Pages project ${project.name} (${env})`
-					);
-
-					await fetchResult<PagesProject>(
-						`/accounts/${accountId}/pages/projects/${project.name}`,
-						{
-							method: "PATCH",
-							body: JSON.stringify({
-								deployment_configs: {
-									[env]: {
-										env_vars: {
-											[args.key as string]: null,
-										},
-										wrangler_config_hash:
-											project.deployment_configs[env].wrangler_config_hash,
-									},
-								},
-							}),
-						}
-					);
-					metrics.sendMetricsEvent("delete pages encrypted variable", {
-						sendMetrics: config?.send_metrics,
-					});
-					logger.log(`✨ Success! Deleted secret ${args.key}`);
-				}
-			}
-		)
-		.command(
-			"list",
-			"List all secrets for a Pages project",
-			(yargs) => {
-				return yargs.option("project-name", {
-					type: "string",
-					alias: ["project"],
-					description: "The name of your Pages project",
-				});
-			},
-			async (args) => {
-				await printWranglerBanner();
-				const { env, project, config } = await pagesProject(
-					args.env,
-					args.projectName
-				);
-
-				const secrets = Object.entries(
-					project.deployment_configs[env].env_vars ?? {}
-				).filter(([_, val]) => val?.type === "secret_text");
-
-				const message = [
-					`The "${chalk.blue(
-						env
-					)}" environment of your Pages project "${chalk.blue(
-						project.name
-					)}" has access to the following secrets:`,
-					...secrets.map(
-						([name]) => `  - ${name}: ${chalk.italic("Value Encrypted")}`
-					),
-				].join("\n");
-
-				logger.log(message);
-
-				metrics.sendMetricsEvent("list pages encrypted variables", {
-					sendMetrics: config?.send_metrics,
-				});
+							wrangler_config_hash:
+								project.deployment_configs[env].wrangler_config_hash,
+						},
+					},
+				}),
 			}
 		);
-};
+
+		metrics.sendMetricsEvent(
+			"create pages encrypted variable",
+			{
+				secretOperation: "single",
+				secretSource: isInteractive() ? "interactive" : "stdin",
+				hasEnvironment: Boolean(args.env),
+			},
+			{
+				sendMetrics: config?.send_metrics,
+			}
+		);
+
+		logger.log(`✨ Success! Uploaded secret ${args.key}`);
+	},
+});
+
+export const pagesSecretBulkCommand = createCommand({
+	metadata: {
+		description: "Bulk upload secrets for a Pages project",
+		status: "stable",
+		owner: "Workers: Authoring and Testing",
+		hideGlobalFlags: ["config", "env"],
+	},
+	behaviour: {
+		provideConfig: false,
+	},
+	args: {
+		file: {
+			type: "string",
+			description: `The file of key-value pairs to upload, as JSON in form {"key": value, ...} or .dev.vars file in the form KEY=VALUE`,
+		},
+		"project-name": {
+			type: "string",
+			alias: ["project"],
+			description: "The name of your Pages project",
+		},
+	},
+	positionalArgs: ["file"],
+	async handler(args) {
+		const { env, project, accountId, config } = await pagesProject(
+			args.env,
+			args.projectName
+		);
+
+		logger.log(
+			`🌀 Creating the secrets for the Pages project "${project.name}" (${env})`
+		);
+		const result = await parseBulkInputToObject(args.file);
+
+		if (!result) {
+			throw new FatalError(`🚨 No content found in file or piped input.`, {
+				telemetryMessage: "pages secret bulk missing content",
+			});
+		}
+
+		const { content, secretSource, secretFormat } = result;
+
+		const upsertBindings = Object.fromEntries(
+			Object.entries(content).map(([key, value]) => {
+				return [
+					key,
+					{
+						type: "secret_text",
+						value: value,
+					},
+				];
+			})
+		);
+		try {
+			await fetchResult<PagesProject>(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
+				`/accounts/${accountId}/pages/projects/${project.name}`,
+				{
+					method: "PATCH",
+					body: JSON.stringify({
+						deployment_configs: {
+							[env]: {
+								env_vars: {
+									...upsertBindings,
+								},
+								wrangler_config_hash:
+									project.deployment_configs[env].wrangler_config_hash,
+							},
+						},
+					}),
+				}
+			);
+			logger.log("Finished processing secrets file:");
+			logger.log(
+				`✨ ${Object.keys(upsertBindings).length} secrets successfully uploaded`
+			);
+			metrics.sendMetricsEvent(
+				"create pages encrypted variable",
+				{
+					secretOperation: "bulk",
+					secretSource,
+					secretFormat,
+					hasEnvironment: Boolean(args.env),
+				},
+				{
+					sendMetrics: config?.send_metrics,
+				}
+			);
+		} catch (err) {
+			logger.log(`🚨 Secrets failed to upload`);
+			throw err;
+		}
+	},
+});
+
+export const pagesSecretDeleteCommand = createCommand({
+	metadata: {
+		description: "Delete a secret variable from a Pages project",
+		status: "stable",
+		owner: "Workers: Authoring and Testing",
+		hideGlobalFlags: ["config", "env"],
+	},
+	behaviour: {
+		provideConfig: false,
+	},
+	args: {
+		key: {
+			type: "string",
+			description: "The variable name to be accessible in the Pages project",
+			demandOption: true,
+		},
+		"project-name": {
+			type: "string",
+			alias: ["project"],
+			description: "The name of your Pages project",
+		},
+	},
+	positionalArgs: ["key"],
+
+	async handler(args) {
+		const { env, project, accountId, config } = await pagesProject(
+			args.env,
+			args.projectName
+		);
+
+		if (
+			await confirm(
+				`Are you sure you want to permanently delete the secret ${args.key} on the Pages project ${project.name} (${env})?`
+			)
+		) {
+			logger.log(
+				`🌀 Deleting the secret ${args.key} on the Pages project ${project.name} (${env})`
+			);
+
+			await fetchResult<PagesProject>(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
+				`/accounts/${accountId}/pages/projects/${project.name}`,
+				{
+					method: "PATCH",
+					body: JSON.stringify({
+						deployment_configs: {
+							[env]: {
+								env_vars: {
+									[args.key as string]: null,
+								},
+								wrangler_config_hash:
+									project.deployment_configs[env].wrangler_config_hash,
+							},
+						},
+					}),
+				}
+			);
+			metrics.sendMetricsEvent("delete pages encrypted variable", {
+				sendMetrics: config?.send_metrics,
+			});
+			logger.log(`✨ Success! Deleted secret ${args.key}`);
+		}
+	},
+});
+
+export const pagesSecretListCommand = createCommand({
+	metadata: {
+		description: "List all secrets for a Pages project",
+		status: "stable",
+		owner: "Workers: Authoring and Testing",
+		hideGlobalFlags: ["config", "env"],
+	},
+	behaviour: {
+		provideConfig: false,
+	},
+	args: {
+		"project-name": {
+			type: "string",
+			alias: ["project"],
+			description: "The name of your Pages project",
+		},
+	},
+	async handler(args) {
+		const { env, project, config } = await pagesProject(
+			args.env,
+			args.projectName
+		);
+
+		const secrets = Object.entries(
+			project.deployment_configs[env].env_vars ?? {}
+		).filter(([_, val]) => val?.type === "secret_text");
+
+		const message = [
+			`The "${chalk.blue(env)}" environment of your Pages project "${chalk.blue(
+				project.name
+			)}" has access to the following secrets:`,
+			...secrets.map(
+				([name]) => `  - ${name}: ${chalk.italic("Value Encrypted")}`
+			),
+		].join("\n");
+
+		logger.log(message);
+
+		metrics.sendMetricsEvent("list pages encrypted variables", {
+			sendMetrics: config?.send_metrics,
+		});
+	},
+});

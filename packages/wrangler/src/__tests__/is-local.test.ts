@@ -18,6 +18,9 @@ const testCases: [
 	[{ remote: undefined, local: undefined }, false, false],
 ];
 
-it.each(testCases)("isLocal(%j, %o) -> %o", (args, defaultValue, expected) => {
-	expect(isLocal(args, defaultValue)).toBe(expected);
-});
+it.for(testCases)(
+	"isLocal(%j, %o) -> %o",
+	([args, defaultValue, expected], { expect }) => {
+		expect(isLocal(args, defaultValue)).toBe(expected);
+	}
+);

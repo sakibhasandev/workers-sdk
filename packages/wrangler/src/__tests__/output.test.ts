@@ -1,12 +1,22 @@
+/* eslint-disable @typescript-eslint/no-empty-object-type -- Type augmentation interfaces intentionally left empty */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { FatalError } from "@cloudflare/workers-utils";
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
+/* eslint-disable-next-line no-restricted-imports --
+ * Uses expect in MSW handlers outside test callbacks
+ * TODO: remove this `expect` import
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearOutputFilePath, writeOutput } from "../output";
-import { runInTempDir } from "./helpers/run-in-tmp";
+import { mockConsoleMethods } from "./helpers/mock-console";
+import { runWrangler } from "./helpers/run-wrangler";
 import type { OutputEntry } from "../output";
 
 describe("writeOutput()", () => {
 	runInTempDir({ homedir: "home" });
 	afterEach(clearOutputFilePath);
+	mockConsoleMethods();
 
 	it("should do nothing with no env vars set", () => {
 		vi.stubEnv("WRANGLER_OUTPUT_FILE_DIRECTORY", "");
@@ -183,6 +193,7 @@ describe("writeOutput()", () => {
 			},
 		]);
 	});
+
 	it("should write an alias and environment for pages-deploy-detailed outputs", () => {
 		vi.stubEnv("WRANGLER_OUTPUT_FILE_DIRECTORY", "output");
 		vi.stubEnv("WRANGLER_OUTPUT_FILE_PATH", "");
@@ -237,6 +248,72 @@ describe("writeOutput()", () => {
 				},
 			},
 		]);
+	});
+
+	it("should write preview outputs with separate preview and deployment URLs", () => {
+		const WRANGLER_OUTPUT_FILE_PATH = "output.json";
+		vi.stubEnv("WRANGLER_OUTPUT_FILE_DIRECTORY", "");
+		vi.stubEnv("WRANGLER_OUTPUT_FILE_PATH", WRANGLER_OUTPUT_FILE_PATH);
+		writeOutput({
+			type: "preview",
+			version: 1,
+			worker_name: "worker",
+			preview_id: "preview-id",
+			preview_name: "branch-name",
+			preview_slug: "branch-name",
+			preview_urls: ["https://branch-name.worker.cloudflare.app"],
+			deployment_id: "deployment-id",
+			deployment_urls: ["https://abc12345.worker.cloudflare.app"],
+		});
+
+		const outputFile = readFileSync(WRANGLER_OUTPUT_FILE_PATH, "utf8");
+		expect(outputFile).toContainEntries([
+			{
+				type: "preview",
+				version: 1,
+				worker_name: "worker",
+				preview_id: "preview-id",
+				preview_name: "branch-name",
+				preview_slug: "branch-name",
+				preview_urls: ["https://branch-name.worker.cloudflare.app"],
+				deployment_id: "deployment-id",
+				deployment_urls: ["https://abc12345.worker.cloudflare.app"],
+			},
+		]);
+	});
+
+	it("should write an error log when a handler throws an error", async () => {
+		vi.mock("../user/whoami", () => {
+			return {
+				whoami: vi.fn().mockImplementation(() => {
+					throw new FatalError("A request to the Cloudflare API failed.", {
+						code: 10211,
+						telemetryMessage: false,
+					});
+				}),
+			};
+		});
+
+		const WRANGLER_OUTPUT_FILE_PATH = "output.json";
+		vi.stubEnv("WRANGLER_OUTPUT_FILE_DIRECTORY", "");
+		vi.stubEnv("WRANGLER_OUTPUT_FILE_PATH", WRANGLER_OUTPUT_FILE_PATH);
+
+		await expect(runWrangler("whoami")).rejects.toThrow();
+
+		const outputFile = readFileSync(WRANGLER_OUTPUT_FILE_PATH, "utf8");
+		const entries = outputFile
+			.split("\n")
+			.filter(Boolean)
+			.map((e) => JSON.parse(e));
+		expect(entries).toHaveLength(2);
+		expect(entries[0].type).toBe("wrangler-session");
+		expect(entries[1]).toMatchObject({
+			version: 1,
+			type: "command-failed",
+			// excluding timestamp
+			message: "A request to the Cloudflare API failed.",
+			code: 10211,
+		});
 	});
 });
 

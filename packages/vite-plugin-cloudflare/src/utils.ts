@@ -1,10 +1,37 @@
-import * as path from "node:path";
-import getPort, { portNumbers } from "get-port";
-import { Request as MiniflareRequest } from "miniflare";
+import * as nodePath from "node:path";
+import * as util from "node:util";
+import { createRequest, sendResponse } from "@remix-run/node-fetch-server";
+import {
+	CoreHeaders,
+	Request as MiniflareRequest,
+	Response as MiniflareResponse,
+} from "miniflare";
+import semverGte from "semver/functions/gte";
+import { version as viteVersion } from "vite";
 import * as vite from "vite";
-import { ROUTER_WORKER_NAME } from "./constants";
-import type { Miniflare } from "miniflare";
-import type { IncomingHttpHeaders } from "node:http";
+import { PROXY_SHARED_SECRET } from "./constants";
+import { warnIfQuickTunnelSseResponse } from "./plugins/tunnel";
+import type { PluginContext } from "./context";
+import type * as http from "node:http";
+
+export const debuglog = util.debuglog("@cloudflare:vite-plugin");
+
+/**
+ * Creates an internal plugin to be used inside the main `vite-plugin-cloudflare` plugin.
+ * The provided `name` will be prefixed with `vite-plugin-cloudflare:`.
+ */
+export function createPlugin(
+	name: string,
+	pluginFactory: (ctx: PluginContext) => Omit<vite.Plugin, "name">
+): (ctx: PluginContext) => vite.Plugin {
+	return (ctx) => {
+		return {
+			name: `vite-plugin-cloudflare:${name}`,
+			sharedDuringBuild: true,
+			...pluginFactory(ctx),
+		};
+	};
+}
 
 export function getOutputDirectory(
 	userConfig: vite.UserConfig,
@@ -14,49 +41,8 @@ export function getOutputDirectory(
 
 	return (
 		userConfig.environments?.[environmentName]?.build?.outDir ??
-		path.join(rootOutputDirectory, environmentName)
+		nodePath.join(rootOutputDirectory, environmentName)
 	);
-}
-
-export function getRouterWorker(miniflare: Miniflare) {
-	return miniflare.getWorker(ROUTER_WORKER_NAME);
-}
-
-export function toMiniflareRequest(request: Request): MiniflareRequest {
-	// We set the X-Forwarded-Host header to the original host as the `Host` header inside a Worker will contain the workerd host
-	const host = request.headers.get("Host");
-	if (host) {
-		request.headers.set("X-Forwarded-Host", host);
-	}
-	// Undici sets the `Sec-Fetch-Mode` header to `cors` so we capture it in a custom header to be converted back later.
-	const secFetchMode = request.headers.get("Sec-Fetch-Mode");
-	if (secFetchMode) {
-		request.headers.set("X-Mf-Sec-Fetch-Mode", secFetchMode);
-	}
-	return new MiniflareRequest(request.url, {
-		method: request.method,
-		headers: [["accept-encoding", "identity"], ...request.headers],
-		body: request.body,
-		duplex: "half",
-	});
-}
-
-export function nodeHeadersToWebHeaders(
-	nodeHeaders: IncomingHttpHeaders
-): Headers {
-	const headers = new Headers();
-
-	for (const [key, value] of Object.entries(nodeHeaders)) {
-		if (typeof value === "string") {
-			headers.append(key, value);
-		} else if (Array.isArray(value)) {
-			for (const item of value) {
-				headers.append(key, item);
-			}
-		}
-	}
-
-	return headers;
 }
 
 const postfixRE = /[?#].*$/;
@@ -70,6 +56,125 @@ export type MaybePromise<T> = Promise<T> | T;
 
 export type Defined<T> = Exclude<T, undefined>;
 
-export function getFirstAvailablePort(start: number) {
-	return getPort({ port: portNumbers(start, 65535) });
+export function withTrailingSlash(path: string): string {
+	return path.endsWith("/") ? path : `${path}/`;
+}
+
+export function createRequestHandler(
+	handler: (
+		request: MiniflareRequest,
+		req: vite.Connect.IncomingMessage
+	) => Promise<MiniflareResponse>
+): (
+	req: vite.Connect.IncomingMessage,
+	res: http.ServerResponse,
+	next: vite.Connect.NextFunction
+) => Promise<void> {
+	return async (req, res, next) => {
+		let request: Request | undefined;
+
+		try {
+			// Built in vite middleware trims out the base path when passing in the request
+			// We can restore it by using the `originalUrl` property
+			// This makes sure the worker receives the correct url in both dev using vite and production
+			if (req.originalUrl) {
+				req.url = req.originalUrl;
+			}
+			// Honor the `X-Forwarded-Proto` header on the incoming request so that
+			// `request.url` reflects the protocol the original client used, not the
+			// HTTP connection between the proxy and the dev server. This is needed
+			// when the Vite dev server sits behind a TLS-terminating reverse proxy
+			// or tunnel (cloudflared, ngrok, etc.) so that frameworks performing
+			// Origin/Host checks (e.g. CSRF protection) see a consistent origin.
+			//
+			// We trust this unconditionally because the Vite dev server is a
+			// local-only dev tool and this header is the de-facto standard set by
+			// reverse proxies. Browser-mediated CSRF attacks cannot reach here:
+			// `X-Forwarded-Proto` is not a CORS-safelisted header, so a `fetch()`
+			// that sets it triggers a CORS preflight, and simple form-submitted
+			// POSTs cannot include custom headers at all.
+			//
+			// If the header is absent or invalid, `createRequest` falls back to the
+			// connection protocol (`req.socket.encrypted`).
+			const protocol = getForwardedProto(req);
+			request = createRequest(req, res, protocol ? { protocol } : undefined);
+
+			let response = await handler(toMiniflareRequest(request), req);
+
+			// Vite uses HTTP/2 when `server.https` or `preview.https` is enabled
+			if (req.httpVersionMajor === 2) {
+				response = new MiniflareResponse(response.body, response);
+				// HTTP/2 disallows use of the `transfer-encoding` header
+				response.headers.delete("transfer-encoding");
+			}
+
+			warnIfQuickTunnelSseResponse(response.headers.get("content-type"));
+
+			await sendResponse(res, response as unknown as Response);
+		} catch (error) {
+			if (request?.signal.aborted) {
+				// If the request was aborted, ignore the error
+				return;
+			}
+
+			next(error);
+		}
+	};
+}
+
+export function satisfiesMinimumViteVersion(minVersion: string): boolean {
+	return semverGte(viteVersion, minVersion);
+}
+
+function toMiniflareRequest(request: Request): MiniflareRequest {
+	const host = request.headers.get("Host");
+	const xForwardedHost = request.headers.get("X-Forwarded-Host");
+
+	if (host && !xForwardedHost) {
+		// Set the `x-forwarded-host` header to the host of the Vite server if it is not already set
+		// Note that the `host` header inside the Worker will contain the workerd host
+		// TODO: reconsider this when adopting `miniflare.dispatchFetch` as it may be possible to provide the Vite server host in the `host` header
+		request.headers.set("X-Forwarded-Host", host);
+	}
+
+	// Add the proxy shared secret to the request headers
+	// so the proxy worker can trust it and add host headers back
+	request.headers.set(CoreHeaders.PROXY_SHARED_SECRET, PROXY_SHARED_SECRET);
+
+	// Undici sets the `Sec-Fetch-Mode` header to `cors` so we capture it in a custom header to be converted back later.
+	const secFetchMode = request.headers.get("Sec-Fetch-Mode");
+	if (secFetchMode) {
+		request.headers.set(CoreHeaders.SEC_FETCH_MODE, secFetchMode);
+	}
+	return new MiniflareRequest(request.url, {
+		method: request.method,
+		headers: [["accept-encoding", "identity"], ...request.headers],
+		body: request.body,
+		duplex: "half",
+		signal: request.signal,
+	});
+}
+
+export const isRolldown = "rolldownVersion" in vite;
+
+/**
+ * Parses the `X-Forwarded-Proto` header from an incoming Node.js request.
+ *
+ * If multiple proxies are in the chain, the header may be a comma-separated
+ * list — the left-most value is the original client-facing protocol.
+ * Returns `undefined` if the header is missing or holds an unsupported value.
+ */
+export function getForwardedProto(req: {
+	headers: http.IncomingHttpHeaders;
+}): "http:" | "https:" | undefined {
+	const raw = req.headers["x-forwarded-proto"];
+	const value = Array.isArray(raw) ? raw[0] : raw;
+	if (!value) {
+		return undefined;
+	}
+	const first = value.split(",")[0]?.trim().toLowerCase();
+	if (first === "http" || first === "https") {
+		return `${first}:`;
+	}
+	return undefined;
 }

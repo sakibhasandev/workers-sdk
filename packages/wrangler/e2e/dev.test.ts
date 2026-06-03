@@ -1,17 +1,44 @@
-import assert, { fail } from "node:assert";
+import assert from "node:assert";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import * as nodeNet from "node:net";
-import { scheduler, setTimeout } from "node:timers/promises";
+import { setTimeout } from "node:timers/promises";
+import { stripVTControlCharacters } from "node:util";
 import dedent from "ts-dedent";
 import { fetch } from "undici";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import {
+	CLOUDFLARE_ACCOUNT_ID,
+	E2E_ACCOUNT_WORKERS_DEV_DOMAIN,
+} from "./helpers/account-id";
 import { WranglerE2ETestHelper } from "./helpers/e2e-wrangler-test";
 import { fetchText } from "./helpers/fetch-text";
 import { fetchWithETag } from "./helpers/fetch-with-etag";
 import { generateResourceName } from "./helpers/generate-resource-name";
+import {
+	MYSQL_INITIAL_HANDSHAKE_PACKET,
+	setupMysqlServer,
+} from "./helpers/mysql-echo-handler";
+import {
+	createPostgresEchoHandler,
+	POSTGRES_SSL_REQUEST_PACKET,
+} from "./helpers/postgres-echo-handler";
 import { retry } from "./helpers/retry";
+import { waitFor, waitForLong } from "./helpers/wait-for";
 import { getStartedWorkerdProcesses } from "./helpers/workerd-processes";
+
+const HYPERDRIVE_DATABASES = [
+	{
+		scheme: "postgresql",
+		defaultPort: 5432,
+		envVar: "HYPERDRIVE_DATABASE_URL",
+	},
+	{
+		scheme: "mysql",
+		defaultPort: 3306,
+		envVar: "HYPERDRIVE_MYSQL_DATABASE_URL",
+	},
+] as const;
 
 /**
  * We use the same workerName for all of the tests in this suite in hopes of reducing flakes.
@@ -23,13 +50,16 @@ import { getStartedWorkerdProcesses } from "./helpers/workerd-processes";
  */
 const workerName = generateResourceName();
 
-describe.each([{ cmd: "wrangler dev" }, { cmd: "wrangler dev --remote" }])(
-	"basic js dev: $cmd",
-	({ cmd }) => {
-		it(`can modify Worker during ${cmd}`, async () => {
-			const helper = new WranglerE2ETestHelper();
-			await helper.seed({
-				"wrangler.toml": dedent`
+describe.each([
+	{ cmd: "wrangler dev --port=0 --inspector-port=0" },
+	...(CLOUDFLARE_ACCOUNT_ID
+		? [{ cmd: "wrangler dev --remote --port=0 --inspector-port=0" }]
+		: []),
+])("basic js dev: $cmd", ({ cmd }) => {
+	it(`can modify Worker during ${cmd}`, async ({ expect }) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed({
+			"wrangler.toml": dedent`
 							name = "${workerName}"
 							main = "src/index.ts"
 							compatibility_date = "2023-01-01"
@@ -38,44 +68,91 @@ describe.each([{ cmd: "wrangler dev" }, { cmd: "wrangler dev --remote" }])(
 							[vars]
 							KEY = "value"
 					`,
-				"src/index.ts": dedent`
+			"src/index.ts": dedent`
 							export default {
 								fetch(request) {
 									return new Response("Hello World!")
 								}
 							}`,
-				"package.json": dedent`
+			"package.json": dedent`
 							{
 								"name": "worker",
 								"version": "0.0.0",
 								"private": true
 							}
 							`,
-			});
-			const worker = helper.runLongLived(cmd);
+		});
+		const worker = helper.runLongLived(cmd);
 
-			const { url } = await worker.waitForReady();
+		const { url } = await worker.waitForReady();
 
-			await expect(fetch(url).then((r) => r.text())).resolves.toMatchSnapshot();
+		await expect(fetch(url).then((r) => r.text())).resolves.toMatchSnapshot();
 
-			await helper.seed({
-				"src/index.ts": dedent`
+		await helper.seed({
+			"src/index.ts": dedent`
 						export default {
 							fetch(request, env) {
 								return new Response("Updated Worker! " + env.KEY)
 							}
 						}`,
-			});
-
-			await worker.waitForReload();
-
-			await expect(fetchText(url)).resolves.toMatchSnapshot();
 		});
 
-		it(`hotkeys can be disabled with ${cmd}`, async () => {
-			const helper = new WranglerE2ETestHelper();
-			await helper.seed({
-				"wrangler.toml": dedent`
+		await worker.waitForReload();
+
+		// Regression test for issue where multiple request logs were being logged per request
+		expect([...worker.currentOutput.matchAll(/GET /g)].length).toBe(1);
+
+		await waitForLong(() => expect(fetchText(url)).resolves.toMatchSnapshot());
+	});
+
+	it("works with basic service worker", async ({ expect }) => {
+		const helper = new WranglerE2ETestHelper();
+		const isLocal = cmd.includes("--remote") ? false : true;
+		await helper.seed({
+			"wrangler.toml": dedent`
+				name = "${workerName}"
+				main = "src/index.ts"
+				compatibility_date = "2023-01-01"
+				# TODO: This is a workaround for an EWC bug where remote dev workers only log properly if they have bindings.
+				#       Remove the below line when MR:7727 is merged
+				version_metadata = { binding = "METADATA" }
+			`,
+			"src/index.ts": dedent`
+				addEventListener("fetch", (event) => {
+					const { pathname } = new URL(event.request.url);
+					if (pathname === "/") {
+						event.respondWith(new Response("service worker"));
+					} else if (pathname === "/error") {
+						throw new Error("monkey");
+					} else {
+						event.respondWith(new Response(null, { status: 404 }));
+					}
+				});
+			`,
+		});
+		const worker = helper.runLongLived(cmd);
+		const { url } = await worker.waitForReady();
+		let res = await fetch(url);
+		expect(await res.text()).toBe("service worker");
+
+		res = await fetch(new URL("/error", url), {
+			headers: { Accept: "text/plain" },
+		});
+		const text = await res.text();
+		if (isLocal) {
+			expect(text).toContain("Error: monkey");
+			expect(text).toContain("src/index.ts:6:9");
+		}
+		await worker.readUntil(/monkey/, 30_000);
+		if (isLocal) {
+			await worker.readUntil(/src\/index\.ts:6:9/, 30_000);
+		}
+	});
+
+	it(`hotkeys can be disabled with ${cmd}`, async ({ expect }) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed({
+			"wrangler.toml": dedent`
 							name = "${workerName}"
 							main = "src/index.ts"
 							compatibility_date = "2023-01-01"
@@ -84,106 +161,197 @@ describe.each([{ cmd: "wrangler dev" }, { cmd: "wrangler dev --remote" }])(
 							[vars]
 							KEY = "value"
 					`,
-				"src/index.ts": dedent`
+			"src/index.ts": dedent`
 							export default {
 								fetch(request) {
 									return new Response("Hello World!")
 								}
 							}`,
-				"package.json": dedent`
+			"package.json": dedent`
 							{
 								"name": "worker",
 								"version": "0.0.0",
 								"private": true
 							}
 							`,
-			});
-			const worker = helper.runLongLived(
-				`${cmd} --show-interactive-dev-session=false`
-			);
-
-			const { url } = await worker.waitForReady();
-
-			await expect(fetch(url).then((r) => r.text())).resolves.toMatchSnapshot();
-
-			await expect(worker.currentOutput).not.toContain("[b] open a browser");
 		});
+		const worker = helper.runLongLived(
+			`${cmd} --show-interactive-dev-session=false`
+		);
 
-		describe(`--test-scheduled works with ${cmd}`, async () => {
-			it("custom build", async () => {
-				const helper = new WranglerE2ETestHelper();
-				await helper.seed({
-					"wrangler.toml": dedent`
+		const { url } = await worker.waitForReady();
+
+		await waitForLong(() =>
+			expect(fetch(url).then((r) => r.text())).resolves.toMatchSnapshot()
+		);
+
+		expect(worker.currentOutput).not.toContain("[b] open a browser");
+	});
+
+	describe(`--test-scheduled works with ${cmd}`, async () => {
+		it("custom build", async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 								name = "${workerName}"
 								main = "src/index.ts"
 								compatibility_date = "2023-01-01"
 								[build]
 								command = "true"
 						`,
-					"src/index.ts": dedent`
+				"src/index.ts": dedent`
 								export default {
 									scheduled(event) {
 										console.log("Event triggered")
 									}
 								}`,
-					"package.json": dedent`
+				"package.json": dedent`
 								{
 									"name": "worker",
 									"version": "0.0.0",
 									"private": true
 								}
 								`,
-				});
-				const worker = helper.runLongLived(`${cmd} --test-scheduled`);
-
-				const { url } = await worker.waitForReady();
-
-				await expect(
-					fetch(`${url}/__scheduled`).then((r) => r.text())
-				).resolves.toMatchSnapshot();
-
-				await worker.readUntil(/Event triggered/);
 			});
+			const worker = helper.runLongLived(`${cmd} --test-scheduled`);
 
-			it("no custom build", async () => {
-				const helper = new WranglerE2ETestHelper();
-				await helper.seed({
-					"wrangler.toml": dedent`
+			const { url } = await worker.waitForReady();
+
+			await expect(
+				fetch(`${url}/__scheduled`).then((r) => r.text())
+			).resolves.toMatchSnapshot();
+
+			await worker.readUntil(/Event triggered/);
+		});
+
+		it("no custom build", async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 								name = "${workerName}"
 								main = "src/index.ts"
 								compatibility_date = "2023-01-01"
 						`,
-					"src/index.ts": dedent`
+				"src/index.ts": dedent`
 								export default {
 									scheduled(event) {
 										console.log("Event triggered")
 									}
 								}`,
-					"package.json": dedent`
+				"package.json": dedent`
 								{
 									"name": "worker",
 									"version": "0.0.0",
 									"private": true
 								}
 								`,
-				});
-				const worker = helper.runLongLived(`${cmd} --test-scheduled`);
+			});
+			const worker = helper.runLongLived(`${cmd} --test-scheduled`);
 
-				const { url } = await worker.waitForReady();
+			const { url } = await worker.waitForReady();
 
-				await expect(
-					fetch(`${url}/__scheduled`).then((r) => r.text())
-				).resolves.toMatchSnapshot();
+			await expect(
+				fetch(`${url}/__scheduled`).then((r) => r.text())
+			).resolves.toMatchSnapshot();
 
-				await worker.readUntil(/Event triggered/);
+			await worker.readUntil(/Event triggered/);
+		});
+	});
+
+	describe(`scheduled worker warning with ${cmd}`, () => {
+		it("shows warning with correct port when cron trigger is configured", async ({
+			expect,
+		}) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
+								name = "${workerName}"
+								main = "src/index.ts"
+								compatibility_date = "2023-01-01"
+
+								[triggers]
+								crons = ["* * * * *"]
+						`,
+				"src/index.ts": dedent`
+								export default {
+									fetch(request) {
+										return new Response("Hello World!")
+									},
+									scheduled(event) {
+										console.log("Scheduled event triggered");
+									}
+								}`,
+				"package.json": dedent`
+								{
+									"name": "worker",
+									"version": "0.0.0",
+									"private": true
+								}
+								`,
+			});
+			const worker = helper.runLongLived(cmd);
+
+			const { url } = await worker.waitForReady();
+			const { hostname, port } = new URL(url);
+
+			// The warning should contain the actual port, not "undefined"
+			await waitFor(() => {
+				expect(worker.currentOutput).toContain(
+					"Scheduled Workers are not automatically triggered"
+				);
+				expect(worker.currentOutput).toContain(
+					`curl "http://${hostname}:${port}/cdn-cgi/handler/scheduled"`
+				);
+				expect(worker.currentOutput).not.toContain("undefined");
 			});
 		});
 
-		describe("Workers + Assets", () => {
-			it(`can modify User Worker during ${cmd}`, async () => {
-				const helper = new WranglerE2ETestHelper();
-				await helper.seed({
-					"wrangler.toml": dedent`
+		it("does not show warning when --test-scheduled is enabled", async ({
+			expect,
+		}) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
+								name = "${workerName}"
+								main = "src/index.ts"
+								compatibility_date = "2023-01-01"
+
+								[triggers]
+								crons = ["* * * * *"]
+						`,
+				"src/index.ts": dedent`
+								export default {
+									fetch(request) {
+										return new Response("Hello World!")
+									},
+									scheduled(event) {
+										console.log("Scheduled event triggered");
+									}
+								}`,
+				"package.json": dedent`
+								{
+									"name": "worker",
+									"version": "0.0.0",
+									"private": true
+								}
+								`,
+			});
+			const worker = helper.runLongLived(`${cmd} --test-scheduled`);
+
+			await worker.waitForReady();
+
+			// The warning should NOT appear when testScheduled is enabled
+			expect(worker.currentOutput).not.toContain(
+				"Scheduled Workers are not automatically triggered"
+			);
+		});
+	});
+
+	describe("Workers + Assets", () => {
+		it(`can modify User Worker during ${cmd}`, async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 								name = "${workerName}"
 								main = "src/index.ts"
 								compatibility_date = "2023-01-01"
@@ -192,48 +360,48 @@ describe.each([{ cmd: "wrangler dev" }, { cmd: "wrangler dev --remote" }])(
 								[assets]
 								directory = "public"
 						`,
-					"src/index.ts": dedent`
+				"src/index.ts": dedent`
 								export default {
 									fetch(request) {
 										return new Response("Hello World!")
 									}
 								}`,
-					"public/readme.md": dedent`
+				"public/readme.md": dedent`
 								Welcome to Workers + Assets readme!`,
-					"package.json": dedent`
+				"package.json": dedent`
 								{
 									"name": "worker",
 									"version": "0.0.0",
 									"private": true
 								}
 								`,
-				});
-				const worker = helper.runLongLived(cmd);
+			});
+			const worker = helper.runLongLived(cmd);
 
-				const { url } = await worker.waitForReady();
+			// Remote mode with assets involves session creation + asset upload +
+			// bundle upload to edge-preview, which can be slow on Windows CI.
+			const { url } = await worker.waitForReady(30_000);
 
-				await expect(
-					fetch(url).then((r) => r.text())
-				).resolves.toMatchSnapshot();
+			await expect(fetch(url).then((r) => r.text())).resolves.toMatchSnapshot();
 
-				await helper.seed({
-					"src/index.ts": dedent`
+			await helper.seed({
+				"src/index.ts": dedent`
 							export default {
 								fetch(request, env) {
 									return new Response("Updated Worker!")
 								}
 							}`,
-				});
-
-				await worker.waitForReload();
-
-				await expect(fetchText(url)).resolves.toMatchSnapshot();
 			});
 
-			it(`can modify assets during ${cmd}`, async () => {
-				const helper = new WranglerE2ETestHelper();
-				await helper.seed({
-					"wrangler.toml": dedent`
+			await worker.waitForReload(30_000);
+
+			await expect(fetchText(url)).resolves.toMatchSnapshot();
+		});
+
+		it(`can modify assets during ${cmd}`, async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 								name = "${workerName}"
 								main = "src/index.ts"
 								compatibility_date = "2023-01-01"
@@ -242,47 +410,44 @@ describe.each([{ cmd: "wrangler dev" }, { cmd: "wrangler dev --remote" }])(
 								[assets]
 								directory = "public"
 						`,
-					"src/index.ts": dedent`
+				"src/index.ts": dedent`
 								export default {
 									fetch(request) {
 										return new Response("Hello World!")
 									}
 								}`,
-					"public/readme.md": dedent`
+				"public/readme.md": dedent`
 								Welcome to Workers + Assets readme!`,
-					"package.json": dedent`
+				"package.json": dedent`
 								{
 									"name": "worker",
 									"version": "0.0.0",
 									"private": true
 								}
 								`,
-				});
-				const worker = helper.runLongLived(cmd);
-
-				const { url } = await worker.waitForReady();
-
-				await expect(
-					fetch(url).then((r) => r.text())
-				).resolves.toMatchSnapshot();
-
-				await helper.seed({
-					"public/readme.md": dedent`
-								Welcome to updated Workers + Assets readme!`,
-				});
-
-				await worker.waitForReload();
-
-				await expect(fetchText(url)).resolves.toMatchSnapshot();
 			});
+			const worker = helper.runLongLived(cmd);
+
+			const { url } = await worker.waitForReady(30_000);
+
+			await expect(fetch(url).then((r) => r.text())).resolves.toMatchSnapshot();
+
+			await helper.seed({
+				"public/readme.md": dedent`
+								Welcome to updated Workers + Assets readme!`,
+			});
+
+			await worker.waitForReload(30_000);
+
+			await expect(fetchText(url)).resolves.toMatchSnapshot();
 		});
-	}
-);
+	});
+});
 
 // This fails on Windows because of https://github.com/cloudflare/workerd/issues/1664
 it.runIf(process.platform !== "win32")(
 	`leaves no orphaned workerd processes with port conflict`,
-	async () => {
+	async ({ expect }) => {
 		const initial = new WranglerE2ETestHelper();
 		await initial.seed({
 			"wrangler.toml": dedent`
@@ -352,7 +517,7 @@ describe.each([{ cmd: "wrangler dev" }])(
 	"basic python dev: $cmd",
 	{ timeout: 90_000 },
 	({ cmd }) => {
-		it(`can modify entrypoint during ${cmd}`, async () => {
+		it(`can modify entrypoint during ${cmd}`, async ({ expect }) => {
 			const helper = new WranglerE2ETestHelper();
 			await helper.seed({
 				"wrangler.toml": dedent`
@@ -405,7 +570,7 @@ describe.each([{ cmd: "wrangler dev" }])(
 			expect(text).toBe("Updated Python Worker value");
 		});
 
-		it(`can modify imports during ${cmd}`, async () => {
+		it(`can modify imports during ${cmd}`, async ({ expect }) => {
 			const helper = new WranglerE2ETestHelper();
 			await helper.seed({
 				"wrangler.toml": dedent`
@@ -457,7 +622,7 @@ describe.each([{ cmd: "wrangler dev" }])(
 			expect(text).toBe("py hello world 5");
 		});
 
-		it(`can print during ${cmd}`, async () => {
+		it(`can print during ${cmd}`, async ({ expect }) => {
 			const helper = new WranglerE2ETestHelper();
 			await helper.seed({
 				"wrangler.toml": dedent`
@@ -496,125 +661,140 @@ describe.each([{ cmd: "wrangler dev" }])(
 			await worker.readUntil(/foobar 12/);
 			await worker.readUntil(/end/);
 		});
+
+		it(`prints additional modules when vendored modules are present during ${cmd}`, async () => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
+					name = "${workerName}"
+					main = "index.py"
+					compatibility_date = "2023-01-01"
+					compatibility_flags = ["python_workers"]
+			`,
+				"arithmetic.py": dedent`
+					def mul(a,b):
+						return a*b`,
+				"index.py": dedent`
+					from arithmetic import mul
+
+					from js import Response
+					def on_fetch(request):
+						return Response.new(f"py hello world {mul(2,3)}")`,
+				"python_modules/mod1.py": "print(42)",
+				"python_modules/mod2.py": "def hello(): return 42",
+				"package.json": dedent`
+					{
+						"name": "worker",
+						"version": "0.0.0",
+						"private": true
+					}
+					`,
+			});
+			const worker = helper.runLongLived(cmd);
+
+			// Check that the additional modules output includes the vendored modules
+			// This needs to be done before waitForReady() since that consumes the output stream
+			await worker.readUntil(/Attaching additional modules:/);
+			await worker.readUntil(/Vendored Modules/);
+
+			await worker.waitForReady();
+		});
+
+		it(`can exclude vendored module during ${cmd}`, async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
+					name = "${workerName}"
+					main = "src/index.py"
+					compatibility_date = "2023-01-01"
+					compatibility_flags = ["python_workers"]
+					[python_modules]
+					exclude = ["excluded_module.py"]
+			`,
+				"src/arithmetic.py": dedent`
+					def mul(a,b):
+						return a*b`,
+				"python_modules/excluded_module.py": dedent`
+					def excluded(a,b):
+						return a*b`,
+				"src/index.py": dedent`
+					from arithmetic import mul
+
+					from js import Response
+					def on_fetch(request):
+						print(f"hello {mul(2,3)}")
+						try:
+							import excluded_module
+							print("excluded_module found")
+						except ImportError:
+							print("excluded_module not found")
+						print(f"end")
+						return Response.new(f"py hello world {mul(2,3)}")`,
+				"package.json": dedent`
+					{
+						"name": "worker",
+						"version": "0.0.0",
+						"private": true
+					}
+					`,
+			});
+			const worker = helper.runLongLived(cmd);
+
+			const { url } = await worker.waitForReady();
+
+			await expect(fetchText(url)).resolves.toBe("py hello world 6");
+
+			await worker.readUntil(/hello 6/);
+			await worker.readUntil(/excluded_module not found/);
+			await worker.readUntil(/end/);
+		});
 	}
 );
 
-describe("hyperdrive dev tests", () => {
-	let server: nodeNet.Server;
+// When `wrangler dev` is force-killed via tree-kill at test teardown,
+// workerd's outbound TCP connection to the mock database server is reset
+// rather than gracefully closed. With the Hyperdrive proxy now skipped for
+// `sslmode=disable` (the default), that RST surfaces directly on the
+// per-connection socket of the test's `nodeNet.Server`. Without an `error`
+// listener Node escalates it to `uncaughtException`, which Vitest catches as
+// an unhandled error and fails the run even though the test itself passed.
+function ignoreEconnreset(err: NodeJS.ErrnoException): void {
+	if (err.code !== "ECONNRESET") {
+		throw err;
+	}
+}
 
-	beforeEach(async () => {
-		server = nodeNet.createServer().listen();
-	});
+describe.each(HYPERDRIVE_DATABASES)(
+	"hyperdrive dev tests ($scheme)",
+	({ scheme, defaultPort, envVar }) => {
+		let server: nodeNet.Server;
 
-	it("matches expected configuration parameters", async () => {
-		const helper = new WranglerE2ETestHelper();
-		let port = 5432;
-		if (server.address() && typeof server.address() !== "string") {
-			port = (server.address() as nodeNet.AddressInfo).port;
-		}
-		await helper.seed({
-			"wrangler.toml": dedent`
-					name = "${workerName}"
-					main = "src/index.ts"
-					compatibility_date = "2023-10-25"
-
-					[[hyperdrive]]
-					binding = "HYPERDRIVE"
-					id = "hyperdrive_id"
-					localConnectionString = "postgresql://user:%21pass@127.0.0.1:${port}/some_db"
-			`,
-			"src/index.ts": dedent`
-					export default {
-						async fetch(request, env) {
-							if (request.url.includes("connect")) {
-								const conn = env.HYPERDRIVE.connect();
-								await conn.writable.getWriter().write(new TextEncoder().encode("test string"));
-							}
-							return new Response(env.HYPERDRIVE?.connectionString ?? "no")
-						}
-					}`,
-			"package.json": dedent`
-					{
-						"name": "worker",
-						"version": "0.0.0",
-						"private": true
-					}
-					`,
-		});
-		const worker = helper.runLongLived("wrangler dev");
-		const { url } = await worker.waitForReady();
-
-		const text = await fetchText(url);
-
-		const hyperdrive = new URL(text);
-		expect(hyperdrive.pathname).toBe("/some_db");
-		expect(hyperdrive.username).toBe("user");
-		expect(hyperdrive.password).toBe("!pass");
-		expect(hyperdrive.host).not.toBe("localhost");
-	});
-
-	it("connects to a socket", async () => {
-		const helper = new WranglerE2ETestHelper();
-		let port = 5432;
-		if (server.address() && typeof server.address() !== "string") {
-			port = (server.address() as nodeNet.AddressInfo).port;
-		}
-		await helper.seed({
-			"wrangler.toml": dedent`
-					name = "${workerName}"
-					main = "src/index.ts"
-					compatibility_date = "2023-10-25"
-
-					[[hyperdrive]]
-					binding = "HYPERDRIVE"
-					id = "hyperdrive_id"
-					localConnectionString = "postgresql://user:pass@127.0.0.1:${port}/some_db"
-			`,
-			"src/index.ts": dedent`
-					export default {
-						async fetch(request, env) {
-							if (request.url.includes("connect")) {
-								const conn = env.HYPERDRIVE.connect();
-								await conn.writable.getWriter().write(new TextEncoder().encode("test string"));
-							}
-							return new Response(env.HYPERDRIVE?.connectionString ?? "no")
-						}
-					}`,
-			"package.json": dedent`
-					{
-						"name": "worker",
-						"version": "0.0.0",
-						"private": true
-					}
-					`,
-		});
-		const socketMsgPromise = new Promise((resolve, _) => {
-			server.on("connection", (sock) => {
-				sock.on("data", (data) => {
-					expect(new TextDecoder().decode(data)).toBe("test string");
-					server.close();
-					resolve({});
-				});
+		beforeEach(async () => {
+			if (scheme === "mysql") {
+				server = nodeNet.createServer().listen();
+				setupMysqlServer(server);
+			} else {
+				server = nodeNet
+					.createServer((socket) => {
+						socket.on("data", createPostgresEchoHandler(socket));
+					})
+					.listen();
+			}
+			// Attach a no-op-on-ECONNRESET listener to every accepted socket.
+			// See `ignoreEconnreset` for context.
+			server.on("connection", (socket) => {
+				socket.on("error", ignoreEconnreset);
 			});
 		});
 
-		const worker = helper.runLongLived("wrangler dev");
-
-		const { url } = await worker.waitForReady();
-
-		await fetch(`${url}/connect`);
-
-		await socketMsgPromise;
-	});
-
-	it("uses HYPERDRIVE_LOCAL_CONNECTION_STRING for the localConnectionString variable in the binding", async () => {
-		const helper = new WranglerE2ETestHelper();
-		let port = 5432;
-		if (server.address() && typeof server.address() !== "string") {
-			port = (server.address() as nodeNet.AddressInfo).port;
-		}
-		await helper.seed({
-			"wrangler.toml": dedent`
+		it("matches expected configuration parameters", async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			let port: number = defaultPort;
+			if (server.address() && typeof server.address() !== "string") {
+				port = (server.address() as nodeNet.AddressInfo).port;
+			}
+			await helper.seed({
+				"wrangler.toml": dedent`
 					name = "${workerName}"
 					main = "src/index.ts"
 					compatibility_date = "2023-10-25"
@@ -622,8 +802,9 @@ describe("hyperdrive dev tests", () => {
 					[[hyperdrive]]
 					binding = "HYPERDRIVE"
 					id = "hyperdrive_id"
+					localConnectionString = "${scheme}://user:%21pass@127.0.0.1:${port}/some_db"
 			`,
-			"src/index.ts": dedent`
+				"src/index.ts": dedent`
 					export default {
 						async fetch(request, env) {
 							if (request.url.includes("connect")) {
@@ -633,43 +814,174 @@ describe("hyperdrive dev tests", () => {
 							return new Response(env.HYPERDRIVE?.connectionString ?? "no")
 						}
 					}`,
-			"package.json": dedent`
+				"package.json": dedent`
 					{
 						"name": "worker",
 						"version": "0.0.0",
 						"private": true
 					}
 					`,
+			});
+			const worker = helper.runLongLived("wrangler dev");
+			const { url } = await worker.waitForReady();
+
+			const text = await fetchText(url);
+
+			assert(text);
+			const hyperdrive = new URL(text);
+			expect(hyperdrive.pathname).toBe("/some_db");
+			expect(hyperdrive.username).toBe("user");
+			expect(hyperdrive.password).toBe("!pass");
+			expect(hyperdrive.host).not.toBe("localhost");
 		});
 
-		const worker = helper.runLongLived("wrangler dev", {
-			env: {
-				...process.env,
-				WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: `postgresql://user:pass@127.0.0.1:${port}/some_db`,
-			},
-		});
+		it("connects to a socket", async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			let port: number = defaultPort;
+			if (server.address() && typeof server.address() !== "string") {
+				port = (server.address() as nodeNet.AddressInfo).port;
+			}
+			await helper.seed({
+				"wrangler.toml": dedent`
+					name = "${workerName}"
+					main = "src/index.ts"
+					compatibility_date = "2023-10-25"
 
-		const { url } = await worker.waitForReady();
-		const socketMsgPromise = new Promise((resolve, _) => {
-			server.on("connection", (sock) => {
-				sock.on("data", (data) => {
-					expect(new TextDecoder().decode(data)).toBe("test string");
-					server.close();
-					resolve({});
+					[[hyperdrive]]
+					binding = "HYPERDRIVE"
+					id = "hyperdrive_id"
+					localConnectionString = "${scheme}://user:pass@127.0.0.1:${port}/some_db"
+			`,
+				"src/index.ts": dedent`
+					export default {
+						async fetch(request, env) {
+							if (request.url.includes("connect")) {
+								const conn = env.HYPERDRIVE.connect();
+								await conn.writable.getWriter().write(new TextEncoder().encode("test string"));
+							}
+							return new Response(env.HYPERDRIVE?.connectionString ?? "no")
+						}
+					}`,
+				"package.json": dedent`
+					{
+						"name": "worker",
+						"version": "0.0.0",
+						"private": true
+					}
+					`,
+			});
+			const socketMsgPromise = new Promise((resolve, _) => {
+				server.on("connection", (socket) => {
+					// For MySQL, send initial handshake first
+					if (scheme === "mysql") {
+						socket.write(MYSQL_INITIAL_HANDSHAKE_PACKET);
+					}
+					socket.on("data", (chunk) => {
+						if (
+							scheme === "postgresql" &&
+							chunk.equals(POSTGRES_SSL_REQUEST_PACKET)
+						) {
+							socket.write("N");
+							return;
+						}
+						expect(new TextDecoder().decode(chunk)).toBe("test string");
+						server.close();
+						resolve({});
+					});
 				});
 			});
+
+			const worker = helper.runLongLived("wrangler dev");
+
+			const { url } = await worker.waitForReady();
+
+			await fetch(`${url}/connect`);
+
+			await socketMsgPromise;
 		});
-		await fetch(`${url}/connect`);
 
-		await socketMsgPromise;
-	});
+		it("uses HYPERDRIVE_LOCAL_CONNECTION_STRING for the localConnectionString variable in the binding", async ({
+			expect,
+		}) => {
+			const helper = new WranglerE2ETestHelper();
+			let port: number = defaultPort;
+			if (server.address() && typeof server.address() !== "string") {
+				port = (server.address() as nodeNet.AddressInfo).port;
+			}
+			await helper.seed({
+				"wrangler.toml": dedent`
+					name = "${workerName}"
+					main = "src/index.ts"
+					compatibility_date = "2023-10-25"
 
-	it("does not require local connection string when running `wrangler dev --remote`", async () => {
-		const helper = new WranglerE2ETestHelper();
-		const { id } = await helper.hyperdrive(false);
+					[[hyperdrive]]
+					binding = "HYPERDRIVE"
+					id = "hyperdrive_id"
+			`,
+				"src/index.ts": dedent`
+					export default {
+						async fetch(request, env) {
+							if (request.url.includes("connect")) {
+								const conn = env.HYPERDRIVE.connect();
+								await conn.writable.getWriter().write(new TextEncoder().encode("test string"));
+							}
+							return new Response(env.HYPERDRIVE?.connectionString ?? "no")
+						}
+					}`,
+				"package.json": dedent`
+					{
+						"name": "worker",
+						"version": "0.0.0",
+						"private": true
+					}
+					`,
+			});
 
-		await helper.seed({
-			"wrangler.toml": dedent`
+			const worker = helper.runLongLived("wrangler dev", {
+				env: {
+					...process.env,
+					CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE: `${scheme}://user:pass@127.0.0.1:${port}/some_db`,
+				},
+			});
+
+			const { url } = await worker.waitForReady();
+			const socketMsgPromise = new Promise((resolve, reject) => {
+				server.on("connection", (socket) => {
+					// For MySQL, send initial handshake first
+					if (scheme === "mysql") {
+						socket.write(MYSQL_INITIAL_HANDSHAKE_PACKET);
+					}
+					socket.on("data", (chunk) => {
+						if (
+							scheme === "postgresql" &&
+							POSTGRES_SSL_REQUEST_PACKET.equals(chunk)
+						) {
+							socket.write("N");
+							return;
+						}
+						expect(new TextDecoder().decode(chunk)).toBe("test string");
+						server.close();
+						resolve({});
+					});
+					socket.on("error", (err) => {
+						console.error("Socket error:", err);
+						reject(err);
+					});
+				});
+			});
+			await fetch(`${url}/connect`);
+
+			await socketMsgPromise;
+		});
+
+		it.skipIf(!CLOUDFLARE_ACCOUNT_ID || !process.env[envVar])(
+			"does not require local connection string when running `wrangler dev --remote`",
+			async () => {
+				const helper = new WranglerE2ETestHelper();
+				const { id } = await helper.hyperdrive(false, scheme);
+
+				await helper.seed({
+					"wrangler.toml": dedent`
 					name = "${workerName}"
 					main = "src/index.ts"
 					compatibility_date = "2023-10-25"
@@ -678,7 +990,7 @@ describe("hyperdrive dev tests", () => {
 					binding = "HYPERDRIVE"
 					id = "${id}"
 			`,
-			"src/index.ts": dedent`
+					"src/index.ts": dedent`
 					export default {
 						async fetch(request, env) {
 							if (request.url.includes("connect")) {
@@ -687,30 +999,32 @@ describe("hyperdrive dev tests", () => {
 							return new Response(env.HYPERDRIVE?.connectionString ?? "no")
 						}
 					}`,
-			"package.json": dedent`
+					"package.json": dedent`
 					{
 						"name": "worker",
 						"version": "0.0.0",
 						"private": true
 					}
 					`,
+				});
+
+				const worker = helper.runLongLived("wrangler dev --remote");
+
+				const { url } = await worker.waitForReady();
+				await fetch(`${url}/connect`);
+			}
+		);
+
+		afterEach(() => {
+			if (server.listening) {
+				server.close();
+			}
 		});
-
-		const worker = helper.runLongLived("wrangler dev --remote");
-
-		const { url } = await worker.waitForReady();
-		await fetch(`${url}/connect`);
-	});
-
-	afterEach(() => {
-		if (server.listening) {
-			server.close();
-		}
-	});
-});
+	}
+);
 
 describe("queue dev tests", () => {
-	it("matches expected configuration parameters", async () => {
+	it("matches expected configuration parameters", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -747,7 +1061,7 @@ describe("queue dev tests", () => {
 });
 
 describe("writes debug logs to hidden file", () => {
-	it("writes to file when --log-level = debug", async () => {
+	it("writes to file when --log-level = debug", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -755,7 +1069,7 @@ describe("writes debug logs to hidden file", () => {
 					main = "src/index.ts"
 					compatibility_date = "2023-01-01"
 				`,
-			"src/index.ts": dedent/* javascript */ `
+			"src/index.ts": dedent /* javascript */ `
 					export default {
 						fetch(req, env) {
 							return new Response('A' + req.url);
@@ -784,7 +1098,7 @@ describe("writes debug logs to hidden file", () => {
 		expect(existsSync(filepath)).toBe(true);
 	});
 
-	it("does NOT write to file when --log-level != debug", async () => {
+	it("does NOT write to file when --log-level != debug", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -792,7 +1106,7 @@ describe("writes debug logs to hidden file", () => {
 				main = "src/index.ts"
 				compatibility_date = "2023-01-01"
 			`,
-			"src/index.ts": dedent/* javascript */ `
+			"src/index.ts": dedent /* javascript */ `
 				export default {
 					fetch(req, env) {
 						return new Response('A' + req.url);
@@ -817,17 +1131,19 @@ describe("writes debug logs to hidden file", () => {
 });
 
 describe("analytics engine", () => {
-	describe.each([{ cmd: "wrangler dev" }, { cmd: "wrangler dev --remote" }])(
+	describe.each([{ cmd: "wrangler dev" }])(
 		"mock analytics engine datasets: $cmd",
 		({ cmd }) => {
 			describe("module worker", () => {
-				it("analytics engine datasets are mocked in dev", async () => {
+				it("analytics engine datasets are mocked in dev", async ({
+					expect,
+				}) => {
 					const helper = new WranglerE2ETestHelper();
 					await helper.seed({
 						"wrangler.toml": dedent`
 				name = "${workerName}"
 				main = "src/index.ts"
-				compatibility_date = "2024-08-08"
+				compatibility_date = "2022-08-08"
 
 				[[analytics_engine_datasets]]
 				binding = "ANALYTICS_BINDING"
@@ -866,7 +1182,7 @@ describe("analytics engine", () => {
 			});
 
 			describe("service worker", async () => {
-				it("analytics engine datasets are mocked in dev", async () => {
+				it("using analytics engine datasets logs a warning in dev", async () => {
 					const helper = new WranglerE2ETestHelper();
 					await helper.seed({
 						"wrangler.toml": dedent`
@@ -900,11 +1216,8 @@ describe("analytics engine", () => {
 					});
 					const worker = helper.runLongLived(cmd);
 
-					const { url } = await worker.waitForReady();
-
-					const text = await fetchText(url);
-					expect(text).toContain(
-						`successfully wrote datapoint from service worker`
+					await worker.readUntil(
+						/Analytics Engine is not supported locally when using the service-worker format/
 					);
 				});
 			});
@@ -912,42 +1225,44 @@ describe("analytics engine", () => {
 	);
 });
 
-describe("zone selection", () => {
-	it("defaults to a workers.dev preview", async () => {
-		const helper = new WranglerE2ETestHelper();
-		await helper.seed({
-			"wrangler.toml": dedent`
+describe.skipIf(CLOUDFLARE_ACCOUNT_ID !== "8d783f274e1f82dc46744c297b015a2f")(
+	"zone selection",
+	() => {
+		it("defaults to a workers.dev preview", async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 				name = "${workerName}"
 				main = "src/index.ts"
 				compatibility_date = "2023-01-01"
 				compatibility_flags = ["nodejs_compat"]`,
-			"src/index.ts": dedent`
+				"src/index.ts": dedent`
 				export default {
 					fetch(request) {
 						return new Response(request.url)
 					}
 				}`,
-			"package.json": dedent`
+				"package.json": dedent`
 				{
 					"name": "worker",
 					"version": "0.0.0",
 					"private": true
 				}
 				`,
+			});
+			const worker = helper.runLongLived("wrangler dev --remote");
+
+			const { url } = await worker.waitForReady();
+
+			const text = await fetchText(url);
+
+			expect(text).toContain(E2E_ACCOUNT_WORKERS_DEV_DOMAIN);
 		});
-		const worker = helper.runLongLived("wrangler dev --remote");
 
-		const { url } = await worker.waitForReady();
-
-		const text = await fetchText(url);
-
-		expect(text).toContain(`devprod-testing7928.workers.dev`);
-	});
-
-	it("respects dev.host setting", async () => {
-		const helper = new WranglerE2ETestHelper();
-		await helper.seed({
-			"wrangler.toml": dedent`
+		it("respects dev.host setting", async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 				name = "${workerName}"
 				main = "src/index.ts"
 				compatibility_date = "2023-01-01"
@@ -955,35 +1270,35 @@ describe("zone selection", () => {
 
 				[dev]
 				host = "wrangler-testing.testing.devprod.cloudflare.dev"`,
-			"src/index.ts": dedent`
+				"src/index.ts": dedent`
 				export default {
 					fetch(request) {
 						return new Response(request.url)
 					}
 				}`,
-			"package.json": dedent`
+				"package.json": dedent`
 				{
 					"name": "worker",
 					"version": "0.0.0",
 					"private": true
 				}
 				`,
+			});
+			const worker = helper.runLongLived("wrangler dev --remote");
+
+			const { url } = await worker.waitForReady();
+
+			const text = await fetchText(url);
+
+			expect(text).toMatchInlineSnapshot(
+				`"https://wrangler-testing.testing.devprod.cloudflare.dev/"`
+			);
 		});
-		const worker = helper.runLongLived("wrangler dev --remote");
 
-		const { url } = await worker.waitForReady();
-
-		const text = await fetchText(url);
-
-		expect(text).toMatchInlineSnapshot(
-			`"https://wrangler-testing.testing.devprod.cloudflare.dev/"`
-		);
-	});
-
-	it("infers host from first route", async () => {
-		const helper = new WranglerE2ETestHelper();
-		await helper.seed({
-			"wrangler.toml": dedent`
+		it("infers host from first route", async ({ expect }) => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 				name = "${workerName}"
 				main = "src/index.ts"
 				compatibility_date = "2023-01-01"
@@ -993,35 +1308,35 @@ describe("zone selection", () => {
 				pattern = "wrangler-testing.testing.devprod.cloudflare.dev/*"
 				zone_name = "testing.devprod.cloudflare.dev"
 			`,
-			"src/index.ts": dedent`
+				"src/index.ts": dedent`
 				export default {
 					fetch(request) {
 						return new Response(request.url)
 					}
 				}`,
-			"package.json": dedent`
+				"package.json": dedent`
 				{
 					"name": "worker",
 					"version": "0.0.0",
 					"private": true
 				}
 				`,
+			});
+			const worker = helper.runLongLived("wrangler dev --remote");
+
+			const { url } = await worker.waitForReady();
+
+			const text = await fetchText(url);
+
+			expect(text).toMatchInlineSnapshot(
+				`"https://wrangler-testing.testing.devprod.cloudflare.dev/"`
+			);
 		});
-		const worker = helper.runLongLived("wrangler dev --remote");
 
-		const { url } = await worker.waitForReady();
-
-		const text = await fetchText(url);
-
-		expect(text).toMatchInlineSnapshot(
-			`"https://wrangler-testing.testing.devprod.cloudflare.dev/"`
-		);
-	});
-
-	it("fails with useful error message if host is not routable", async () => {
-		const helper = new WranglerE2ETestHelper();
-		await helper.seed({
-			"wrangler.toml": dedent`
+		it("fails with useful error message if host is not routable", async () => {
+			const helper = new WranglerE2ETestHelper();
+			await helper.seed({
+				"wrangler.toml": dedent`
 				name = "${workerName}"
 				main = "src/index.ts"
 				compatibility_date = "2023-01-01"
@@ -1031,30 +1346,33 @@ describe("zone selection", () => {
 				pattern = "not-a-domain.testing.devprod.cloudflare.dev/*"
 				zone_name = "testing.devprod.cloudflare.dev"
 			`,
-			"src/index.ts": dedent`
+				"src/index.ts": dedent`
 				export default {
 					fetch(request) {
 						return new Response(request.url)
 					}
 				}`,
-			"package.json": dedent`
+				"package.json": dedent`
 				{
 					"name": "worker",
 					"version": "0.0.0",
 					"private": true
 				}
 				`,
-		});
-		const worker = helper.runLongLived("wrangler dev --remote");
+			});
+			const worker = helper.runLongLived("wrangler dev --remote");
+			const { url } = await worker.waitForReady();
 
-		await worker.readUntil(
-			/Could not access `not-a-domain.testing.devprod.cloudflare.dev`. Make sure the domain is set up to be proxied by Cloudflare/
-		);
-	});
-});
+			await fetchText(url);
+			await worker.readUntil(/ERROR/);
+		});
+	}
+);
 
 describe("custom builds", () => {
-	it("does not hang when custom build does not cause esbuild to run", async () => {
+	it("does not hang when custom build does not cause esbuild to run", async ({
+		expect,
+	}) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -1091,7 +1409,7 @@ describe("custom builds", () => {
 		expect(text).toMatchInlineSnapshot(`"Hello, World!"`);
 	});
 
-	it("does not infinite-loop custom build with assets", async () => {
+	it("does not infinite-loop custom build with assets", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -1115,9 +1433,9 @@ describe("custom builds", () => {
 		const worker = helper.runLongLived("wrangler dev");
 
 		// first build on startup
-		await worker.readUntil(/Running custom build/, 5_000);
+		await worker.readUntil(/\[custom build\] Running/, 5_000);
 		// second build for first watcher notification (can be optimised away, leaving as-is for now)
-		await worker.readUntil(/Running custom build/, 5_000);
+		await worker.readUntil(/\[custom build\] Running/, 5_000);
 
 		// Need to get the url in this order because waitForReady calls readUntil
 		// which keeps track of where it's read up to so far,
@@ -1129,7 +1447,7 @@ describe("custom builds", () => {
 		// assert no more custom builds happen
 		// regression: https://github.com/cloudflare/workers-sdk/issues/6876
 		await expect(
-			worker.readUntil(/Running custom build:/, 5_000)
+			worker.readUntil(/\[custom build\] Running/, 5_000)
 		).rejects.toThrowError();
 
 		// now check assets are still fetchable, even after updates
@@ -1156,7 +1474,9 @@ describe("watch mode", () => {
 	describe.each([{ cmd: "wrangler dev" }])(
 		"Workers watch mode: $cmd",
 		({ cmd }) => {
-			it(`supports modifying the Worker script during dev session`, async () => {
+			it(`supports modifying the Worker script during dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1207,7 +1527,9 @@ describe("watch mode", () => {
 	describe.each([{ cmd: "wrangler dev" }])(
 		"Workers + Assets watch mode: $cmd",
 		({ cmd }) => {
-			it(`supports modifying existing assets during dev session`, async () => {
+			it(`supports modifying existing assets during dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1250,7 +1572,9 @@ describe("watch mode", () => {
 				expect(response.headers.get("etag")).not.toBe(originalETag);
 			});
 
-			it(`supports adding new assets during dev session`, async () => {
+			it(`supports adding new assets during dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1304,7 +1628,9 @@ describe("watch mode", () => {
 				expect(response.status).toBe(304);
 			});
 
-			it(`supports removing existing assets during dev session`, async () => {
+			it(`supports removing existing assets during dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1354,7 +1680,9 @@ describe("watch mode", () => {
 				expect(response.status).toBe(404);
 			});
 
-			it("supports adding new metafiles during dev session", async () => {
+			it("supports adding new metafiles during dev session", async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1406,7 +1734,9 @@ describe("watch mode", () => {
 				expect(response.headers.get("X-Header")).toBe("Custom-Value");
 			});
 
-			it(`supports modifying the assets directory in wrangler.toml during dev session`, async () => {
+			it(`supports modifying the assets directory in wrangler.toml during dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1462,7 +1792,9 @@ describe("watch mode", () => {
 				);
 			});
 
-			it(`supports switching from Workers without assets to assets-only Workers during the current dev session`, async () => {
+			it(`supports switching from Workers without assets to assets-only Workers during the current dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1526,7 +1858,9 @@ describe("watch mode", () => {
 				expect(response.status).toBe(404);
 			});
 
-			it(`supports switching from Workers without assets to Workers with assets during the current dev session`, async () => {
+			it(`supports switching from Workers without assets to Workers with assets during the current dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1592,7 +1926,9 @@ describe("watch mode", () => {
 				expect(await response.text()).toBe("Hello from user Worker!");
 			});
 
-			it(`supports switching from assets-only Workers to Workers with assets during the current dev session`, async () => {
+			it(`supports switching from assets-only Workers to Workers with assets during the current dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1648,7 +1984,9 @@ describe("watch mode", () => {
 				expect(await response.text()).toBe("Hello from user Worker!");
 			});
 
-			it(`supports switching from Workers with assets to assets-only Workers during the current dev session`, async () => {
+			it(`supports switching from Workers with assets to assets-only Workers during the current dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1704,7 +2042,9 @@ describe("watch mode", () => {
 				expect(response.status).toBe(404);
 			});
 
-			it("debounces runtime restarts when assets are modified", async () => {
+			it("debounces runtime restarts when assets are modified", async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1751,7 +2091,9 @@ describe("watch mode", () => {
 				await expect(fetchText(url)).resolves.toBe("Hello from Assets");
 			});
 
-			it(`warns on mounted paths when routes are configured in the configuration file`, async () => {
+			it(`warns on mounted paths when routes are configured in the configuration file`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1791,7 +2133,7 @@ describe("watch mode", () => {
 	describe.each([{ cmd: "wrangler dev --assets=dist" }])(
 		"Workers + Assets watch mode: $cmd",
 		({ cmd }) => {
-			it(`supports modifying assets during dev session`, async () => {
+			it(`supports modifying assets during dev session`, async ({ expect }) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1874,7 +2216,9 @@ describe("watch mode", () => {
 				expect(response.status).toBe(404);
 			});
 
-			it(`supports switching from assets-only Workers to Workers with assets during the current dev session`, async () => {
+			it(`supports switching from assets-only Workers to Workers with assets during the current dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1924,7 +2268,9 @@ describe("watch mode", () => {
 				expect(await response.text()).toBe("Hello from user Worker!");
 			});
 
-			it(`supports switching from Workers with assets to assets-only Workers during the current dev session`, async () => {
+			it(`supports switching from Workers with assets to assets-only Workers during the current dev session`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -1973,7 +2319,9 @@ describe("watch mode", () => {
 				expect(response.status).toBe(404);
 			});
 
-			it(`warns on mounted paths when routes are configured in the configuration file`, async () => {
+			it(`warns on mounted paths when routes are configured in the configuration file`, async ({
+				expect,
+			}) => {
 				const helper = new WranglerE2ETestHelper();
 				await helper.seed({
 					"wrangler.toml": dedent`
@@ -2006,7 +2354,7 @@ describe("watch mode", () => {
 });
 
 describe("email local dev", () => {
-	it("should save file on reply", async () => {
+	it("should save file on reply", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -2060,19 +2408,21 @@ This is a random email body.
 
 		expect(response.status).toBe(200);
 
-		expect(worker.currentOutput).includes(
-			"Email handler replied to sender with the following message:"
-		);
+		await waitFor(() => {
+			expect(worker.currentOutput).toContain(
+				"Email handler replied to sender with the following message:"
+			);
+		});
 
 		const pathRegexp = new RegExp(
 			"Email handler replied to sender with the following message:\\s*(\\S*)"
 		);
 
-		const maybeReplyPath = pathRegexp.exec(worker.currentOutput)?.[1];
-
-		if (maybeReplyPath === undefined) {
-			fail("Reply message does not contain path");
-		}
+		const maybeReplyPath = await vi.waitUntil(
+			() =>
+				pathRegexp.exec(stripVTControlCharacters(worker.currentOutput))?.[1],
+			{ interval: 100, timeout: 5000 }
+		);
 
 		expect(await readFile(maybeReplyPath, "utf-8")).toMatchInlineSnapshot(`
 			"References: <im-a-random-message-id@example.com>
@@ -2088,7 +2438,7 @@ This is a random email body.
 		`);
 	});
 
-	it("should print reject with reason", async () => {
+	it("should print reject with reason", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -2132,7 +2482,7 @@ This is a random email body.
 		expect(response.status).toBe(400);
 	});
 
-	it("should print forward email", async () => {
+	it("should print forward email", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -2171,13 +2521,15 @@ This is a random email body.
 
 		expect(response.status).toBe(200);
 
-		expect(worker.currentOutput).includes(
-			`Email handler forwarded message with`
-		);
-		expect(worker.currentOutput).includes(`rcptTo: mark.s@example.com`);
+		await waitFor(() => {
+			expect(worker.currentOutput).toContain(
+				`Email handler forwarded message with`
+			);
+			expect(worker.currentOutput).toContain(`rcptTo: mark.s@example.com`);
+		});
 	});
 
-	it("should save file on send_email", async () => {
+	it("should save file on send_email", async ({ expect }) => {
 		const helper = new WranglerE2ETestHelper();
 		await helper.seed({
 			"wrangler.toml": dedent`
@@ -2225,21 +2577,21 @@ This is a random email body.
 
 		expect(response.status).toBe(200);
 
-		await scheduler.wait(1000);
-
-		expect(worker.currentOutput).includes(
-			"send_email binding called with the following message"
+		await waitFor(() =>
+			expect(worker.currentOutput).toContain(
+				"send_email binding called with the following message"
+			)
 		);
 
 		const pathRegexp = new RegExp(
 			"send_email binding called with the following message:\\s*(\\S*)"
 		);
 
-		const maybeReplyPath = pathRegexp.exec(worker.currentOutput)?.[1];
-
-		if (maybeReplyPath === undefined || maybeReplyPath === null) {
-			fail("send_email message does not contain path");
-		}
+		const maybeReplyPath = await vi.waitUntil(
+			() =>
+				pathRegexp.exec(stripVTControlCharacters(worker.currentOutput))?.[1],
+			{ interval: 100, timeout: 5000 }
+		);
 
 		expect(await readFile(maybeReplyPath, "utf-8")).toMatchInlineSnapshot(`
 			"From: someone <someone@example.com>
@@ -2250,6 +2602,338 @@ This is a random email body.
 
 			This is a random email body.
 			"
+		`);
+	});
+});
+
+describe(".env support in local dev", () => {
+	const seedFiles = {
+		"wrangler.jsonc": JSON.stringify({
+			name: workerName,
+			main: "src/index.ts",
+			compatibility_date: "2025-07-01",
+			vars: {
+				WRANGLER_ENV_VAR_0: "default-0",
+				WRANGLER_ENV_VAR_1: "default-1",
+				WRANGLER_ENV_VAR_2: "default-2",
+				WRANGLER_ENV_VAR_3: "default-3",
+			},
+		}),
+		"src/index.ts": dedent`
+				export default {
+					fetch(request, env) {
+						return new Response(JSON.stringify(env, null, 2));
+					}
+				}
+			`,
+	};
+
+	it("should load environment variables from .env file", async ({ expect }) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev");
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_3": "default-3",
+			  "WRANGLER_ENV_VAR_1": "env-1",
+			  "WRANGLER_ENV_VAR_2": "env-2"
+			}"
+		`);
+	});
+
+	it("should not load local dev variables from .env files if there is a .dev.vars file", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+		await helper.seed({
+			".dev.vars": dedent`
+				WRANGLER_ENV_VAR_1=dev-vars-1
+				WRANGLER_ENV_VAR_2=dev-vars-2
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev");
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_3": "default-3",
+			  "WRANGLER_ENV_VAR_1": "dev-vars-1",
+			  "WRANGLER_ENV_VAR_2": "dev-vars-2"
+			}"
+		`);
+	});
+
+	it("should not load dev variables from .env files if CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV is set to false", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev", {
+			env: { ...process.env, CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false" },
+		});
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_1": "default-1",
+			  "WRANGLER_ENV_VAR_2": "default-2",
+			  "WRANGLER_ENV_VAR_3": "default-3"
+			}"
+		`);
+	});
+
+	it("should load environment variables from .env.staging if it exists and --env=staging", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env.staging": dedent`
+				WRANGLER_ENV_VAR_2=staging-2
+				WRANGLER_ENV_VAR_3=staging-3
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev --env=staging");
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_1": "default-1",
+			  "WRANGLER_ENV_VAR_2": "staging-2",
+			  "WRANGLER_ENV_VAR_3": "staging-3"
+			}"
+		`);
+	});
+
+	it("should prefer to load environment variables from .env.staging over .env, if --env=staging", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+		await helper.seed({
+			".env.staging": dedent`
+				WRANGLER_ENV_VAR_2=staging-2
+				WRANGLER_ENV_VAR_3=staging-3
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev --env=staging");
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_1": "env-1",
+			  "WRANGLER_ENV_VAR_2": "staging-2",
+			  "WRANGLER_ENV_VAR_3": "staging-3"
+			}"
+		`);
+	});
+
+	it("should load environment variables from .env file if --env=xxx and .env.xxx does not exist", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+		await helper.seed({
+			".env.staging": dedent`
+				WRANGLER_ENV_VAR_2=staging-2
+				WRANGLER_ENV_VAR_3=staging-3
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev --env=xxx");
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_3": "default-3",
+			  "WRANGLER_ENV_VAR_1": "env-1",
+			  "WRANGLER_ENV_VAR_2": "env-2"
+			}"
+		`);
+	});
+
+	it("should prefer to load environment variables from .env.local over .env", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+		await helper.seed({
+			".env.local": dedent`
+				WRANGLER_ENV_VAR_2=local-2
+				WRANGLER_ENV_VAR_3=local-3
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev");
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_1": "env-1",
+			  "WRANGLER_ENV_VAR_2": "local-2",
+			  "WRANGLER_ENV_VAR_3": "local-3"
+			}"
+		`);
+	});
+
+	it("should prefer to load environment variables from .env.staging.local over .env.staging, etc", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+		await helper.seed({
+			".env.local": dedent`
+				WRANGLER_ENV_VAR_2=local-2
+				WRANGLER_ENV_VAR_3=local-3
+			`,
+		});
+		await helper.seed({
+			".env.staging": dedent`
+				WRANGLER_ENV_VAR_3=staging-3
+				WRANGLER_ENV_VAR_4=staging-4
+			`,
+		});
+		await helper.seed({
+			".env.staging.local": dedent`
+				WRANGLER_ENV_VAR_4=staging-local-4
+				WRANGLER_ENV_VAR_5=staging-local-5
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev --env=staging");
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_1": "env-1",
+			  "WRANGLER_ENV_VAR_2": "local-2",
+			  "WRANGLER_ENV_VAR_3": "staging-3",
+			  "WRANGLER_ENV_VAR_4": "staging-local-4",
+			  "WRANGLER_ENV_VAR_5": "staging-local-5"
+			}"
+		`);
+	});
+
+	it("should load environment variables from process.env if CLOUDFLARE_INCLUDE_PROCESS_ENV is true", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+
+		const worker = helper.runLongLived("wrangler dev", {
+			env: { CLOUDFLARE_INCLUDE_PROCESS_ENV: "true", ...process.env },
+		});
+		const { url } = await worker.waitForReady();
+		// We could dump out all the bindings but that would be a lot of noise, and also may change between OSes and runs.
+		// Instead, we know that the `CLOUDFLARE_INCLUDE_PROCESS_ENV` variable should be present, so we just check for that.
+		expect(await (await fetch(url)).text()).contains(
+			'"CLOUDFLARE_INCLUDE_PROCESS_ENV": "true"'
+		);
+		expect(await (await fetch(url)).text()).contains(
+			'"WRANGLER_ENV_VAR_0": "default-0"'
+		);
+		expect(await (await fetch(url)).text()).contains(
+			'"WRANGLER_ENV_VAR_1": "env-1"'
+		);
+	});
+
+	it("should load environment variables from the .env files pointed to by `--env-file`", async ({
+		expect,
+	}) => {
+		const helper = new WranglerE2ETestHelper();
+		await helper.seed(seedFiles);
+		await helper.seed({
+			".env": dedent`
+				WRANGLER_ENV_VAR_1=env-1
+				WRANGLER_ENV_VAR_2=env-2
+			`,
+		});
+		await helper.seed({
+			".env.local": dedent`
+				WRANGLER_ENV_VAR_2=local-2
+				WRANGLER_ENV_VAR_3=local-3
+			`,
+		});
+		await helper.seed({
+			"other/.env": dedent`
+				WRANGLER_ENV_VAR_1=other-env-1
+				WRANGLER_ENV_VAR_2=other-env-2
+			`,
+		});
+		await helper.seed({
+			"other/.env.local": dedent`
+				WRANGLER_ENV_VAR_2=other-local-2
+				WRANGLER_ENV_VAR_3=other-local-3
+			`,
+		});
+
+		const worker = helper.runLongLived(
+			"wrangler dev --env-file=other/.env --env-file=other/.env.local"
+		);
+		const { url } = await worker.waitForReady();
+		expect(await (await fetch(url)).text()).toMatchInlineSnapshot(`
+			"{
+			  "WRANGLER_ENV_VAR_0": "default-0",
+			  "WRANGLER_ENV_VAR_1": "other-env-1",
+			  "WRANGLER_ENV_VAR_2": "other-local-2",
+			  "WRANGLER_ENV_VAR_3": "other-local-3"
+			}"
 		`);
 	});
 });

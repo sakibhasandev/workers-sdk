@@ -1,68 +1,27 @@
+import assert from "node:assert";
 import path from "node:path";
-import TOML from "@iarna/toml";
-import dotenv from "dotenv";
-import { FatalError, UserError } from "../errors";
+import {
+	configFileName,
+	experimental_readRawConfig,
+	FatalError,
+	isPagesConfig,
+	normalizeAndValidateConfig,
+	UserError,
+	validatePagesConfig,
+} from "@cloudflare/workers-utils";
+import dedent from "ts-dedent";
+import { version as wranglerVersion } from "../../package.json";
 import { logger } from "../logger";
 import { EXIT_CODE_INVALID_PAGES_CONFIG } from "../pages/errors";
-import { parseJSONC, parseTOML, readFileSync } from "../parse";
-import { maybeGetFile } from "../utils/filesystem";
-import { resolveWranglerConfigPath } from "./config-helpers";
-import { isPagesConfig, normalizeAndValidateConfig } from "./validation";
-import { validatePagesConfig } from "./validation-pages";
-import type { CommonYargsOptions } from "../yargs-types";
-import type { Config, OnlyCamelCase, RawConfig } from "./config";
-import type { ResolveConfigPathOptions } from "./config-helpers";
-import type { NormalizeAndValidateConfigArgs } from "./validation";
-
-export type {
+import { updateCheck } from "../update-check";
+import type {
 	Config,
-	ConfigFields,
-	DevConfig,
+	ConfigBindingOptions,
+	Diagnostics,
+	NormalizeAndValidateConfigArgs,
 	RawConfig,
-	RawDevConfig,
-} from "./config";
-export type {
-	ConfigModuleRuleType,
-	Environment,
-	RawEnvironment,
-} from "./environment";
-
-export function configFormat(
-	configPath: string | undefined
-): "jsonc" | "toml" | "none" {
-	if (configPath?.endsWith("toml")) {
-		return "toml";
-	} else if (configPath?.endsWith("json") || configPath?.endsWith("jsonc")) {
-		return "jsonc";
-	}
-	return "none";
-}
-
-export function configFileName(configPath: string | undefined) {
-	const format = configFormat(configPath);
-	if (format === "toml") {
-		return "wrangler.toml";
-	} else if (format === "jsonc") {
-		return "wrangler.json";
-	} else {
-		return "Wrangler configuration";
-	}
-}
-
-export function formatConfigSnippet(
-	snippet: RawConfig,
-	configPath: Config["configPath"],
-	formatted = true
-) {
-	const format = configFormat(configPath);
-	if (format === "toml") {
-		return TOML.stringify(snippet as TOML.JsonMap);
-	} else {
-		return formatted
-			? JSON.stringify(snippet, null, 2)
-			: JSON.stringify(snippet);
-	}
-}
+	ResolveConfigPathOptions,
+} from "@cloudflare/workers-utils";
 
 export type ReadConfigCommandArgs = NormalizeAndValidateConfigArgs & {
 	config?: string;
@@ -71,7 +30,37 @@ export type ReadConfigCommandArgs = NormalizeAndValidateConfigArgs & {
 
 export type ReadConfigOptions = ResolveConfigPathOptions & {
 	hideWarnings?: boolean;
+	// Used by the Vite plugin
+	// If set to `true`, the `main` field is not converted to an absolute path
+	preserveOriginalMain?: boolean;
 };
+
+export type { ConfigBindingOptions };
+
+/**
+ * Log config warnings. If any unexpected fields were found and a newer version
+ * of Wrangler is available, also log a contextual upgrade hint — the unexpected
+ * field may be supported in the newer version.
+ */
+async function logWarningsWithUpgradeHint(
+	diagnostics: Diagnostics,
+	hideWarnings: boolean | undefined
+): Promise<void> {
+	if (!diagnostics.hasWarnings() || hideWarnings) {
+		return;
+	}
+	logger.warn(diagnostics.renderWarnings());
+	if (diagnostics.hasUnexpectedFieldsInTree()) {
+		const result = await updateCheck();
+		if (result.status === "update-available") {
+			logger.log(
+				`There is a newer version of Wrangler available ` +
+					`(current: ${wranglerVersion}, latest: ${result.latest}). ` +
+					`Try upgrading, as it might support this configuration option.`
+			);
+		}
+	}
+}
 
 /**
  * Get the Wrangler configuration; read it from the give `configPath` if available.
@@ -80,23 +69,40 @@ export function readConfig(
 	args: ReadConfigCommandArgs,
 	options: ReadConfigOptions = {}
 ): Config {
-	const { rawConfig, configPath, userConfigPath } = experimental_readRawConfig(
-		args,
-		options
-	);
+	const {
+		rawConfig,
+		configPath,
+		userConfigPath,
+		deployConfigPath,
+		redirected,
+	} = experimental_readRawConfig(args, options);
+	if (redirected) {
+		assert(configPath, "Redirected config found without a configPath");
+		assert(
+			deployConfigPath,
+			"Redirected config found without a deployConfigPath"
+		);
+		logger.info(dedent`
+				Using redirected Wrangler configuration.
+				 - Configuration being used: "${path.relative(".", configPath)}"
+				 - Original user's configuration: "${userConfigPath ? path.relative(".", userConfigPath) : "<no user config found>"}"
+				 - Deploy configuration file: "${path.relative(".", deployConfigPath)}"
+			`);
+	}
 
 	const { config, diagnostics } = normalizeAndValidateConfig(
 		rawConfig,
 		configPath,
 		userConfigPath,
-		args
+		args,
+		options.preserveOriginalMain
 	);
 
-	if (diagnostics.hasWarnings() && !options?.hideWarnings) {
-		logger.warn(diagnostics.renderWarnings());
-	}
+	void logWarningsWithUpgradeHint(diagnostics, options?.hideWarnings);
 	if (diagnostics.hasErrors()) {
-		throw new UserError(diagnostics.renderErrors());
+		throw new UserError(diagnostics.renderErrors(), {
+			telemetryMessage: "config wrangler validation failed",
+		});
 	}
 
 	return config;
@@ -109,23 +115,42 @@ export function readPagesConfig(
 	let rawConfig: RawConfig;
 	let configPath: string | undefined;
 	let userConfigPath: string | undefined;
+	let redirected: boolean;
+	let deployConfigPath: string | undefined;
 	try {
-		({ rawConfig, configPath, userConfigPath } = experimental_readRawConfig(
-			args,
-			options
-		));
+		({ rawConfig, configPath, userConfigPath, deployConfigPath, redirected } =
+			experimental_readRawConfig(args, options));
+		if (redirected) {
+			assert(configPath, "Redirected config found without a configPath");
+			assert(
+				deployConfigPath,
+				"Redirected config found without a deployConfigPath"
+			);
+			logger.info(dedent`
+				Using redirected Wrangler configuration.
+				 - Configuration being used: "${path.relative(".", configPath)}"
+				 - Original user's configuration: "${userConfigPath ? path.relative(".", userConfigPath) : "<no user config found>"}"
+				 - Deploy configuration file: "${path.relative(".", deployConfigPath)}"
+			`);
+		}
 	} catch (e) {
 		logger.error(e);
 		throw new FatalError(
 			`Your ${configFileName(configPath)} file is not a valid Pages configuration file`,
-			EXIT_CODE_INVALID_PAGES_CONFIG
+			{
+				code: EXIT_CODE_INVALID_PAGES_CONFIG,
+				telemetryMessage: "config pages parse failed",
+			}
 		);
 	}
 
 	if (!isPagesConfig(rawConfig)) {
 		throw new FatalError(
 			`Your ${configFileName(configPath)} file is not a valid Pages configuration file`,
-			EXIT_CODE_INVALID_PAGES_CONFIG
+			{
+				code: EXIT_CODE_INVALID_PAGES_CONFIG,
+				telemetryMessage: "config pages validation failed",
+			}
 		);
 	}
 
@@ -136,16 +161,14 @@ export function readPagesConfig(
 		args
 	);
 
-	if (diagnostics.hasWarnings() && !options.hideWarnings) {
-		logger.warn(diagnostics.renderWarnings());
-	}
+	void logWarningsWithUpgradeHint(diagnostics, options.hideWarnings);
 	if (diagnostics.hasErrors()) {
-		throw new UserError(diagnostics.renderErrors());
+		throw new UserError(diagnostics.renderErrors(), {
+			telemetryMessage: "config pages validation failed",
+		});
 	}
 
-	logger.debug(
-		`Configuration file belonging to ⚡️ Pages ⚡️ project detected.`
-	);
+	logger.debug(`Configuration file belonging to ⚡️ Pages ⚡️ project detected.`);
 
 	const envNames = rawConfig.env ? Object.keys(rawConfig.env) : [];
 	const projectName = rawConfig?.name;
@@ -155,84 +178,12 @@ export function readPagesConfig(
 		logger.warn(pagesDiagnostics.renderWarnings());
 	}
 	if (pagesDiagnostics.hasErrors()) {
-		throw new UserError(pagesDiagnostics.renderErrors());
+		throw new UserError(pagesDiagnostics.renderErrors(), {
+			telemetryMessage: "config pages project validation failed",
+		});
 	}
 
 	return config as Omit<Config, "pages_build_output_dir"> & {
 		pages_build_output_dir: string;
 	};
-}
-
-export const experimental_readRawConfig = (
-	args: ReadConfigCommandArgs,
-	options: ReadConfigOptions = {}
-): {
-	rawConfig: RawConfig;
-	configPath: string | undefined;
-	userConfigPath: string | undefined;
-} => {
-	// Load the configuration from disk if available
-	const { configPath, userConfigPath } = resolveWranglerConfigPath(
-		args,
-		options
-	);
-	let rawConfig: RawConfig = {};
-	if (configPath?.endsWith("toml")) {
-		rawConfig = parseTOML(readFileSync(configPath), configPath);
-	} else if (configPath?.endsWith("json") || configPath?.endsWith("jsonc")) {
-		rawConfig = parseJSONC(readFileSync(configPath), configPath) as RawConfig;
-	}
-	return { rawConfig, configPath, userConfigPath };
-};
-
-export function withConfig<T>(
-	handler: (
-		args: OnlyCamelCase<T & CommonYargsOptions> & { config: Config }
-	) => Promise<void>,
-	options?: Parameters<typeof readConfig>[1]
-) {
-	return (args: OnlyCamelCase<T & CommonYargsOptions>) => {
-		return handler({ ...args, config: readConfig(args, options) });
-	};
-}
-
-export interface DotEnv {
-	path: string;
-	parsed: dotenv.DotenvParseOutput;
-}
-
-function tryLoadDotEnv(basePath: string): DotEnv | undefined {
-	try {
-		const contents = maybeGetFile(basePath);
-		if (contents === undefined) {
-			logger.debug(
-				`.env file not found at "${path.relative(".", basePath)}". Continuing... For more details, refer to https://developers.cloudflare.com/workers/wrangler/system-environment-variables/`
-			);
-			return;
-		}
-
-		const parsed = dotenv.parse(contents);
-		return { path: basePath, parsed };
-	} catch (e) {
-		logger.debug(
-			`Failed to load .env file "${path.relative(".", basePath)}":`,
-			e
-		);
-	}
-}
-
-/**
- * Loads a dotenv file from `envPath`, preferring to read `${envPath}.${env}` if
- * `env` is defined and that file exists.
- *
- * Note: The `getDotDevDotVarsContent` function in the `packages/vite-plugin-cloudflare/src/index.ts` file
- *       follows the same logic implemented here, the two need to be kept in sync, so if you modify some logic
- *       here make sure that, if applicable, the same change is reflected there
- */
-export function loadDotEnv(envPath: string, env?: string): DotEnv | undefined {
-	if (env === undefined) {
-		return tryLoadDotEnv(envPath);
-	} else {
-		return tryLoadDotEnv(`${envPath}.${env}`) ?? tryLoadDotEnv(envPath);
-	}
 }

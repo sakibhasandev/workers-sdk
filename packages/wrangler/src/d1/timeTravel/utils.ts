@@ -1,7 +1,8 @@
+import { UserError } from "@cloudflare/workers-utils";
 import { fetchResult } from "../../cfetch";
-import { UserError } from "../../errors";
 import { getDatabaseInfoFromIdOrName } from "../utils";
 import type { BookmarkResponse } from "./types";
+import type { ComplianceConfig } from "@cloudflare/workers-utils";
 
 /**
  * a function to grab the nearest bookmark for a given timestamp. If no timestamp is provided, it will return the current bookmark
@@ -11,6 +12,7 @@ import type { BookmarkResponse } from "./types";
  * @returns Promise<BookmarkResponse>
  */
 export const getBookmarkIdFromTimestamp = async (
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	databaseId: string,
 	timestamp?: string
@@ -22,6 +24,7 @@ export const getBookmarkIdFromTimestamp = async (
 	}
 
 	const bookmarkResult = await fetchResult<BookmarkResponse>(
+		complianceConfig,
 		`/accounts/${accountId}/d1/database/${databaseId}/time_travel/bookmark?${searchParams.toString()}`,
 		{
 			headers: {
@@ -33,13 +36,19 @@ export const getBookmarkIdFromTimestamp = async (
 };
 
 export const throwIfDatabaseIsAlpha = async (
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	databaseId: string
 ): Promise<void> => {
-	const dbInfo = await getDatabaseInfoFromIdOrName(accountId, databaseId);
+	const dbInfo = await getDatabaseInfoFromIdOrName(
+		complianceConfig,
+		accountId,
+		databaseId
+	);
 	if (dbInfo.version === "alpha") {
 		throw new UserError(
-			"Time travel is not available for alpha D1 databases. You will need to migrate to a new database for access to this feature."
+			"Time travel is not available for alpha D1 databases. You will need to migrate to a new database for access to this feature.",
+			{ telemetryMessage: "d1 time travel alpha database unsupported" }
 		);
 	}
 };
@@ -81,7 +90,8 @@ export const convertTimestampToISO = (timestamp: string): string => {
 		throw new UserError(
 			`Invalid timestamp '${timestamp}'. Please provide a valid Unix timestamp or ISO string, for example: ${getLocalISOString(
 				new Date()
-			)}\nFor accepted format, see: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date#date_time_string_format`
+			)}\nFor accepted format, see: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date#date_time_string_format`,
+			{ telemetryMessage: "d1 time travel invalid timestamp format" }
 		);
 	}
 
@@ -91,12 +101,14 @@ export const convertTimestampToISO = (timestamp: string): string => {
 	thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 	if (parsedTimestamp > now) {
 		throw new UserError(
-			`Invalid timestamp '${timestamp}'. Please provide a timestamp in the past`
+			`Invalid timestamp '${timestamp}'. Please provide a timestamp in the past`,
+			{ telemetryMessage: "d1 time travel timestamp in future" }
 		);
 	}
 	if (parsedTimestamp < thirtyDaysAgo) {
 		throw new UserError(
-			`Invalid timestamp '${timestamp}'. Please provide a timestamp within the last 30 days`
+			`Invalid timestamp '${timestamp}'. Please provide a timestamp within the last 30 days`,
+			{ telemetryMessage: "d1 time travel timestamp too old" }
 		);
 	}
 

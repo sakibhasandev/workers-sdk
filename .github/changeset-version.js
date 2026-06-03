@@ -25,8 +25,15 @@ function parseVersion(version) {
 const rootPath = path.resolve(__dirname, "..");
 const miniflarePath = path.join(rootPath, "packages/miniflare");
 const miniflarePkgPath = path.join(miniflarePath, "package.json");
-const miniflareChangelogPath = path.join(miniflarePath, "CHANGELOG.md");
 
+function getWorkerdVersion() {
+	const pnpmWorkspacePath = path.join(rootPath, "pnpm-workspace.yaml");
+	const match = /workerd: "(\d+\.\d+\.\d+)"/.exec(
+		fs.readFileSync(pnpmWorkspacePath, "utf8")
+	);
+	assert(match !== null, `Expected ${match[1]} to be <major>.<minor>.<patch>`);
+	return match[1];
+}
 /**
  * Gets the correct version to bump `miniflare` to, ensuring the minor versions
  * of `workerd` and `miniflare` match. Minor bumps in changesets will become
@@ -64,12 +71,14 @@ function main() {
 
 	// 2. Run standard `changeset version` command to apply changesets, bump
 	//    versions, and update changelogs
+	console.log("Applying changesets and updating versions...");
 	execSync("pnpm exec changeset version", { stdio: "inherit" });
 
 	// 3. Force `miniflare`'s minor version to be the same as `workerd`
+	console.log("Getting miniflare and workerd versions...");
 	const miniflarePkg = getPkg(miniflarePkgPath);
 	const miniflareVersion = miniflarePkg.version;
-	const workerdVersion = miniflarePkg.dependencies.workerd;
+	const workerdVersion = getWorkerdVersion();
 	const nextMiniflareVersion = getNextMiniflareVersion(
 		workerdVersion,
 		previousMiniflareVersion,
@@ -79,17 +88,20 @@ function main() {
 		// If `changeset version` didn't produce the correct version on its own...
 
 		// ...update `miniflare`'s `package.json` version
+		console.log(`Updating miniflare version to ${nextMiniflareVersion}...`);
 		miniflarePkg.version = nextMiniflareVersion;
 		setPkg(miniflarePkgPath, miniflarePkg);
 
 		const changedPathsBuffer = execSync("git ls-files --modified", {
 			cwd: rootPath,
 		});
+		console.log("Checking modified files...");
 		const changedPaths = changedPathsBuffer.toString().trim().split("\n");
 		for (const relativeChangedPath of changedPaths) {
 			const changedPath = path.resolve(rootPath, relativeChangedPath);
 			const name = path.basename(changedPath);
 			if (name === "package.json") {
+				console.log("Updating dependencies in", changedPath);
 				// ...update `miniflare` version in dependencies of other packages
 				const pkg = getPkg(changedPath);
 				let changed = false;
@@ -108,6 +120,7 @@ function main() {
 				}
 				if (changed) setPkg(changedPath, pkg);
 			} else if (name === "CHANGELOG.md") {
+				console.log("Updating changelog in", changedPath);
 				// ...update `CHANGELOG.md`s with correct version
 				let changelog = fs.readFileSync(changedPath, "utf8");
 				// Replace version header in `miniflare` `CHANGELOG.md`
@@ -126,7 +139,9 @@ function main() {
 	}
 
 	// 4. Update the lockfile
+	console.log("Updating lockfile...");
 	execSync("pnpm install --lockfile-only", { stdio: "inherit" });
+	console.log("Done.");
 }
 
 if (require.main === module) main();

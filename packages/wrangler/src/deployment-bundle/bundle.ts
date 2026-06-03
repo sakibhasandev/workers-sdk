@@ -1,19 +1,20 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import chalk from "chalk";
-import * as esbuild from "esbuild";
 import {
 	getBuildConditionsFromEnv,
 	getBuildPlatformFromEnv,
-	getUnenvResolvePathsFromEnv,
-} from "../environment-variables/misc-variables";
-import { UserError } from "../errors";
+	getWranglerTmpDir,
+	UserError,
+} from "@cloudflare/workers-utils";
+import chalk from "chalk";
+import * as esbuild from "esbuild";
 import { getFlag } from "../experimental-flags";
-import { getBasePath, getWranglerTmpDir } from "../paths";
+import { getBasePath } from "../paths";
 import { applyMiddlewareLoaderFacade } from "./apply-middleware";
 import {
 	isBuildFailure,
 	rewriteNodeCompatBuildFailure,
+	rewriteUnresolvedModuleBuildFailure,
 } from "./build-failures";
 import { dedupeModulesByName } from "./dedupe-modules";
 import { getEntryPointFromMetafile } from "./entry-point-from-metafile";
@@ -22,15 +23,16 @@ import { configProviderPlugin } from "./esbuild-plugins/config-provider";
 import { getNodeJSCompatPlugins } from "./esbuild-plugins/nodejs-plugins";
 import { writeAdditionalModules } from "./find-additional-modules";
 import { noopModuleCollector } from "./module-collection";
-import type { Config } from "../config";
-import type {
-	DurableObjectBindings,
-	WorkflowBinding,
-} from "../config/environment";
 import type { MiddlewareLoader } from "./apply-middleware";
-import type { Entry } from "./entry";
 import type { ModuleCollector } from "./module-collection";
-import type { CfModule, CfModuleType } from "./worker";
+import type {
+	CfModule,
+	CfModuleType,
+	Config,
+	DurableObjectBindings,
+	Entry,
+	WorkflowBinding,
+} from "@cloudflare/workers-utils";
 import type { NodeJSCompatMode } from "miniflare";
 
 // Taken from https://stackoverflow.com/a/3561711
@@ -43,8 +45,10 @@ const escapeRegex = (str: string) => {
 };
 
 export const COMMON_ESBUILD_OPTIONS = {
-	// Our workerd runtime uses the same V8 version as recent Chrome, which is highly ES2022 compliant: https://kangax.github.io/compat-table/es2016plus/
-	target: "es2022",
+	// v8 supports es2024 features as of 11.9
+	// workerd uses [v8 version 14.2 as of 2025-10-17](https://developers.cloudflare.com/workers/platform/changelog/#2025-10-17)
+	target: "es2024",
+	supported: { "import-source": true },
 	loader: { ".js": "jsx", ".mjs": "jsx", ".cjs": "jsx" },
 } as const;
 
@@ -80,7 +84,8 @@ function getBuildPlatform(): esbuild.Platform {
 	) {
 		throw new UserError(
 			"Invalid esbuild platform configuration defined in the WRANGLER_BUILD_PLATFORM environment variable.\n" +
-				"Valid platform values are: 'browser', 'node' and 'neutral'."
+				"Valid platform values are: 'browser', 'node' and 'neutral'.",
+			{ telemetryMessage: "invalid esbuild platform configuration" }
 		);
 	}
 	return platform as esbuild.Platform;
@@ -120,11 +125,13 @@ export type BundleOptions = {
 	watch: boolean | undefined;
 	tsconfig: string | undefined;
 	minify: boolean | undefined;
+	keepNames: boolean;
 	nodejsCompatMode: NodeJSCompatMode | undefined;
+	compatibilityDate: string | undefined;
+	compatibilityFlags: string[] | undefined;
 	define: Config["define"];
 	alias: Config["alias"];
 	checkFetch: boolean;
-	mockAnalyticsEngineDatasets: Config["analytics_engine_datasets"];
 	targetConsumer: "dev" | "deploy";
 	testScheduled: boolean | undefined;
 	inject: string[] | undefined;
@@ -135,6 +142,7 @@ export type BundleOptions = {
 	projectRoot: string | undefined;
 	defineNavigatorUserAgent: boolean;
 	external: string[] | undefined;
+	metafile: string | boolean | undefined;
 };
 
 /**
@@ -155,11 +163,13 @@ export async function bundleWorker(
 		watch,
 		tsconfig,
 		minify,
+		keepNames,
 		nodejsCompatMode,
+		compatibilityDate,
+		compatibilityFlags,
 		alias,
 		define,
 		checkFetch,
-		mockAnalyticsEngineDatasets,
 		targetConsumer,
 		testScheduled,
 		inject: injectOption,
@@ -170,6 +180,7 @@ export async function bundleWorker(
 		projectRoot,
 		defineNavigatorUserAgent,
 		external,
+		metafile,
 	}: BundleOptions
 ): Promise<BundleResult> {
 	// We create a temporary directory for any one-off files we
@@ -181,21 +192,6 @@ export async function bundleWorker(
 
 	// At this point, we take the opportunity to "wrap" the worker with middleware.
 	const middlewareToLoad: MiddlewareLoader[] = [];
-
-	if (
-		targetConsumer === "dev" &&
-		mockAnalyticsEngineDatasets &&
-		mockAnalyticsEngineDatasets.length > 0
-	) {
-		middlewareToLoad.push({
-			name: "mock-analytics-engine",
-			path: "templates/middleware/middleware-mock-analytics-engine.ts",
-			config: {
-				bindings: mockAnalyticsEngineDatasets.map(({ binding }) => binding),
-			},
-			supports: ["modules", "service-worker"],
-		});
-	}
 
 	if (
 		targetConsumer === "dev" &&
@@ -217,7 +213,7 @@ export async function bundleWorker(
 	}
 
 	if (targetConsumer === "dev" && local) {
-		// In Miniflare 3, we bind the user's worker as a service binding in a
+		// In Miniflare, we bind the user's worker as a service binding in a
 		// special entry worker that handles things like injecting `Request.cf`,
 		// live-reload, and the pretty-error page.
 		//
@@ -290,7 +286,8 @@ export async function bundleWorker(
 	for (const middleware of middlewareToLoad) {
 		if (!middleware.supports.includes(entry.format)) {
 			throw new UserError(
-				`Your Worker is written using the "${entry.format}" format, which isn't supported by the "${middleware.name}" middleware. To use "${middleware.name}" middleware, convert your Worker to the "${middleware.supports[0]}" format`
+				`Your Worker is written using the "${entry.format}" format, which isn't supported by the "${middleware.name}" middleware. To use "${middleware.name}" middleware, convert your Worker to the "${middleware.supports[0]}" format`,
+				{ telemetryMessage: "middleware unsupported worker format" }
 			);
 		}
 	}
@@ -362,29 +359,37 @@ export async function bundleWorker(
 		},
 	};
 
-	const unenvResolvePaths = getUnenvResolvePathsFromEnv()?.split(",");
+	const nodeEnvReplacement = JSON.stringify(
+		// use process.env["NODE_ENV" + ""] so that esbuild doesn't replace it
+		// when we do a build of wrangler. (re: https://github.com/cloudflare/workers-sdk/issues/1477)
+		process.env["NODE_ENV" + ""] ||
+			(targetConsumer === "deploy" ? "production" : "development")
+	);
 
 	const buildOptions = {
 		// Don't use entryFile here as the file may have been changed when applying the middleware
 		entryPoints: [entry.file],
 		bundle,
 		absWorkingDir: entry.projectRoot,
-		outdir: destination,
-		keepNames: true,
-		entryNames: entryName || path.parse(entryFile).name,
+		keepNames,
 		...(isOutfile
 			? {
 					outdir: undefined,
 					outfile: destination,
 					entryNames: undefined,
 				}
-			: {}),
+			: {
+					outdir: destination,
+					outfile: undefined,
+					entryNames: entryName || path.parse(entryFile).name,
+				}),
 		inject,
 		external: bundle
 			? ["__STATIC_CONTENT_MANIFEST", ...(external ? external : [])]
 			: undefined,
 		format: entry.format === "modules" ? "esm" : "iife",
 		target: COMMON_ESBUILD_OPTIONS.target,
+		supported: COMMON_ESBUILD_OPTIONS.supported,
 		sourcemap: sourcemap ?? true,
 		// Include a reference to the output folder in the sourcemap.
 		// This is omitted by default, but we need it to properly resolve source paths in error output.
@@ -393,25 +398,24 @@ export async function bundleWorker(
 		metafile: true,
 		conditions: getBuildConditions(),
 		platform: getBuildPlatform(),
-		...(process.env.NODE_ENV && {
-			define: {
-				...(defineNavigatorUserAgent
-					? { "navigator.userAgent": `"Cloudflare-Workers"` }
-					: {}),
-				// use process.env["NODE_ENV" + ""] so that esbuild doesn't replace it
-				// when we do a build of wrangler. (re: https://github.com/cloudflare/workers-sdk/issues/1477)
-				"process.env.NODE_ENV": `"${process.env["NODE_ENV" + ""]}"`,
-				...define,
-			},
-		}),
+		define: {
+			...(defineNavigatorUserAgent
+				? { "navigator.userAgent": `"Cloudflare-Workers"` }
+				: {}),
+			"process.env.NODE_ENV": nodeEnvReplacement,
+			"global.process.env.NODE_ENV": nodeEnvReplacement,
+			"globalThis.process.env.NODE_ENV": nodeEnvReplacement,
+			...define,
+		},
 		loader: COMMON_ESBUILD_OPTIONS.loader,
 		plugins: [
 			aliasPlugin,
 			moduleCollector.plugin,
-			...(await getNodeJSCompatPlugins({
+			...getNodeJSCompatPlugins({
 				mode: nodejsCompatMode ?? null,
-				unenvResolvePaths,
-			})),
+				compatibilityDate,
+				compatibilityFlags,
+			}),
 			cloudflareInternalPlugin,
 			buildResultPlugin,
 			...(plugins || []),
@@ -434,9 +438,15 @@ export async function bundleWorker(
 
 	let result: esbuild.BuildResult<typeof buildOptions>;
 	let stop: BundleResult["stop"];
+	// Hoisted so the `catch` below can dispose any esbuild context that was
+	// created before the initial build failed. Without this, a failing initial
+	// build (e.g. unresolvable entrypoint) leaves the esbuild child process
+	// running for the lifetime of the Node process, keeping the event loop
+	// alive and preventing clean exit.
+	let ctx: esbuild.BuildContext<typeof buildOptions> | undefined;
 	try {
 		if (watch) {
-			const ctx = await esbuild.context(buildOptions);
+			ctx = await esbuild.context(buildOptions);
 			await ctx.watch();
 			result = await initialBuildResultPromise;
 			if (result.errors.length > 0) {
@@ -447,12 +457,30 @@ export async function bundleWorker(
 				);
 			}
 
+			const ctxForStop = ctx;
 			stop = async function () {
 				tmpDir.remove();
-				await ctx.dispose();
+				await ctxForStop.dispose();
 			};
 		} else {
 			result = await esbuild.build(buildOptions);
+
+			// Write the bundle metafile to disk.
+			if (metafile && result.metafile) {
+				let metaFilePath: string;
+
+				if (typeof metafile === "string") {
+					metaFilePath = path.resolve(metafile);
+				} else if (isOutfile) {
+					metaFilePath = `${destination}.bundle-meta.json`;
+				} else {
+					metaFilePath = path.join(destination, "bundle-meta.json");
+				}
+
+				const metaJson = JSON.stringify(result.metafile, null, 2);
+				fs.writeFileSync(metaFilePath, metaJson);
+			}
+
 			// Even when we're not watching, we still want some way of cleaning up the
 			// temporary directory when we don't need it anymore
 			stop = async function () {
@@ -460,8 +488,18 @@ export async function bundleWorker(
 			};
 		}
 	} catch (e) {
+		if (ctx !== undefined) {
+			// Best-effort cleanup of the esbuild context; swallow errors because
+			// we are re-throwing the original build failure anyway.
+			try {
+				await ctx.dispose();
+			} catch {
+				// intentionally empty
+			}
+		}
 		if (isBuildFailure(e)) {
 			rewriteNodeCompatBuildFailure(e.errors, nodejsCompatMode);
+			rewriteUnresolvedModuleBuildFailure(e.errors);
 		}
 		throw e;
 	}
@@ -475,7 +513,8 @@ export async function bundleWorker(
 		throw new UserError(
 			`Your Worker depends on the following Durable Objects, which are not exported in your entrypoint file: ${notExportedDOs.join(
 				", "
-			)}.\nYou should export these objects from your entrypoint, ${relativePath}.`
+			)}.\nYou should export these objects from your entrypoint, ${relativePath}.`,
+			{ telemetryMessage: "durable object classes not exported" }
 		);
 	}
 
@@ -487,7 +526,8 @@ export async function bundleWorker(
 		throw new UserError(
 			`Your Worker depends on the following Workflows, which are not exported in your entrypoint file: ${notExportedWorkflows.join(
 				", "
-			)}.\nYou should export these objects from your entrypoint, ${relativePath}.`
+			)}.\nYou should export these objects from your entrypoint, ${relativePath}.`,
+			{ telemetryMessage: "workflow classes not exported" }
 		);
 	}
 

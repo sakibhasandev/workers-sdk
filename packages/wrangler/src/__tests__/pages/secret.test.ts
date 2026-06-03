@@ -1,30 +1,31 @@
 import { writeFileSync } from "node:fs";
 import readline from "node:readline";
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
-import { vi } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import { saveToConfigCache } from "../../config-cache";
+import { PAGES_CONFIG_CACHE_FILENAME } from "../../pages/constants";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { clearDialogs, mockConfirm, mockPrompt } from "../helpers/mock-dialogs";
 import { useMockIsTTY } from "../helpers/mock-istty";
-import { mockGetMembershipsFail } from "../helpers/mock-oauth-flow";
 import { useMockStdin } from "../helpers/mock-stdin";
-import { createFetchResult, msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
+import {
+	createFetchResult,
+	mswFailMembershipHandler,
+	mswFailAccountsHandler,
+	getMswSuccessMembershipHandlers,
+	msw,
+} from "../helpers/msw";
 import { runWrangler } from "../helpers/run-wrangler";
 import type { PagesProject } from "../../pages/download-config";
+import type { PagesConfigCache } from "../../pages/types";
 import type { Interface } from "node:readline";
+import type { ExpectStatic } from "vitest";
 
-export function mockGetMemberships(
-	accounts: { id: string; account: { id: string; name: string } }[]
-) {
-	msw.use(
-		http.get(
-			"*/memberships",
-			() => {
-				return HttpResponse.json(createFetchResult(accounts));
-			},
-			{ once: true }
-		)
+function mockReadlineInput(input: string) {
+	vi.spyOn(readline, "createInterface").mockImplementation(
+		() => input.split(/\r?\n/) as unknown as Interface
 	);
 }
 
@@ -40,6 +41,7 @@ describe("wrangler pages secret", () => {
 
 	describe("put", () => {
 		function mockProjectRequests(
+			expect: ExpectStatic,
 			input: { name: string; text: string },
 			env: "production" | "preview" = "production"
 		) {
@@ -84,7 +86,7 @@ describe("wrangler pages secret", () => {
 				setIsTTY(true);
 			});
 
-			it("should trim stdin secret value", async () => {
+			it("should trim stdin secret value", async ({ expect }) => {
 				mockPrompt({
 					text: "Enter a secret value:",
 					options: { isSecret: true },
@@ -92,56 +94,70 @@ describe("wrangler pages secret", () => {
 				  `,
 				});
 
-				mockProjectRequests({ name: `secret-name`, text: `hunter2` });
+				mockProjectRequests(expect, { name: `secret-name`, text: `hunter2` });
 				await runWrangler(
 					"pages secret put secret-name --project some-project-name"
 				);
 				expect(std.out).toMatchInlineSnapshot(`
-			"🌀 Creating the secret for the Pages project \\"some-project-name\\" (production)
-			✨ Success! Uploaded secret secret-name"
-		`);
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					🌀 Creating the secret for the Pages project "some-project-name" (production)
+					✨ Success! Uploaded secret secret-name"
+				`);
 			});
 
-			it("should create a secret", async () => {
+			it("should create a secret", async ({ expect }) => {
 				mockPrompt({
 					text: "Enter a secret value:",
 					options: { isSecret: true },
 					result: "the-secret",
 				});
 
-				mockProjectRequests({ name: "the-key", text: "the-secret" });
+				mockProjectRequests(expect, { name: "the-key", text: "the-secret" });
 				await runWrangler(
 					"pages secret put the-key --project some-project-name"
 				);
 
 				expect(std.out).toMatchInlineSnapshot(`
-			"🌀 Creating the secret for the Pages project \\"some-project-name\\" (production)
-			✨ Success! Uploaded secret the-key"
-		`);
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					🌀 Creating the secret for the Pages project "some-project-name" (production)
+					✨ Success! Uploaded secret the-key"
+				`);
 				expect(std.err).toMatchInlineSnapshot(`""`);
 			});
 
-			it("should create a secret: preview", async () => {
+			it("should create a secret: preview", async ({ expect }) => {
 				mockPrompt({
 					text: "Enter a secret value:",
 					options: { isSecret: true },
 					result: "the-secret",
 				});
 
-				mockProjectRequests({ name: "the-key", text: "the-secret" }, "preview");
+				mockProjectRequests(
+					expect,
+					{ name: "the-key", text: "the-secret" },
+					"preview"
+				);
 				await runWrangler(
 					"pages secret put the-key --project some-project-name --env preview"
 				);
 
 				expect(std.out).toMatchInlineSnapshot(`
-			"🌀 Creating the secret for the Pages project \\"some-project-name\\" (preview)
-			✨ Success! Uploaded secret the-key"
-		`);
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					🌀 Creating the secret for the Pages project "some-project-name" (preview)
+					✨ Success! Uploaded secret the-key"
+				`);
 				expect(std.err).toMatchInlineSnapshot(`""`);
 			});
 
-			it("should error with invalid env", async () => {
+			it("should error with invalid env", async ({ expect }) => {
 				mockProjectRequests(
+					expect,
 					{ name: "the-key", text: "the-secret" },
 					// @ts-expect-error This is intentionally invalid
 					"some-env"
@@ -151,15 +167,15 @@ describe("wrangler pages secret", () => {
 						"pages secret put the-key --project some-project-name --env some-env"
 					)
 				).rejects.toMatchInlineSnapshot(
-					`[Error: Pages does not support the "some-env" named environment. Please specify "production" (default) or "preview"]`
+					`[Error: Pages does not support the "some-env" environment. Only "production" and "preview" are valid. Use --env production or --env preview.]`
 				);
 			});
 
-			it("should error without a project name", async () => {
+			it("should error without a project name", async ({ expect }) => {
 				await expect(
 					runWrangler("pages secret put the-key")
 				).rejects.toMatchInlineSnapshot(
-					`[Error: Must specify a project name.]`
+					`[Error: Missing Pages project name. Use --project-name <name> to specify which project to manage secrets for.]`
 				);
 			});
 		});
@@ -170,8 +186,10 @@ describe("wrangler pages secret", () => {
 			});
 			const mockStdIn = useMockStdin({ isTTY: false });
 
-			it("should trim stdin secret value, from piped input", async () => {
-				mockProjectRequests({ name: "the-key", text: "the-secret" });
+			it("should trim stdin secret value, from piped input", async ({
+				expect,
+			}) => {
+				mockProjectRequests(expect, { name: "the-key", text: "the-secret" });
 				// Pipe the secret in as three chunks to test that we reconstitute it correctly.
 				mockStdIn.send(
 					`the`,
@@ -184,15 +202,18 @@ describe("wrangler pages secret", () => {
 				);
 
 				expect(std.out).toMatchInlineSnapshot(`
-			"🌀 Creating the secret for the Pages project \\"some-project-name\\" (production)
-			✨ Success! Uploaded secret the-key"
-		`);
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					🌀 Creating the secret for the Pages project "some-project-name" (production)
+					✨ Success! Uploaded secret the-key"
+				`);
 				expect(std.warn).toMatchInlineSnapshot(`""`);
 				expect(std.err).toMatchInlineSnapshot(`""`);
 			});
 
-			it("should create a secret, from piped input", async () => {
-				mockProjectRequests({ name: "the-key", text: "the-secret" });
+			it("should create a secret, from piped input", async ({ expect }) => {
+				mockProjectRequests(expect, { name: "the-key", text: "the-secret" });
 				// Pipe the secret in as three chunks to test that we reconstitute it correctly.
 				mockStdIn.send("the", "-", "secret");
 				await runWrangler(
@@ -200,15 +221,18 @@ describe("wrangler pages secret", () => {
 				);
 
 				expect(std.out).toMatchInlineSnapshot(`
-			"🌀 Creating the secret for the Pages project \\"some-project-name\\" (production)
-			✨ Success! Uploaded secret the-key"
-		`);
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					🌀 Creating the secret for the Pages project "some-project-name" (production)
+					✨ Success! Uploaded secret the-key"
+				`);
 				expect(std.warn).toMatchInlineSnapshot(`""`);
 				expect(std.err).toMatchInlineSnapshot(`""`);
 			});
 
-			it("should error if the piped input fails", async () => {
-				mockProjectRequests({ name: "the-key", text: "the-secret" });
+			it("should error if the piped input fails", async ({ expect }) => {
+				mockProjectRequests(expect, { name: "the-key", text: "the-secret" });
 				mockStdIn.throwError(new Error("Error in stdin stream"));
 				await expect(
 					runWrangler("pages secret put the-key --project some-project-name")
@@ -217,17 +241,36 @@ describe("wrangler pages secret", () => {
 				);
 
 				expect(std.out).toMatchInlineSnapshot(`
-			          "
-			          [32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
-		        `);
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+
+					[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
+				`);
 				expect(std.warn).toMatchInlineSnapshot(`""`);
 			});
 
 			describe("with accountId", () => {
 				mockAccountId({ accountId: null });
 
-				it("should error if request for memberships fails", async () => {
-					mockGetMembershipsFail();
+				it("should error if request for available accounts fails", async ({
+					expect,
+				}) => {
+					msw.use(mswFailAccountsHandler, ...getMswSuccessMembershipHandlers());
+					await expect(
+						runWrangler("pages secret put the-key --project some-project-name")
+					).rejects.toThrowErrorMatchingInlineSnapshot(
+						`[APIError: A request to the Cloudflare API (/accounts) failed.]`
+					);
+				});
+
+				it("should error if request for available memberships fails", async ({
+					expect,
+				}) => {
+					msw.use(
+						mswFailMembershipHandler,
+						...getMswSuccessMembershipHandlers()
+					);
 					await expect(
 						runWrangler("pages secret put the-key --project some-project-name")
 					).rejects.toThrowErrorMatchingInlineSnapshot(
@@ -235,31 +278,27 @@ describe("wrangler pages secret", () => {
 					);
 				});
 
-				it("should error if a user has no account", async () => {
-					mockGetMemberships([]);
+				it("should error if a user has no account", async ({ expect }) => {
+					msw.use(...getMswSuccessMembershipHandlers([]));
 					await expect(
 						runWrangler("pages secret put the-key --project some-project-name")
 					).rejects.toThrowErrorMatchingInlineSnapshot(`
 						[Error: Failed to automatically retrieve account IDs for the logged in user.
-						In a non-interactive environment, it is mandatory to specify an account ID, either by assigning its value to CLOUDFLARE_ACCOUNT_ID, or as \`account_id\` in your Wrangler configuration file.]
+						In a non-interactive environment, it is mandatory to specify an account ID, either by assigning its value to CLOUDFLARE_ACCOUNT_ID, or as \`account_id\` in your Wrangler configuration file.
+						Alternatively, try running \`wrangler login\` to re-authenticate.]
 					`);
 				});
 
-				it("should error if a user has multiple accounts, and has not specified an account", async () => {
-					mockGetMemberships([
-						{
-							id: "1",
-							account: { id: "account-id-1", name: "account-name-1" },
-						},
-						{
-							id: "2",
-							account: { id: "account-id-2", name: "account-name-2" },
-						},
-						{
-							id: "3",
-							account: { id: "account-id-3", name: "account-name-3" },
-						},
-					]);
+				it("should error if a user has multiple accounts, and has not specified an account", async ({
+					expect,
+				}) => {
+					msw.use(
+						...getMswSuccessMembershipHandlers([
+							{ id: "account-id-1", name: "account-name-1" },
+							{ id: "account-id-2", name: "account-name-2" },
+							{ id: "account-id-3", name: "account-name-3" },
+						])
+					);
 
 					await expect(
 						runWrangler("pages secret put the-key --project some-project-name")
@@ -281,6 +320,7 @@ describe("wrangler pages secret", () => {
 			setIsTTY(true);
 		});
 		function mockDeleteRequest(
+			expect: ExpectStatic,
 			name: string,
 			env: "production" | "preview" = "production"
 		) {
@@ -321,8 +361,8 @@ describe("wrangler pages secret", () => {
 			);
 		}
 
-		it("should delete a secret", async () => {
-			mockDeleteRequest("the-key");
+		it("should delete a secret", async ({ expect }) => {
+			mockDeleteRequest(expect, "the-key");
 			mockConfirm({
 				text: "Are you sure you want to permanently delete the secret the-key on the Pages project some-project-name (production)?",
 				result: true,
@@ -331,14 +371,17 @@ describe("wrangler pages secret", () => {
 				"pages secret delete the-key --project some-project-name"
 			);
 			expect(std.out).toMatchInlineSnapshot(`
-			"🌀 Deleting the secret the-key on the Pages project some-project-name (production)
-			✨ Success! Deleted secret the-key"
-		`);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Deleting the secret the-key on the Pages project some-project-name (production)
+				✨ Success! Deleted secret the-key"
+			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should delete a secret: preview", async () => {
-			mockDeleteRequest("the-key", "preview");
+		it("should delete a secret: preview", async ({ expect }) => {
+			mockDeleteRequest(expect, "the-key", "preview");
 			mockConfirm({
 				text: "Are you sure you want to permanently delete the secret the-key on the Pages project some-project-name (preview)?",
 				result: true,
@@ -347,26 +390,31 @@ describe("wrangler pages secret", () => {
 				"pages secret delete the-key --project some-project-name --env preview"
 			);
 			expect(std.out).toMatchInlineSnapshot(`
-			"🌀 Deleting the secret the-key on the Pages project some-project-name (preview)
-			✨ Success! Deleted secret the-key"
-		`);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Deleting the secret the-key on the Pages project some-project-name (preview)
+				✨ Success! Deleted secret the-key"
+			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should fail to delete with invalid env", async () => {
+		it("should fail to delete with invalid env", async ({ expect }) => {
 			await expect(
 				runWrangler(
 					"pages secret delete the-key --project some-project-name --env some-env"
 				)
 			).rejects.toMatchInlineSnapshot(
-				`[Error: Pages does not support the "some-env" named environment. Please specify "production" (default) or "preview"]`
+				`[Error: Pages does not support the "some-env" environment. Only "production" and "preview" are valid. Use --env production or --env preview.]`
 			);
 		});
 
-		it("should error without a project name", async () => {
+		it("should error without a project name", async ({ expect }) => {
 			await expect(
 				runWrangler("pages secret delete the-key")
-			).rejects.toMatchInlineSnapshot(`[Error: Must specify a project name.]`);
+			).rejects.toMatchInlineSnapshot(
+				`[Error: Missing Pages project name. Use --project-name <name> to specify which project to manage secrets for.]`
+			);
 		});
 	});
 
@@ -412,49 +460,58 @@ describe("wrangler pages secret", () => {
 			);
 		}
 
-		it("should list secrets", async () => {
+		it("should list secrets", async ({ expect }) => {
 			mockListRequest();
 			await runWrangler("pages secret list --project some-project-name");
 			expect(std.out).toMatchInlineSnapshot(`
-			"The \\"production\\" environment of your Pages project \\"some-project-name\\" has access to the following secrets:
-			  - the-secret-name: Value Encrypted
-			  - the-secret-name-2: Value Encrypted"
-		`);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				The "production" environment of your Pages project "some-project-name" has access to the following secrets:
+				  - the-secret-name: Value Encrypted
+				  - the-secret-name-2: Value Encrypted"
+			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should list secrets: preview", async () => {
+		it("should list secrets: preview", async ({ expect }) => {
 			mockListRequest();
 			await runWrangler(
 				"pages secret list --project some-project-name --env preview"
 			);
 			expect(std.out).toMatchInlineSnapshot(`
-			"The \\"preview\\" environment of your Pages project \\"some-project-name\\" has access to the following secrets:
-			  - the-secret-name-preview: Value Encrypted"
-		`);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				The "preview" environment of your Pages project "some-project-name" has access to the following secrets:
+				  - the-secret-name-preview: Value Encrypted"
+			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should fail with invalid env", async () => {
+		it("should fail with invalid env", async ({ expect }) => {
 			mockListRequest();
 			await expect(
 				runWrangler(
 					"pages secret list --project some-project-name --env some-env"
 				)
 			).rejects.toMatchInlineSnapshot(
-				`[Error: Pages does not support the "some-env" named environment. Please specify "production" (default) or "preview"]`
+				`[Error: Pages does not support the "some-env" environment. Only "production" and "preview" are valid. Use --env production or --env preview.]`
 			);
 		});
 
-		it("should error without a project name", async () => {
+		it("should error without a project name", async ({ expect }) => {
 			await expect(
 				runWrangler("pages secret list")
-			).rejects.toMatchInlineSnapshot(`[Error: Must specify a project name.]`);
+			).rejects.toMatchInlineSnapshot(
+				`[Error: Missing Pages project name. Use --project-name <name> to specify which project to manage secrets for.]`
+			);
 		});
 	});
 
 	describe("secret bulk", () => {
 		function mockProjectRequests(
+			expect: ExpectStatic,
 			vars: { name: string; text: string }[],
 			env: "production" | "preview" = "production"
 		) {
@@ -496,8 +553,10 @@ describe("wrangler pages secret", () => {
 				})
 			);
 		}
-		it("should fail secret bulk w/ no pipe or JSON input", async () => {
-			mockProjectRequests([]);
+		it("should fail secret bulk w/ no pipe or JSON input", async ({
+			expect,
+		}) => {
+			mockProjectRequests(expect, []);
 			vi.spyOn(readline, "createInterface").mockImplementation(
 				() => null as unknown as Interface
 			);
@@ -508,17 +567,15 @@ describe("wrangler pages secret", () => {
 			);
 		});
 
-		it("should use secret bulk w/ pipe input", async () => {
-			vi.spyOn(readline, "createInterface").mockImplementation(
-				() =>
-					// `readline.Interface` is an async iterator: `[Symbol.asyncIterator](): AsyncIterableIterator<string>`
-					JSON.stringify({
-						secret1: "secret-value",
-						password: "hunter2",
-					}) as unknown as Interface
+		it("should use secret bulk w/ pipe input", async ({ expect }) => {
+			mockReadlineInput(
+				JSON.stringify({
+					secret1: "secret-value",
+					password: "hunter2",
+				})
 			);
 
-			mockProjectRequests([
+			mockProjectRequests(expect, [
 				{
 					name: "secret1",
 					text: "secret-value",
@@ -531,14 +588,17 @@ describe("wrangler pages secret", () => {
 
 			await runWrangler(`pages secret bulk --project some-project-name`);
 			expect(std.out).toMatchInlineSnapshot(`
-				"🌀 Creating the secrets for the Pages project \\"some-project-name\\" (production)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Creating the secrets for the Pages project "some-project-name" (production)
 				Finished processing secrets file:
 				✨ 2 secrets successfully uploaded"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should create secret bulk", async () => {
+		it("should create secret bulk", async ({ expect }) => {
 			writeFileSync(
 				"secret.json",
 				JSON.stringify({
@@ -547,7 +607,7 @@ describe("wrangler pages secret", () => {
 				})
 			);
 
-			mockProjectRequests([
+			mockProjectRequests(expect, [
 				{
 					name: "secret-name-1",
 					text: "secret_text",
@@ -562,20 +622,23 @@ describe("wrangler pages secret", () => {
 			);
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"🌀 Creating the secrets for the Pages project \\"some-project-name\\" (production)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Creating the secrets for the Pages project "some-project-name" (production)
 				Finished processing secrets file:
 				✨ 2 secrets successfully uploaded"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should create secret bulk w/ env file", async () => {
+		it("should create secret bulk w/ env file", async ({ expect }) => {
 			writeFileSync(
 				".env",
 				`SECRET_1=secret-1\nSECRET_2=secret-2\nSECRET_3=secret-3`
 			);
 
-			mockProjectRequests([
+			mockProjectRequests(expect, [
 				{
 					name: "SECRET_1",
 					text: "secret-1",
@@ -592,14 +655,17 @@ describe("wrangler pages secret", () => {
 			await runWrangler("pages secret bulk .env --project some-project-name");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"🌀 Creating the secrets for the Pages project \\"some-project-name\\" (production)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Creating the secrets for the Pages project "some-project-name" (production)
 				Finished processing secrets file:
 				✨ 3 secrets successfully uploaded"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should create secret bulk: preview", async () => {
+		it("should create secret bulk: preview", async ({ expect }) => {
 			writeFileSync(
 				"secret.json",
 				JSON.stringify({
@@ -609,6 +675,7 @@ describe("wrangler pages secret", () => {
 			);
 
 			mockProjectRequests(
+				expect,
 				[
 					{
 						name: "secret-name-1",
@@ -627,14 +694,19 @@ describe("wrangler pages secret", () => {
 			);
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"🌀 Creating the secrets for the Pages project \\"some-project-name\\" (preview)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Creating the secrets for the Pages project "some-project-name" (preview)
 				Finished processing secrets file:
 				✨ 2 secrets successfully uploaded"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
-		it("should count success and network failure on secret bulk", async () => {
+		it("should count success and network failure on secret bulk", async ({
+			expect,
+		}) => {
 			writeFileSync(
 				"secret.json",
 				JSON.stringify({
@@ -685,7 +757,10 @@ describe("wrangler pages secret", () => {
 			);
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"🌀 Creating the secrets for the Pages project \\"some-project-name\\" (production)
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Creating the secrets for the Pages project "some-project-name" (production)
 				🚨 Secrets failed to upload
 
 				[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
@@ -697,7 +772,7 @@ describe("wrangler pages secret", () => {
 			`);
 		});
 
-		it("throws a meaningful error", async () => {
+		it("throws a meaningful error", async ({ expect }) => {
 			writeFileSync(
 				"secret.json",
 				JSON.stringify({
@@ -707,16 +782,8 @@ describe("wrangler pages secret", () => {
 			);
 
 			msw.use(
-				http.get(
-					`*/accounts/:accountId/workers/scripts/:scriptName/settings`,
-					({ params }) => {
-						expect(params.accountId).toEqual("some-account-id");
-
-						return HttpResponse.json(createFetchResult({ bindings: [] }));
-					}
-				),
 				http.patch(
-					`*/accounts/:accountId/workers/scripts/:scriptName/settings`,
+					`*/accounts/:accountId/workers/scripts/:scriptName/secrets-bulk`,
 					({ params }) => {
 						expect(params.accountId).toEqual("some-account-id");
 						return HttpResponse.json(
@@ -734,23 +801,81 @@ describe("wrangler pages secret", () => {
 			await expect(async () => {
 				await runWrangler("secret bulk ./secret.json --name script-name");
 			}).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[APIError: A request to the Cloudflare API (/accounts/some-account-id/workers/scripts/script-name/settings) failed.]`
+				`[APIError: A request to the Cloudflare API (/accounts/some-account-id/workers/scripts/script-name/secrets-bulk) failed.]`
 			);
 
-			expect(std.out).toMatchInlineSnapshot(`
-				"🌀 Creating the secrets for the Worker \\"script-name\\"
-
-				🚨 Secrets failed to upload
-
-				[31mX [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/accounts/some-account-id/workers/scripts/script-name/settings) failed.[0m
+			expect(std).toMatchInlineSnapshot(`
+				{
+				  "debug": "",
+				  "err": "[31mX [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/accounts/some-account-id/workers/scripts/script-name/secrets-bulk) failed.[0m
 
 				  This is a helpful error [code: 1]
 
 				  If you think this is a bug, please open an issue at:
 				  [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
 
-				"
+				",
+				  "info": "",
+				  "out": "
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🌀 Processing the secrets for the Worker "script-name"
+
+				🚨 Secrets failed to upload
+				",
+				  "warn": "",
+				}
 			`);
+		});
+	});
+
+	describe("account id resolution", () => {
+		beforeEach(() => {
+			setIsTTY(true);
+		});
+
+		it("should prefer CLOUDFLARE_ACCOUNT_ID over cached account id", async ({
+			expect,
+		}) => {
+			vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "env-var-account-id");
+
+			saveToConfigCache<PagesConfigCache>(PAGES_CONFIG_CACHE_FILENAME, {
+				account_id: "stale-cached-account-id",
+				project_name: "some-project-name",
+			});
+
+			msw.use(
+				http.get(
+					"*/accounts/:accountId/pages/projects/:project",
+					({ params }) => {
+						expect(params.accountId).toEqual("env-var-account-id");
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: {
+									name: "some-project-name",
+									deployment_configs: {
+										production: {
+											wrangler_config_hash: "wch",
+											env_vars: {
+												"the-secret": {
+													type: "secret_text",
+												},
+											},
+										},
+										preview: {},
+									},
+								},
+							},
+							{ status: 200 }
+						);
+					}
+				)
+			);
+
+			await runWrangler("pages secret list --project some-project-name");
 		});
 	});
 });

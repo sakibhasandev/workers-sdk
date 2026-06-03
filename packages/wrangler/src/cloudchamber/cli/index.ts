@@ -1,23 +1,24 @@
 import {
-	crash,
 	endSection,
 	log,
 	logRaw,
 	newline,
 	status,
 	updateStatus,
-} from "@cloudflare/cli";
-import { brandColor, dim } from "@cloudflare/cli/colors";
-import { spinner } from "@cloudflare/cli/interactive";
+} from "@cloudflare/cli-shared-helpers";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import { spinner } from "@cloudflare/cli-shared-helpers/interactive";
 import {
 	DeploymentsService,
 	ImageRegistriesService,
 	PlacementsService,
 	SshPublicKeysService,
-} from "../client";
+} from "@cloudflare/containers-shared";
+import { UserError } from "@cloudflare/workers-utils";
+import { capitalize } from "../../utils/strings";
 import { wrap } from "../helpers/wrap";
 import { idToLocationName } from "../locations";
-import { capitalize } from "./util";
+import type { EventName } from "../enums";
 import type {
 	CustomerImageRegistry,
 	DeploymentV2,
@@ -25,8 +26,7 @@ import type {
 	PlacementEvent,
 	PlacementStatusHealth,
 	PlacementWithEvents,
-} from "../client";
-import type { EventName } from "../enums";
+} from "@cloudflare/containers-shared";
 
 export function pollRegistriesUntilCondition(
 	onRegistries: (registries: Array<CustomerImageRegistry>) => boolean
@@ -214,7 +214,9 @@ async function waitForImagePull(deployment: DeploymentV2) {
 	);
 	s.stop();
 	if (err) {
-		crash(err.message);
+		throw new UserError(err.message, {
+			telemetryMessage: "cloudchamber placement image pull wait failed",
+		});
 	}
 
 	if (
@@ -231,15 +233,18 @@ async function waitForImagePull(deployment: DeploymentV2) {
 		// For now, the cloudchamber API always returns a 404 in the message when the
 		// image is not found.
 		if (eventPlacement.event.message.includes("404")) {
-			crash(
-				"Your container image couldn't be pulled, (404 not found). Did you specify the correct URL?",
-				`Run ${brandColor(
-					process.argv0 + " cloudchamber modify " + deployment.id
-				)} to change the deployment image`
+			throw new UserError(
+				"Your container image couldn't be pulled, (404 not found). Did you specify the correct URL?\n\t" +
+					`Run ${brandColor(
+						process.argv0 + " cloudchamber modify " + deployment.id
+					)} to change the deployment image`,
+				{ telemetryMessage: "cloudchamber placement image not found" }
 			);
 		}
 
-		crash(capitalize(eventPlacement.event.message));
+		throw new UserError(capitalize(eventPlacement.event.message), {
+			telemetryMessage: "cloudchamber placement image pull failed",
+		});
 	}
 
 	updateStatus("Pulled your image");
@@ -271,7 +276,9 @@ async function waitForVMToStart(deployment: DeploymentV2) {
 	);
 	s.stop();
 	if (err) {
-		crash(err.message);
+		throw new UserError(err.message, {
+			telemetryMessage: "cloudchamber placement vm start wait failed",
+		});
 	}
 
 	if (!eventPlacement.event) {
@@ -338,7 +345,9 @@ async function waitForPlacementInstance(deployment: DeploymentV2) {
 	}
 
 	if (err) {
-		crash(err.message);
+		throw new UserError(err.message, {
+			telemetryMessage: "cloudchamber placement assignment failed",
+		});
 	}
 
 	updateStatus(
@@ -378,8 +387,12 @@ export async function waitForPlacement(deployment: DeploymentV2) {
 					DeploymentsService.getDeploymentV2(deployment.id)
 				);
 				if (getDeploymentError) {
-					crash(
-						"Couldn't retrieve a new deployment: " + getDeploymentError.message
+					throw new UserError(
+						"Couldn't retrieve a new deployment: " + getDeploymentError.message,
+						{
+							telemetryMessage:
+								"cloudchamber placement deployment refresh failed",
+						}
 					);
 				}
 

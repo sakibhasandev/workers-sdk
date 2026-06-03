@@ -3,27 +3,30 @@ import { Buffer } from "node:buffer";
 import CachePolicy from "http-cache-semantics";
 import {
 	DeferredPromise,
+	DELETE,
 	GET,
-	InclusiveRange,
 	KeyValueStorage,
 	LogLevel,
 	MiniflareDurableObject,
-	MiniflareDurableObjectCf,
-	MultipartReadableStream,
 	parseRanges,
 	PURGE,
 	PUT,
-	RouteHandler,
-	Timers,
 } from "miniflare:shared";
 import { isSitesRequest } from "../kv";
-import { CacheObjectCf } from "./constants";
 import {
 	CacheMiss,
 	PurgeFailure,
 	RangeNotSatisfiable,
 	StorageFailure,
 } from "./errors.worker";
+import type { CacheObjectCf } from "./constants";
+import type {
+	InclusiveRange,
+	MiniflareDurableObjectCf,
+	MultipartReadableStream,
+	RouteHandler,
+	Timers,
+} from "miniflare:shared";
 
 interface CacheMetadata {
 	headers: string[][];
@@ -354,9 +357,7 @@ export class CacheObject extends MiniflareDurableObject {
 
 		// If we know the size, avoid passing the body through a transform stream to
 		// count it (trusting `workerd` to send correct value here).
-		// Safety of `!`: `parseInt(null)` is `NaN`
-		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-		const contentLength = parseInt(res.headers.get("Content-Length")!);
+		const contentLength = parseInt(res.headers.get("Content-Length") ?? "NaN");
 		let sizePromise: Promise<number>;
 		if (Number.isNaN(contentLength)) {
 			const stream = new SizingStream();
@@ -390,5 +391,11 @@ export class CacheObject extends MiniflareDurableObject {
 		// This is an extremely vague error, but it fits with what the cache API in workerd expects
 		if (!deleted) throw new PurgeFailure();
 		return new Response(null);
+	};
+
+	@DELETE("/purge-all")
+	purgeAll: CacheRouteHandler = async () => {
+		const deletedCount = this.storage.deleteAll();
+		return Response.json({ deleted: deletedCount });
 	};
 }

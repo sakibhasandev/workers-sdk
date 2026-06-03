@@ -1,8 +1,7 @@
-import { readFileSync } from "fs";
-import os from "node:os";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
-import path from "path";
-import open from "open";
+import open, { apps } from "open";
 import {
 	isAllowedSourceMapPath,
 	isAllowedSourcePath,
@@ -71,7 +70,7 @@ export function logConsoleMessage(
 					args.push(
 						ro.subtype === "null"
 							? "null"
-							: ro.description ?? "<no-description>"
+							: (ro.description ?? "<no-description>")
 					);
 				} else {
 					args.push(ro.preview.description ?? "<no-description>");
@@ -92,36 +91,39 @@ export function logConsoleMessage(
 							break;
 						case "weakmap":
 						case "map":
-							ro.preview.entries === undefined
-								? args.push("{}")
-								: args.push(
-										"{\n" +
-											ro.preview.entries
-												.map(({ key, value }) => {
-													return `  ${key?.description ?? "<unknown>"} => ${
-														value.description
-													}`;
-												})
-												.join(",\n") +
-											(ro.preview.overflow ? "\n  ..." : "") +
-											"\n}"
-									);
-
+							if (ro.preview.entries === undefined) {
+								args.push("{}");
+							} else {
+								args.push(
+									"{\n" +
+										ro.preview.entries
+											.map(({ key, value }) => {
+												return `  ${key?.description ?? "<unknown>"} => ${
+													value.description
+												}`;
+											})
+											.join(",\n") +
+										(ro.preview.overflow ? "\n  ..." : "") +
+										"\n}"
+								);
+							}
 							break;
 						case "weakset":
 						case "set":
-							ro.preview.entries === undefined
-								? args.push("{}")
-								: args.push(
-										"{ " +
-											ro.preview.entries
-												.map(({ value }) => {
-													return `${value.description}`;
-												})
-												.join(", ") +
-											(ro.preview.overflow ? ", ..." : "") +
-											" }"
-									);
+							if (ro.preview.entries === undefined) {
+								args.push("{}");
+							} else {
+								args.push(
+									"{ " +
+										ro.preview.entries
+											.map(({ value }) => {
+												return `${value.description}`;
+											})
+											.join(", ") +
+										(ro.preview.overflow ? ", ..." : "") +
+										" }"
+								);
+							}
 							break;
 						case "regexp":
 							break;
@@ -262,7 +264,7 @@ export const openInspector = async (
 
 	// see: https://github.com/sindresorhus/open/issues/177#issue-610016699
 	let braveBrowser: string;
-	switch (os.platform()) {
+	switch (process.platform) {
 		case "darwin":
 		case "win32":
 			braveBrowser = "Brave";
@@ -274,16 +276,16 @@ export const openInspector = async (
 	const childProcess = await open(url, {
 		app: [
 			{
-				name: open.apps.chrome,
+				name: apps.chrome,
 			},
 			{
 				name: braveBrowser,
 			},
 			{
-				name: open.apps.edge,
+				name: apps.edge,
 			},
 			{
-				name: open.apps.firefox,
+				name: apps.firefox,
 			},
 		],
 	});

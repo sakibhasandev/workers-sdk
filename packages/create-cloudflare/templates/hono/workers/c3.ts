@@ -1,4 +1,4 @@
-import { logRaw } from "@cloudflare/cli";
+import { logRaw } from "@cloudflare/cli-shared-helpers";
 import { runFrameworkGenerator } from "frameworks/index";
 import { detectPackageManager } from "helpers/packageManagers";
 import type { TemplateConfig } from "../../../src/templates";
@@ -19,6 +19,7 @@ const generate = async (ctx: C3Context) => {
 	logRaw(""); // newline
 };
 
+const envInterfaceName = "CloudflareBindings";
 const config: TemplateConfig = {
 	configVersion: 1,
 	id: "hono",
@@ -32,11 +33,12 @@ const config: TemplateConfig = {
 	generate,
 	transformPackageJson: async () => ({
 		scripts: {
-			"cf-typegen": "wrangler types --env-interface CloudflareBindings",
+			"cf-typegen": `wrangler types --env-interface ${envInterfaceName}`,
 		},
 	}),
 	devScript: "dev",
 	deployScript: "deploy",
 	previewScript: "dev",
+	envInterfaceName,
 };
 export default config;

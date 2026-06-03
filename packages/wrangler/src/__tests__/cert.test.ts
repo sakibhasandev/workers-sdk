@@ -1,5 +1,8 @@
-import { writeFileSync } from "fs";
+import { writeFileSync } from "node:fs";
+import { COMPLIANCE_REGION_CONFIG_UNKNOWN } from "@cloudflare/workers-utils";
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { beforeEach, describe, it, test } from "vitest";
 import {
 	deleteMTlsCertificate,
 	getMTlsCertificate,
@@ -15,7 +18,6 @@ import { mockConsoleMethods } from "./helpers/mock-console";
 import { mockConfirm } from "./helpers/mock-dialogs";
 import { useMockIsTTY } from "./helpers/mock-istty";
 import { msw } from "./helpers/msw";
-import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
 
 describe("wrangler", () => {
@@ -187,14 +189,16 @@ describe("wrangler", () => {
 		return config;
 	}
 
-	const now = new Date();
+	const now = new Date(2025, 1, 1);
 	const oneYearLater = new Date(now);
 	oneYearLater.setFullYear(now.getFullYear() + 1);
 
 	describe("cert", () => {
 		describe("api", () => {
 			describe("uploadMTlsCertificate", () => {
-				it("should call mtls_certificates upload endpoint", async () => {
+				it("should call mtls_certificates upload endpoint", async ({
+					expect,
+				}) => {
 					const mock = mockPostMTlsCertificate({
 						id: "1234",
 						issuer: "example.com...",
@@ -202,11 +206,15 @@ describe("wrangler", () => {
 						expires_on: oneYearLater.toISOString(),
 					});
 
-					const cert = await uploadMTlsCertificate("some-account-id", {
-						certificateChain: "BEGIN CERTIFICATE...",
-						privateKey: "BEGIN PRIVATE KEY...",
-						name: "my_cert",
-					});
+					const cert = await uploadMTlsCertificate(
+						COMPLIANCE_REGION_CONFIG_UNKNOWN,
+						"some-account-id",
+						{
+							certificateChain: "BEGIN CERTIFICATE...",
+							privateKey: "BEGIN PRIVATE KEY...",
+							name: "my_cert",
+						}
+					);
 
 					expect(cert.id).toEqual("1234");
 					expect(cert.issuer).toEqual("example.com...");
@@ -217,19 +225,27 @@ describe("wrangler", () => {
 			});
 
 			describe("uploadMTlsCertificateFromFs", () => {
-				it("should fail to read cert and key files when missing", async () => {
+				it("should fail to read cert and key files when missing", async ({
+					expect,
+				}) => {
 					await expect(
-						uploadMTlsCertificateFromFs("some-account-id", {
-							certificateChainFilename: "cert.pem",
-							privateKeyFilename: "key.pem",
-							name: "my_cert",
-						})
+						uploadMTlsCertificateFromFs(
+							COMPLIANCE_REGION_CONFIG_UNKNOWN,
+							"some-account-id",
+							{
+								certificateChainFilename: "cert.pem",
+								privateKeyFilename: "key.pem",
+								name: "my_cert",
+							}
+						)
 					).rejects.toMatchInlineSnapshot(
 						`[ParseError: Could not read file: cert.pem]`
 					);
 				});
 
-				it("should read cert and key from disk and call mtls_certificates upload endpoint", async () => {
+				it("should read cert and key from disk and call mtls_certificates upload endpoint", async ({
+					expect,
+				}) => {
 					const mock = mockPostMTlsCertificate({
 						id: "1234",
 						issuer: "example.com...",
@@ -238,11 +254,15 @@ describe("wrangler", () => {
 					writeFileSync("cert.pem", "BEGIN CERTIFICATE...");
 					writeFileSync("key.pem", "BEGIN PRIVATE KEY...");
 
-					const cert = await uploadMTlsCertificateFromFs("some-account-id", {
-						certificateChainFilename: "cert.pem",
-						privateKeyFilename: "key.pem",
-						name: "my_cert",
-					});
+					const cert = await uploadMTlsCertificateFromFs(
+						COMPLIANCE_REGION_CONFIG_UNKNOWN,
+						"some-account-id",
+						{
+							certificateChainFilename: "cert.pem",
+							privateKeyFilename: "key.pem",
+							name: "my_cert",
+						}
+					);
 
 					expect(cert.id).toEqual("1234");
 					expect(cert.issuer).toEqual("example.com...");
@@ -253,19 +273,27 @@ describe("wrangler", () => {
 			});
 
 			describe("uploadCaCertificateFromFs", () => {
-				it("should fail to read ca cert when file is missing", async () => {
+				it("should fail to read ca cert when file is missing", async ({
+					expect,
+				}) => {
 					await expect(
-						uploadCaCertificateFromFs("some-account-id", {
-							certificates: "caCert.pem",
-							ca: true,
-							name: "my_cert",
-						})
+						uploadCaCertificateFromFs(
+							COMPLIANCE_REGION_CONFIG_UNKNOWN,
+							"some-account-id",
+							{
+								certificates: "caCert.pem",
+								ca: true,
+								name: "my_cert",
+							}
+						)
 					).rejects.toMatchInlineSnapshot(
 						`[ParseError: Could not read file: caCert.pem]`
 					);
 				});
 
-				it("should read ca cert from disk and call mtls_certificates upload endpoint", async () => {
+				it("should read ca cert from disk and call mtls_certificates upload endpoint", async ({
+					expect,
+				}) => {
 					const mock = mockPostCaChainCertificate({
 						id: "1234",
 						issuer: "example.com...",
@@ -273,11 +301,15 @@ describe("wrangler", () => {
 
 					writeFileSync("caCert.pem", "BEGIN CERTIFICATE...");
 
-					const cert = await uploadCaCertificateFromFs("some-account-id", {
-						certificates: "caCert.pem",
-						ca: true,
-						name: "my_cert",
-					});
+					const cert = await uploadCaCertificateFromFs(
+						COMPLIANCE_REGION_CONFIG_UNKNOWN,
+						"some-account-id",
+						{
+							certificates: "caCert.pem",
+							ca: true,
+							name: "my_cert",
+						}
+					);
 
 					expect(cert.id).toEqual("1234");
 					expect(cert.issuer).toEqual("example.com...");
@@ -289,7 +321,9 @@ describe("wrangler", () => {
 			});
 
 			describe("listMTlsCertificates", () => {
-				it("should call mtls_certificates list endpoint", async () => {
+				it("should call mtls_certificates list endpoint", async ({
+					expect,
+				}) => {
 					const mock = mockGetMTlsCertificates([
 						{
 							id: "1234",
@@ -309,7 +343,12 @@ describe("wrangler", () => {
 						},
 					]);
 
-					const certs = await listMTlsCertificates("some-account-id", {}, true);
+					const certs = await listMTlsCertificates(
+						COMPLIANCE_REGION_CONFIG_UNKNOWN,
+						"some-account-id",
+						{},
+						true
+					);
 
 					expect(certs).toHaveLength(2);
 
@@ -324,7 +363,7 @@ describe("wrangler", () => {
 			});
 
 			describe("getMTlsCertificate", () => {
-				it("calls get mtls_certificates endpoint", async () => {
+				it("calls get mtls_certificates endpoint", async ({ expect }) => {
 					const mock = mockGetMTlsCertificate({
 						id: "1234",
 						name: "cert one",
@@ -334,7 +373,11 @@ describe("wrangler", () => {
 						expires_on: oneYearLater.toISOString(),
 					});
 
-					const cert = await getMTlsCertificate("some-account-id", "1234");
+					const cert = await getMTlsCertificate(
+						COMPLIANCE_REGION_CONFIG_UNKNOWN,
+						"some-account-id",
+						"1234"
+					);
 
 					expect(cert.id).toEqual("1234");
 					expect(cert.issuer).toEqual("example.com...");
@@ -345,7 +388,9 @@ describe("wrangler", () => {
 			});
 
 			describe("getMTlsCertificateByName", () => {
-				it("calls list mtls_certificates endpoint with name", async () => {
+				it("calls list mtls_certificates endpoint with name", async ({
+					expect,
+				}) => {
 					const mock = mockGetMTlsCertificates([
 						{
 							id: "1234",
@@ -358,6 +403,7 @@ describe("wrangler", () => {
 					]);
 
 					const cert = await getMTlsCertificateByName(
+						COMPLIANCE_REGION_CONFIG_UNKNOWN,
 						"some-account-id",
 						"cert one",
 						true
@@ -370,11 +416,16 @@ describe("wrangler", () => {
 					expect(mock.calls).toEqual(1);
 				});
 
-				it("errors when a certificate cannot be found", async () => {
+				it("errors when a certificate cannot be found", async ({ expect }) => {
 					const mock = mockGetMTlsCertificates([]);
 
 					await expect(
-						getMTlsCertificateByName("some-account-id", "cert one", true)
+						getMTlsCertificateByName(
+							COMPLIANCE_REGION_CONFIG_UNKNOWN,
+							"some-account-id",
+							"cert one",
+							true
+						)
 					).rejects.toMatchInlineSnapshot(
 						`[Error: certificate not found with name "cert one"]`
 					);
@@ -382,7 +433,9 @@ describe("wrangler", () => {
 					expect(mock.calls).toEqual(1);
 				});
 
-				it("errors when multiple certificates are found", async () => {
+				it("errors when multiple certificates are found", async ({
+					expect,
+				}) => {
 					const mock = mockGetMTlsCertificates([
 						{
 							id: "1234",
@@ -403,7 +456,12 @@ describe("wrangler", () => {
 					]);
 
 					await expect(
-						getMTlsCertificateByName("some-account-id", "cert one", true)
+						getMTlsCertificateByName(
+							COMPLIANCE_REGION_CONFIG_UNKNOWN,
+							"some-account-id",
+							"cert one",
+							true
+						)
 					).rejects.toMatchInlineSnapshot(
 						`[Error: multiple certificates found with name "cert one"]`
 					);
@@ -413,10 +471,14 @@ describe("wrangler", () => {
 			});
 
 			describe("deleteMTlsCertificate", () => {
-				test("calls delete mts_certificates endpoint", async () => {
+				test("calls delete mts_certificates endpoint", async ({ expect }) => {
 					const mock = mockDeleteMTlsCertificate();
 
-					await deleteMTlsCertificate("some-account-id", "1234");
+					await deleteMTlsCertificate(
+						COMPLIANCE_REGION_CONFIG_UNKNOWN,
+						"some-account-id",
+						"1234"
+					);
 
 					expect(mock.calls).toEqual(1);
 				});
@@ -425,31 +487,33 @@ describe("wrangler", () => {
 
 		describe("commands", () => {
 			describe("help", () => {
-				it("should show the correct help text", async () => {
+				it("should show the correct help text", async ({ expect }) => {
 					await runWrangler("cert --help");
 					expect(std.err).toMatchInlineSnapshot(`""`);
 					expect(std.out).toMatchInlineSnapshot(`
 						"wrangler cert
 
-						🪪 Manage client mTLS certificates and CA certificate chains used for secured connections [open-beta]
+						🪪 Manage client mTLS certificates and CA certificate chains used for secured connections [open beta]
 
 						COMMANDS
-						  wrangler cert upload  Upload a new cert [open-beta]
+						  wrangler cert upload  Upload a new cert [open beta]
 						  wrangler cert list    List uploaded mTLS certificates
 						  wrangler cert delete  Delete an mTLS certificate
 
 						GLOBAL FLAGS
-						  -c, --config   Path to Wrangler configuration file  [string]
-						      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-						  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-						  -h, --help     Show help  [boolean]
-						  -v, --version  Show version number  [boolean]"
+						  -c, --config          Path to Wrangler configuration file  [string]
+						      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+						  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+						      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+						  -h, --help            Show help  [boolean]
+						      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+						  -v, --version         Show version number  [boolean]"
 					`);
 				});
 			});
 
 			describe("upload", () => {
-				test("uploads certificate and key from file", async () => {
+				test("uploads certificate and key from file", async ({ expect }) => {
 					writeFileSync("cert.pem", "BEGIN CERTIFICATE...");
 					writeFileSync("key.pem", "BEGIN PRIVATE KEY...");
 
@@ -460,16 +524,23 @@ describe("wrangler", () => {
 					);
 
 					expect(std.err).toMatchInlineSnapshot(`""`);
-					expect(std.out).toEqual(
-						`Uploading mTLS Certificate...
-Success! Uploaded mTLS Certificate
-ID: 1234
-Issuer: example.com...
-Expires on ${oneYearLater.toLocaleDateString()}`
+					expect(std.out).toMatchInlineSnapshot(
+						`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						Uploading mTLS Certificate...
+						Success! Uploaded mTLS Certificate
+						ID: 1234
+						Issuer: example.com...
+						Expires on 2/1/2026"
+					`
 					);
 				});
 
-				test("uploads certificate and key from file with name", async () => {
+				test("uploads certificate and key from file with name", async ({
+					expect,
+				}) => {
 					writeFileSync("cert.pem", "BEGIN CERTIFICATE...");
 					writeFileSync("key.pem", "BEGIN PRIVATE KEY...");
 
@@ -480,16 +551,21 @@ Expires on ${oneYearLater.toLocaleDateString()}`
 					);
 
 					expect(std.err).toMatchInlineSnapshot(`""`);
-					expect(std.out).toEqual(
-						`Uploading mTLS Certificate my-cert...
-Success! Uploaded mTLS Certificate my-cert
-ID: 1234
-Issuer: example.com...
-Expires on ${oneYearLater.toLocaleDateString()}`
+					expect(std.out).toMatchInlineSnapshot(
+						`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						Uploading mTLS Certificate my-cert...
+						Success! Uploaded mTLS Certificate my-cert
+						ID: 1234
+						Issuer: example.com...
+						Expires on 2/1/2026"
+					`
 					);
 				});
 
-				test("uploads ca certificate chain from file", async () => {
+				test("uploads ca certificate chain from file", async ({ expect }) => {
 					writeFileSync("caCert.pem", "BEGIN CERTIFICATE...");
 
 					mockPostCaChainCertificate();
@@ -499,16 +575,23 @@ Expires on ${oneYearLater.toLocaleDateString()}`
 					);
 
 					expect(std.err).toMatchInlineSnapshot(`""`);
-					expect(std.out).toEqual(
-						`Uploading CA Certificate...
-Success! Uploaded CA Certificate
-ID: 1234
-Issuer: example.com...
-Expires on ${oneYearLater.toLocaleDateString()}`
+					expect(std.out).toMatchInlineSnapshot(
+						`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						Uploading CA Certificate...
+						Success! Uploaded CA Certificate
+						ID: 1234
+						Issuer: example.com...
+						Expires on 2/1/2026"
+					`
 					);
 				});
 
-				test("uploads ca certificate chain from file with name", async () => {
+				test("uploads ca certificate chain from file with name", async ({
+					expect,
+				}) => {
 					writeFileSync("caCert.pem", "BEGIN CERTIFICATE...");
 
 					mockPostCaChainCertificate();
@@ -518,44 +601,54 @@ Expires on ${oneYearLater.toLocaleDateString()}`
 					);
 
 					expect(std.err).toMatchInlineSnapshot(`""`);
-					expect(std.out).toEqual(
-						`Uploading CA Certificate my-caCert...
-Success! Uploaded CA Certificate my-caCert
-ID: 1234
-Issuer: example.com...
-Expires on ${oneYearLater.toLocaleDateString()}`
+					expect(std.out).toMatchInlineSnapshot(
+						`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						Uploading CA Certificate my-caCert...
+						Success! Uploaded CA Certificate my-caCert
+						ID: 1234
+						Issuer: example.com...
+						Expires on 2/1/2026"
+					`
 					);
 				});
 			});
 
 			describe("list", () => {
-				it("should list certificates", async () => {
+				it("should list certificates", async ({ expect }) => {
 					mockGetMTlsCertificates();
 
 					await runWrangler("cert list");
 
 					expect(std.err).toMatchInlineSnapshot(`""`);
-					expect(std.out).toEqual(
-						`ID: 1234
-Name: cert one
-Issuer: example.com...
-Created on: ${now.toLocaleDateString()}
-Expires on: ${oneYearLater.toLocaleDateString()}
+					expect(std.out).toMatchInlineSnapshot(
+						`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						ID: 1234
+						Name: cert one
+						Issuer: example.com...
+						Created on: 2/1/2025
+						Expires on: 2/1/2026
 
 
-ID: 5678
-Name: cert two
-Issuer: example.com...
-Created on: ${now.toLocaleDateString()}
-Expires on: ${oneYearLater.toLocaleDateString()}
+						ID: 5678
+						Name: cert two
+						Issuer: example.com...
+						Created on: 2/1/2025
+						Expires on: 2/1/2026
 
-`
+						"
+					`
 					);
 				});
 			});
 
 			describe("delete", () => {
-				it("should require --id or --name", async () => {
+				it("should require --id or --name", async ({ expect }) => {
 					await runWrangler("cert delete");
 
 					expect(std.err).toMatchInlineSnapshot(`
@@ -563,10 +656,16 @@ Expires on: ${oneYearLater.toLocaleDateString()}
 
 				"
 			`);
-					expect(std.out).toMatchInlineSnapshot(`""`);
+					expect(std.out).toMatchInlineSnapshot(`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────"
+					`);
 				});
 
-				it("should require not providing --id and --name", async () => {
+				it("should require not providing --id and --name", async ({
+					expect,
+				}) => {
 					await runWrangler("cert delete --id 1234 --name mycert");
 
 					expect(std.err).toMatchInlineSnapshot(`
@@ -574,10 +673,14 @@ Expires on: ${oneYearLater.toLocaleDateString()}
 
 				"
 			`);
-					expect(std.out).toMatchInlineSnapshot(`""`);
+					expect(std.out).toMatchInlineSnapshot(`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────"
+					`);
 				});
 
-				it("should delete certificate by id", async () => {
+				it("should delete certificate by id", async ({ expect }) => {
 					mockGetMTlsCertificate({ name: "my-cert" });
 					mockDeleteMTlsCertificate();
 
@@ -590,11 +693,16 @@ Expires on: ${oneYearLater.toLocaleDateString()}
 
 					expect(std.err).toMatchInlineSnapshot(`""`);
 					expect(std.out).toMatchInlineSnapshot(
-						`"Deleted certificate 1234 (my-cert) successfully"`
+						`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						Deleted certificate 1234 (my-cert) successfully"
+					`
 					);
 				});
 
-				it("should delete certificate by name", async () => {
+				it("should delete certificate by name", async ({ expect }) => {
 					mockGetMTlsCertificates([{ id: "1234", name: "my-cert" }]);
 					mockDeleteMTlsCertificate();
 
@@ -607,11 +715,18 @@ Expires on: ${oneYearLater.toLocaleDateString()}
 
 					expect(std.err).toMatchInlineSnapshot(`""`);
 					expect(std.out).toMatchInlineSnapshot(
-						`"Deleted certificate 1234 (my-cert) successfully"`
+						`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						Deleted certificate 1234 (my-cert) successfully"
+					`
 					);
 				});
 
-				it("should not delete when certificate cannot be found by name", async () => {
+				it("should not delete when certificate cannot be found by name", async ({
+					expect,
+				}) => {
 					mockGetMTlsCertificates([]);
 
 					await expect(
@@ -619,10 +734,17 @@ Expires on: ${oneYearLater.toLocaleDateString()}
 					).rejects.toMatchInlineSnapshot(
 						`[Error: certificate not found with name "my-cert"]`
 					);
-					expect(std.out).toMatchInlineSnapshot(`""`);
+					expect(std.out).toMatchInlineSnapshot(`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						"
+					`);
 				});
 
-				it("should not delete when many certificates are found by name", async () => {
+				it("should not delete when many certificates are found by name", async ({
+					expect,
+				}) => {
 					mockGetMTlsCertificates([
 						{
 							id: "1234",
@@ -647,10 +769,15 @@ Expires on: ${oneYearLater.toLocaleDateString()}
 					).rejects.toMatchInlineSnapshot(
 						`[Error: multiple certificates found with name "my-cert"]`
 					);
-					expect(std.out).toMatchInlineSnapshot(`""`);
+					expect(std.out).toMatchInlineSnapshot(`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						"
+					`);
 				});
 
-				it("should not delete when confirmation fails", async () => {
+				it("should not delete when confirmation fails", async ({ expect }) => {
 					mockGetMTlsCertificate({ id: "1234" });
 
 					mockConfirm({
@@ -660,7 +787,12 @@ Expires on: ${oneYearLater.toLocaleDateString()}
 
 					await runWrangler("cert delete --id 1234");
 					expect(std.err).toMatchInlineSnapshot(`""`);
-					expect(std.out).toMatchInlineSnapshot(`"Not deleting"`);
+					expect(std.out).toMatchInlineSnapshot(`
+						"
+						 ⛅️ wrangler x.x.x
+						──────────────────
+						Not deleting"
+					`);
 				});
 			});
 		});

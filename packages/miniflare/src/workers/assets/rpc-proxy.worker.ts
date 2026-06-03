@@ -1,5 +1,9 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
-import type RouterWorker from "@cloudflare/workers-shared/asset-worker/src/index";
+import {
+	tailEventsReplacer,
+	tailEventsReviver,
+} from "../core/dev-registry-proxy-shared.worker";
+import type RouterWorker from "@cloudflare/workers-shared/asset-worker";
 
 interface Env {
 	ROUTER_WORKER: Service<RouterWorker>;
@@ -20,6 +24,15 @@ interface Env {
 export default class RPCProxyWorker extends WorkerEntrypoint<Env> {
 	async fetch(request: Request) {
 		return this.env.ROUTER_WORKER.fetch(request);
+	}
+
+	tail(events: TraceItem[]) {
+		// Temporary workaround: the tail events is not serializable over capnproto yet
+		// But they are effectively JSON, so we are serializing them to JSON and parsing it back to make it transferable.
+		// @ts-expect-error FIXME when https://github.com/cloudflare/workerd/pull/4595 lands
+		return this.env.USER_WORKER.tail(
+			JSON.parse(JSON.stringify(events, tailEventsReplacer), tailEventsReviver)
+		);
 	}
 
 	constructor(ctx: ExecutionContext, env: Env) {

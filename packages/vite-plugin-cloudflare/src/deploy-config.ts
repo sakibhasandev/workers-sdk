@@ -1,112 +1,103 @@
 import assert from "node:assert";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as vite from "vite";
-import { unstable_readConfig } from "wrangler";
-import type { ResolvedPluginConfig } from "./plugin-config";
+import * as wrangler from "wrangler";
+import { resolveDevOnly } from "./plugin-config";
+import type {
+	AssetsOnlyResolvedConfig,
+	WorkersResolvedConfig,
+} from "./plugin-config";
+import type * as vite from "vite";
 
 interface DeployConfig {
 	configPath: string;
 	auxiliaryWorkers: Array<{ configPath: string }>;
+	prerenderWorkerConfigPath?: string;
 }
 
 function getDeployConfigPath(root: string) {
 	return path.resolve(root, ".wrangler", "deploy", "config.json");
 }
 
-export function getWorkerConfigs(root: string) {
+export function getWorkerConfigs(root: string, isPrerender: boolean) {
 	const deployConfigPath = getDeployConfigPath(root);
 	const deployConfig = JSON.parse(
 		fs.readFileSync(deployConfigPath, "utf-8")
 	) as DeployConfig;
 
 	return [
-		{ configPath: deployConfig.configPath },
+		...(isPrerender && deployConfig.prerenderWorkerConfigPath
+			? [{ configPath: deployConfig.prerenderWorkerConfigPath }]
+			: [{ configPath: deployConfig.configPath }]),
 		...deployConfig.auxiliaryWorkers,
 	].map(({ configPath }) => {
 		const resolvedConfigPath = path.resolve(
 			path.dirname(deployConfigPath),
 			configPath
 		);
-		return unstable_readConfig({ config: resolvedConfigPath });
+		return wrangler.unstable_readConfig({ config: resolvedConfigPath });
 	});
 }
 
-function getRelativePathToWorkerConfig(
-	deployConfigDirectory: string,
-	root: string,
-	outputDirectory: string
-) {
-	return path.relative(
-		deployConfigDirectory,
-		path.resolve(root, outputDirectory, "wrangler.json")
-	);
-}
-
 export function writeDeployConfig(
-	resolvedPluginConfig: ResolvedPluginConfig,
-	resolvedViteConfig: vite.ResolvedConfig
+	resolvedPluginConfig: AssetsOnlyResolvedConfig | WorkersResolvedConfig,
+	resolvedViteConfig: vite.ResolvedConfig,
+	isAssetsOnly: boolean
 ) {
 	const deployConfigPath = getDeployConfigPath(resolvedViteConfig.root);
 	const deployConfigDirectory = path.dirname(deployConfigPath);
 
 	fs.mkdirSync(deployConfigDirectory, { recursive: true });
 
-	if (resolvedPluginConfig.type === "assets-only") {
-		const clientOutputDirectory =
-			resolvedViteConfig.environments.client?.build.outDir;
+	const resolveConfigPath = (environmentName: string) => {
+		const outputDirectory =
+			resolvedViteConfig.environments[environmentName]?.build.outDir;
 
 		assert(
-			clientOutputDirectory,
-			"Unexpected error: client environment output directory is undefined"
+			outputDirectory,
+			`Unexpected error: ${environmentName} environment output directory is undefined`
 		);
 
-		const deployConfig: DeployConfig = {
-			configPath: getRelativePathToWorkerConfig(
-				deployConfigDirectory,
-				resolvedViteConfig.root,
-				clientOutputDirectory
-			),
-			auxiliaryWorkers: [],
-		};
+		return path.relative(
+			deployConfigDirectory,
+			path.resolve(resolvedViteConfig.root, outputDirectory, "wrangler.json")
+		);
+	};
 
-		fs.writeFileSync(deployConfigPath, JSON.stringify(deployConfig));
+	const auxiliaryWorkerEnvironmentNames =
+		resolvedPluginConfig.type === "workers"
+			? [...resolvedPluginConfig.environmentNameToWorkerMap.entries()]
+					.filter(
+						([name, worker]) =>
+							name !== resolvedPluginConfig.entryWorkerEnvironmentName &&
+							name !== resolvedPluginConfig.prerenderWorkerEnvironmentName &&
+							!resolveDevOnly(worker.devOnly)
+					)
+					.map(([name]) => name)
+			: [];
+
+	let entryEnvironmentName: string;
+
+	if (isAssetsOnly) {
+		entryEnvironmentName = "client";
 	} else {
-		let entryWorkerConfigPath: string | undefined;
-		const auxiliaryWorkers: DeployConfig["auxiliaryWorkers"] = [];
-
-		for (const environmentName of Object.keys(resolvedPluginConfig.workers)) {
-			const outputDirectory =
-				resolvedViteConfig.environments[environmentName]?.build.outDir;
-
-			assert(
-				outputDirectory,
-				`Unexpected error: ${environmentName} environment output directory is undefined`
-			);
-
-			const configPath = getRelativePathToWorkerConfig(
-				deployConfigDirectory,
-				resolvedViteConfig.root,
-				outputDirectory
-			);
-
-			if (environmentName === resolvedPluginConfig.entryWorkerEnvironmentName) {
-				entryWorkerConfigPath = configPath;
-			} else {
-				auxiliaryWorkers.push({ configPath });
-			}
-		}
-
 		assert(
-			entryWorkerConfigPath,
-			`Unexpected error: entryWorkerConfigPath is undefined`
+			resolvedPluginConfig.type === "workers",
+			`Unexpected error: expected workers config but got ${resolvedPluginConfig.type}`
 		);
-
-		const deployConfig: DeployConfig = {
-			configPath: entryWorkerConfigPath,
-			auxiliaryWorkers,
-		};
-
-		fs.writeFileSync(deployConfigPath, JSON.stringify(deployConfig));
+		entryEnvironmentName = resolvedPluginConfig.entryWorkerEnvironmentName;
 	}
+
+	const deployConfig: DeployConfig = {
+		configPath: resolveConfigPath(entryEnvironmentName),
+		auxiliaryWorkers: auxiliaryWorkerEnvironmentNames.map((name) => ({
+			configPath: resolveConfigPath(name),
+		})),
+		prerenderWorkerConfigPath:
+			resolvedPluginConfig.prerenderWorkerEnvironmentName
+				? resolveConfigPath(resolvedPluginConfig.prerenderWorkerEnvironmentName)
+				: undefined,
+	};
+
+	fs.writeFileSync(deployConfigPath, JSON.stringify(deployConfig));
 }

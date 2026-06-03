@@ -1,19 +1,24 @@
+import assert from "node:assert";
 import crypto from "node:crypto";
 import { readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { UserError } from "@cloudflare/workers-utils";
 import globToRegExp from "glob-to-regexp";
 import { sync as resolveSync } from "resolve";
-import { UserError } from "../errors";
 import { logger } from "../logger";
 import {
 	findAdditionalModules,
 	findAdditionalModuleWatchDirs,
 } from "./find-additional-modules";
 import { isJavaScriptModuleRule, parseRules } from "./rules";
-import type { Config, ConfigModuleRuleType } from "../config";
-import type { Entry } from "./entry";
-import type { CfModule, CfModuleType } from "./worker";
+import type {
+	Entry,
+	CfModule,
+	CfModuleType,
+	Config,
+	ConfigModuleRuleType,
+} from "@cloudflare/workers-utils";
 import type esbuild from "esbuild";
 
 export function flipObject<
@@ -39,6 +44,13 @@ export const RuleTypeToModuleType: Record<ConfigModuleRuleType, CfModuleType> =
 	};
 
 export const ModuleTypeToRuleType = flipObject(RuleTypeToModuleType);
+
+// Strip query string suffixes (e.g. `?module`) from module paths so that
+// file paths and module names don't contain characters invalid on Windows.
+function stripQueryString(modulePath: string): string {
+	const queryIndex = modulePath.indexOf("?");
+	return queryIndex !== -1 ? modulePath.slice(0, queryIndex) : modulePath;
+}
 
 // This is a combination of an esbuild plugin and a mutable array
 // that we use to collect module references from source code.
@@ -198,10 +210,11 @@ export function createModuleCollector(props: {
 
 							// take the file and massage it to a
 							// transportable/manageable format
+							const cleanedPath = stripQueryString(args.path);
+							assert(props.wrangler1xLegacyModuleReferences);
 							const filePath = path.join(
-								// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-								props.wrangler1xLegacyModuleReferences!.rootDirectory,
-								args.path
+								props.wrangler1xLegacyModuleReferences.rootDirectory,
+								cleanedPath
 							);
 							const fileContent = (await readFile(
 								filePath
@@ -211,8 +224,8 @@ export function createModuleCollector(props: {
 								.update(fileContent)
 								.digest("hex");
 							const fileName = props.preserveFileNames
-								? args.path
-								: `./${fileHash}-${path.basename(args.path)}`;
+								? cleanedPath
+								: `./${fileHash}-${path.basename(cleanedPath)}`;
 
 							const { rule } =
 								rulesMatchers.find(({ regex }) => regex.test(fileName)) || {};
@@ -253,13 +266,17 @@ export function createModuleCollector(props: {
 								// take the file and massage it to a
 								// transportable/manageable format
 
-								let filePath = path.join(args.resolveDir, args.path);
+								// Strip query string suffixes (e.g. `?module`) from the import
+								// path. The `?` character is not valid in filenames on Windows
+								// and would cause ENOENT errors when writing modules to disk.
+								const cleanedPath = stripQueryString(args.path);
+								let filePath = path.join(args.resolveDir, cleanedPath);
 
 								// If this was a found additional module, mark it as external.
 								// Note, there's no need to watch the file here as we already
 								// watch all `foundModulePaths` with `wrangler:modules-watch`.
 								if (foundModulePaths.includes(filePath)) {
-									return { path: args.path, external: true };
+									return { path: cleanedPath, external: true };
 								}
 								// For JavaScript module rules, we only register this onResolve
 								// callback if `findAdditionalModules` is true. If we didn't
@@ -273,8 +290,9 @@ export function createModuleCollector(props: {
 								// and if so, validate the import against the package.json exports
 								// and resolve the file path to the correct file.
 								try {
-									const resolved = await build.resolve(args.path, {
-										kind: "import-statement",
+									const resolved = await build.resolve(cleanedPath, {
+										kind: args.kind,
+										importer: args.importer,
 										resolveDir: args.resolveDir,
 										pluginData: {
 											skip: true,
@@ -283,18 +301,18 @@ export function createModuleCollector(props: {
 									if (resolved.path) {
 										filePath = resolved.path;
 									}
-								} catch (ex) {
+								} catch {
 									// We tried, now it'll just fall-through to the previous behaviour
 									// and ENOENT if the absolute file path doesn't exist.
 								}
 
 								// Next try to resolve using the node module resolution algorithm
 								try {
-									const resolved = resolveSync(args.path, {
+									const resolved = resolveSync(cleanedPath, {
 										basedir: args.resolveDir,
 									});
 									filePath = resolved;
-								} catch (e) {
+								} catch {
 									// We tried, now it'll just fall-through to the previous behaviour
 									// and ENOENT if the absolute file path doesn't exist.
 								}
@@ -309,8 +327,8 @@ export function createModuleCollector(props: {
 									.update(fileContent)
 									.digest("hex");
 								const fileName = props.preserveFileNames
-									? args.path
-									: `./${fileHash}-${path.basename(args.path)}`;
+									? cleanedPath
+									: `./${fileHash}-${path.basename(cleanedPath)}`;
 
 								// add the module to the array
 								modules.push({
@@ -360,7 +378,10 @@ export function createModuleCollector(props: {
 										args.path
 									} matched a module rule in your configuration (${JSON.stringify(
 										rule
-									)}), but was ignored because a previous rule with the same type was not marked as \`fallthrough = true\`.`
+									)}), but was ignored because a previous rule with the same type was not marked as \`fallthrough = true\`.`,
+									{
+										telemetryMessage: "module rule ignored without fallthrough",
+									}
 								);
 							}
 						);

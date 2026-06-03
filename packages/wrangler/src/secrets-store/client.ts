@@ -1,4 +1,5 @@
 import { fetchResult } from "../cfetch";
+import type { ComplianceConfig } from "@cloudflare/workers-utils";
 
 // Stores API
 
@@ -15,20 +16,27 @@ export type CreateStore = {
 };
 
 export async function createStore(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	body: CreateStore
 ): Promise<Store> {
-	return await fetchResult(`/accounts/${accountId}/secrets_store/stores`, {
-		method: "POST",
-		body: JSON.stringify(body),
-	});
+	return await fetchResult(
+		complianceConfig,
+		`/accounts/${accountId}/secrets_store/stores`,
+		{
+			method: "POST",
+			body: JSON.stringify(body),
+		}
+	);
 }
 
 export async function deleteStore(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	storeId: string
 ): Promise<Store> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores/${storeId}`,
 		{
 			method: "DELETE",
@@ -37,10 +45,12 @@ export async function deleteStore(
 }
 
 export async function listStores(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
-	urlParams: URLSearchParams
+	urlParams?: URLSearchParams
 ): Promise<Store[]> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores`,
 		{
 			method: "GET",
@@ -63,11 +73,13 @@ export type Secret = {
 };
 
 export async function listSecrets(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	storeId: string,
 	urlParams: URLSearchParams
 ): Promise<Secret[]> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores/${storeId}/secrets`,
 		{
 			method: "GET",
@@ -77,16 +89,39 @@ export async function listSecrets(
 }
 
 export async function getSecret(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	storeId: string,
 	secretId: string
 ): Promise<Secret> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores/${storeId}/secrets/${secretId}`,
 		{
 			method: "GET",
 		}
 	);
+}
+
+export async function getSecretByName(
+	complianceConfig: ComplianceConfig,
+	accountId: string,
+	storeId: string,
+	secretName: string
+): Promise<string | undefined> {
+	const urlSearchParams = new URLSearchParams();
+	urlSearchParams.append("search", secretName);
+
+	const secrets: Secret[] = await listSecrets(
+		complianceConfig,
+		accountId,
+		storeId,
+		urlSearchParams
+	);
+
+	const secret = secrets.find((s) => s.name === secretName);
+
+	return secret?.id;
 }
 
 export type CreateSecret = {
@@ -97,11 +132,13 @@ export type CreateSecret = {
 };
 
 export async function createSecret(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	storeId: string,
 	body: CreateSecret
 ): Promise<Secret[]> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores/${storeId}/secrets`,
 		{
 			method: "POST",
@@ -117,12 +154,14 @@ export type UpdateSecret = {
 };
 
 export async function updateSecret(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	storeId: string,
 	secretId: string,
 	body: UpdateSecret
 ): Promise<Secret> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores/${storeId}/secrets/${secretId}`,
 		{
 			method: "PATCH",
@@ -132,11 +171,13 @@ export async function updateSecret(
 }
 
 export async function deleteSecret(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	storeId: string,
 	secretId: string
 ): Promise<Secret> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores/${storeId}/secrets/${secretId}`,
 		{
 			method: "DELETE",
@@ -151,12 +192,14 @@ export type DuplicateSecret = {
 };
 
 export async function duplicateSecret(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	storeId: string,
 	secretId: string,
 	body: DuplicateSecret
 ): Promise<Secret> {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/secrets_store/stores/${storeId}/secrets/${secretId}/duplicate`,
 		{
 			method: "POST",

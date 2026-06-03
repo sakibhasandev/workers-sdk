@@ -1,9 +1,12 @@
-import assert from "assert";
-import { logRaw } from "@cloudflare/cli";
-import { brandColor, dim } from "@cloudflare/cli/colors";
-import { inputPrompt, spinner } from "@cloudflare/cli/interactive";
+import assert from "node:assert";
+import { logRaw } from "@cloudflare/cli-shared-helpers";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import {
+	inputPrompt,
+	spinner,
+} from "@cloudflare/cli-shared-helpers/interactive";
+import { transformFile } from "@cloudflare/codemod";
 import { runFrameworkGenerator } from "frameworks/index";
-import { transformFile } from "helpers/codemod";
 import { readJSON, usesTypescript, writeJSON } from "helpers/files";
 import { detectPackageManager } from "helpers/packageManagers";
 import { installPackages } from "helpers/packages";
@@ -17,13 +20,14 @@ const t = recast.types.namedTypes;
 const { npm } = detectPackageManager();
 
 const generate = async (ctx: C3Context) => {
-	const variant = await getVariant();
+	const variant = await getVariant(ctx);
 	ctx.args.lang = variant.lang;
 
 	await runFrameworkGenerator(ctx, [
 		ctx.project.name,
 		"--template",
 		variant.value,
+		"--no-immediate",
 	]);
 
 	logRaw("");
@@ -36,7 +40,7 @@ const configure = async (ctx: C3Context) => {
 		doneText: `${brandColor(`installed`)} ${dim("@cloudflare/vite-plugin")}`,
 	});
 
-	await transformViteConfig(ctx);
+	transformViteConfig(ctx);
 
 	if (usesTypescript(ctx)) {
 		updateTsconfigJson();
@@ -53,12 +57,12 @@ function transformViteConfig(ctx: C3Context) {
 			// import {cloudflare} from "@cloudflare/vite-plugin";
 			// ```
 			const lastImportIndex = n.node.body.findLastIndex(
-				(statement) => statement.type === "ImportDeclaration",
+				(statement) => statement.type === "ImportDeclaration"
 			);
 			const lastImport = n.get("body", lastImportIndex);
 			const importAst = b.importDeclaration(
 				[b.importSpecifier(b.identifier("cloudflare"))],
-				b.stringLiteral("@cloudflare/vite-plugin"),
+				b.stringLiteral("@cloudflare/vite-plugin")
 			);
 			lastImport.insertAfter(importAst);
 
@@ -80,7 +84,7 @@ function transformViteConfig(ctx: C3Context) {
 			const pluginsProp = config.properties.find((prop) => isPluginsProp(prop));
 			assert(pluginsProp && t.ArrayExpression.check(pluginsProp.value));
 			pluginsProp.value.elements.push(
-				b.callExpression(b.identifier("cloudflare"), []),
+				b.callExpression(b.identifier("cloudflare"), [])
 			);
 
 			return false;
@@ -89,7 +93,7 @@ function transformViteConfig(ctx: C3Context) {
 }
 
 function isPluginsProp(
-	prop: unknown,
+	prop: unknown
 ): prop is types.namedTypes.ObjectProperty | types.namedTypes.Property {
 	return (
 		(t.Property.check(prop) || t.ObjectProperty.check(prop)) &&
@@ -114,7 +118,7 @@ function updateTsconfigJson() {
 	s.stop(`${brandColor(`updated`)} ${dim(`\`tsconfig.json\``)}`);
 }
 
-async function getVariant() {
+async function getVariant(ctx: C3Context) {
 	const variantsOptions = [
 		{
 			value: "react-ts",
@@ -122,21 +126,41 @@ async function getVariant() {
 			label: "TypeScript",
 		},
 		{
-			value: "react-swc-ts",
-			lang: "ts",
-			label: "TypeScript + SWC",
-		},
-		{
 			value: "react",
 			lang: "js",
 			label: "JavaScript",
 		},
-		{
-			value: "react-swc",
-			lang: "js",
-			label: "JavaScript + SWC",
-		},
 	];
+
+	// If variant is provided via CLI args, use it directly
+	if (ctx.args.variant) {
+		const deprecatedVariantReplacements: Record<string, string> = {
+			"react-swc-ts": "react-ts",
+			"react-swc": "react",
+		};
+
+		const replacement = deprecatedVariantReplacements[ctx.args.variant];
+		if (replacement) {
+			throw new Error(
+				`The React variant "${ctx.args.variant}" is no longer available. Use "${replacement}" instead.`
+			);
+		}
+
+		const selected = variantsOptions.find(
+			(variant) => variant.value === ctx.args.variant
+		);
+		if (!selected) {
+			throw new Error(
+				`Unknown variant "${
+					ctx.args.variant
+				}". Valid variants are: ${variantsOptions
+					.map((v) => v.value)
+					.join(", ")}`
+			);
+		}
+		return selected;
+	}
+
 	const value = await inputPrompt({
 		type: "select",
 		question: "Select a variant:",

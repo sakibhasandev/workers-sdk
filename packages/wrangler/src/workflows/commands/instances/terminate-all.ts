@@ -1,6 +1,6 @@
+import { CommandLineArgsError } from "@cloudflare/workers-utils";
 import { fetchResult } from "../../../cfetch";
 import { createCommand } from "../../../core/create-command";
-import { CommandLineArgsError } from "../../../errors";
 import { logger } from "../../../logger";
 import { requireAuth } from "../../../user";
 
@@ -8,7 +8,7 @@ export const workflowsInstancesTerminateAllCommand = createCommand({
 	metadata: {
 		description: "Terminate all workflow instances",
 		owner: "Product: Workflows",
-		status: "open-beta",
+		status: "stable",
 		hidden: true,
 	},
 
@@ -38,7 +38,8 @@ export const workflowsInstancesTerminateAllCommand = createCommand({
 			!validStatusToTerminate.includes(args.status)
 		) {
 			throw new CommandLineArgsError(
-				`Provided status "${args.status}" is not valid, it must be one of the following: ${validStatusToTerminate.join(", ")}.`
+				`Provided status "${args.status}" is not valid, it must be one of the following: ${validStatusToTerminate.join(", ")}.`,
+				{ telemetryMessage: "workflows instances terminate all invalid status" }
 			);
 		}
 	},
@@ -53,6 +54,7 @@ export const workflowsInstancesTerminateAllCommand = createCommand({
 				: undefined;
 
 		const result = await fetchResult<{ status: "ok" | "already_running" }>(
+			config,
 			`/accounts/${accountId}/workflows/${args.name}/instances/terminate`,
 			{
 				method: "PUT",

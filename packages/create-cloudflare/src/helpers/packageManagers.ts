@@ -1,12 +1,14 @@
-import { existsSync, rmSync } from "fs";
-import path from "path";
-import { brandColor, dim } from "@cloudflare/cli/colors";
+import { existsSync, rmSync } from "node:fs";
+import nodePath from "node:path";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import { runCommand } from "@cloudflare/cli-shared-helpers/command";
 import semver from "semver";
 import whichPmRuns from "which-pm-runs";
-import { runCommand } from "./command";
+import {
+	testPackageManager,
+	testPackageManagerVersion,
+} from "../../e2e/helpers/constants";
 import type { C3Context } from "types";
-
-export type PmName = "pnpm" | "npm" | "yarn" | "bun";
 
 /**
  * Detects the package manager which was used to invoke C3 and provides a map of its associated commands.
@@ -18,13 +20,13 @@ export type PmName = "pnpm" | "npm" | "yarn" | "bun";
  * - dlx: executing packages that are not installed locally (ex. `pnpm dlx create-solid`)
  */
 export const detectPackageManager = () => {
-	const pmInfo = whichPmRuns() as { name: PmName; version: string } | undefined;
+	const pmInfo = whichPmRuns();
 
 	let { name, version } = pmInfo ?? { name: "npm", version: "0.0.0" };
 
-	if (process.env.TEST_PM && process.env.TEST_PM_VERSION) {
-		name = process.env.TEST_PM as PmName;
-		version = process.env.TEST_PM_VERSION;
+	if (testPackageManager && testPackageManagerVersion) {
+		name = testPackageManager;
+		version = testPackageManagerVersion;
 		process.env.npm_config_user_agent = `${name}/${version}`;
 	}
 
@@ -37,7 +39,7 @@ export const detectPackageManager = () => {
 					npm: "pnpm",
 					npx: "pnpm",
 					dlx: ["pnpm", "dlx"],
-				};
+				} as const;
 			}
 			return {
 				name,
@@ -45,7 +47,7 @@ export const detectPackageManager = () => {
 				npm: "pnpm",
 				npx: "pnpx",
 				dlx: ["pnpx"],
-			};
+			} as const;
 		case "yarn":
 			if (semver.gt(version, "2.0.0")) {
 				return {
@@ -54,7 +56,7 @@ export const detectPackageManager = () => {
 					npm: "yarn",
 					npx: "yarn",
 					dlx: ["yarn", "dlx"],
-				};
+				} as const;
 			}
 			return {
 				name,
@@ -62,7 +64,7 @@ export const detectPackageManager = () => {
 				npm: "yarn",
 				npx: "yarn",
 				dlx: ["yarn"],
-			};
+			} as const;
 		case "bun":
 			return {
 				name,
@@ -70,7 +72,7 @@ export const detectPackageManager = () => {
 				npm: "bun",
 				npx: "bunx",
 				dlx: ["bunx"],
-			};
+			} as const;
 
 		case "npm":
 		default:
@@ -80,7 +82,7 @@ export const detectPackageManager = () => {
 				npm: "npm",
 				npx: "npx",
 				dlx: ["npx"],
-			};
+			} as const;
 	}
 };
 
@@ -101,12 +103,26 @@ export const rectifyPmMismatch = async (ctx: C3Context) => {
 		return;
 	}
 
-	const nodeModulesPath = path.join(ctx.project.path, "node_modules");
+	const nodeModulesPath = nodePath.join(ctx.project.path, "node_modules");
 	if (existsSync(nodeModulesPath)) {
-		rmSync(nodeModulesPath, { recursive: true });
+		/* eslint-disable-next-line workers-sdk/no-direct-recursive-rm --
+		   Note: this is intentionally inlined rather than importing `removeDirSync`
+		   from `@cloudflare/workers-utils`. That package's barrel export pulls in CJS
+		   dependencies (e.g. `xdg-app-paths`) that break when Vite bundles code into
+		   ESM — the shimmed `require()` calls throw "Dynamic require of 'path' is not
+		   supported". While the production build (esbuild → CJS) would handle this
+		   fine, the e2e tests import this file through Vitest which uses Vite's bundler.
+		   Keep aligned with `removeDirSync()` in `packages/workers-utils/src/fs-helpers.ts`.
+		*/
+		rmSync(nodeModulesPath, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 100,
+		});
 	}
 
-	const lockfilePath = path.join(ctx.project.path, "package-lock.json");
+	const lockfilePath = nodePath.join(ctx.project.path, "package-lock.json");
 	if (existsSync(lockfilePath)) {
 		rmSync(lockfilePath);
 	}
@@ -127,13 +143,13 @@ export const detectPmMismatch = (ctx: C3Context) => {
 		case "npm":
 			return false;
 		case "yarn":
-			return !existsSync(path.join(projectPath, "yarn.lock"));
+			return !existsSync(nodePath.join(projectPath, "yarn.lock"));
 		case "pnpm":
-			return !existsSync(path.join(projectPath, "pnpm-lock.yaml"));
+			return !existsSync(nodePath.join(projectPath, "pnpm-lock.yaml"));
 		case "bun":
 			return (
-				!existsSync(path.join(projectPath, "bun.lockb")) &&
-				!existsSync(path.join(projectPath, "bun.lock"))
+				!existsSync(nodePath.join(projectPath, "bun.lockb")) &&
+				!existsSync(nodePath.join(projectPath, "bun.lock"))
 			);
 	}
 };

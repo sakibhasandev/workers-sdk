@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.0
+
+### Minor Changes
+
+- [#13726](https://github.com/cloudflare/workers-sdk/pull/13726) [`b5ac54b`](https://github.com/cloudflare/workers-sdk/commit/b5ac54baa4a6e40b7352f7d3ed0d3531a37a5e8f) Thanks [@penalosa](https://github.com/penalosa)! - Hard fail on Node.js < 22
+
+  Wrangler no longer supports Node.js 20.x, as it reached end-of-life on 2026-04-30. The minimum supported Node.js version is now 22.0.0. See https://github.com/nodejs/release?tab=readme-ov-file#end-of-life-releases.
+
+## 0.4.2
+
+### Patch Changes
+
+- [#11898](https://github.com/cloudflare/workers-sdk/pull/11898) [`c17e971`](https://github.com/cloudflare/workers-sdk/commit/c17e971af01a9bcead0aca409666e29417f4636a) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Bundle more third-party dependencies to reduce supply chain risk
+
+  Previously, several small utility packages were listed as runtime dependencies and
+  installed separately. These are now bundled directly into the published packages,
+  reducing the number of external dependencies users need to trust.
+
+  Bundled dependencies:
+
+  - **miniflare**: `acorn`, `acorn-walk`, `exit-hook`, `glob-to-regexp`, `stoppable`
+  - **kv-asset-handler**: `mime`
+  - **vite-plugin-cloudflare**: `@remix-run/node-fetch-server`, `defu`, `get-port`, `picocolors`, `tinyglobby`
+  - **vitest-pool-workers**: `birpc`, `devalue`, `get-port`, `semver`
+
+## 0.4.1
+
+### Patch Changes
+
+- [#11348](https://github.com/cloudflare/workers-sdk/pull/11348) [`4d61fae`](https://github.com/cloudflare/workers-sdk/commit/4d61faed1c0c5cb0f7a7f085d31c3dca9a83c802) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - refactor to generate ESM modules and support Node 22+
+
 ## 0.4.0
 
 ### Minor Changes

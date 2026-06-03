@@ -1,11 +1,12 @@
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { endEventLoop } from "../helpers/end-event-loop";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { clearDialogs, mockConfirm } from "../helpers/mock-dialogs";
 import { useMockIsTTY } from "../helpers/mock-istty";
 import { msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
 
 describe("pages project delete", () => {
@@ -29,7 +30,7 @@ describe("pages project delete", () => {
 		clearDialogs();
 	});
 
-	it("should delete a project with the given name", async () => {
+	it("should delete a project with the given name", async ({ expect }) => {
 		msw.use(
 			http.delete(
 				"*/accounts/:accountId/pages/projects/:projectName",
@@ -58,20 +59,25 @@ describe("pages project delete", () => {
 		await runWrangler("pages project delete some-project-name");
 
 		expect(std.out).toMatchInlineSnapshot(`
-		"Deleting some-project-name
-		Successfully deleted some-project-name"
-	`);
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Deleting some-project-name
+			Successfully deleted some-project-name"
+		`);
 	});
 
-	it("should error if no project name is specified", async () => {
+	it("should error if no project name is specified", async ({ expect }) => {
 		await expect(
 			runWrangler("pages project delete")
 		).rejects.toThrowErrorMatchingInlineSnapshot(
-			`[Error: Missing required argument: project-name]`
+			`[Error: Not enough non-option arguments: got 0, need at least 1]`
 		);
 	});
 
-	it("should not delete a project if confirmation refused", async () => {
+	it("should not delete a project if confirmation refused", async ({
+		expect,
+	}) => {
 		mockConfirm({
 			text: `Are you sure you want to delete "some-project-name-2"? This action cannot be undone.`,
 			result: false,
@@ -79,10 +85,16 @@ describe("pages project delete", () => {
 
 		await runWrangler("pages project delete some-project-name-2");
 
-		expect(std.out).toMatchInlineSnapshot(`""`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────"
+		`);
 	});
 
-	it("should delete a project without asking if --yes provided", async () => {
+	it("should delete a project without asking if --yes provided", async ({
+		expect,
+	}) => {
 		msw.use(
 			http.delete(
 				"*/accounts/:accountId/pages/projects/:projectName",
@@ -106,12 +118,17 @@ describe("pages project delete", () => {
 		await runWrangler("pages project delete some-project-name -y");
 
 		expect(std.out).toMatchInlineSnapshot(`
-		"Deleting some-project-name
-		Successfully deleted some-project-name"
-	`);
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Deleting some-project-name
+			Successfully deleted some-project-name"
+		`);
 	});
 
-	it("should override cached accountId with CLOUDFLARE_ACCOUNT_ID environmental variable if provided", async () => {
+	it("should override cached accountId with CLOUDFLARE_ACCOUNT_ID environmental variable if provided", async ({
+		expect,
+	}) => {
 		msw.use(
 			http.delete(
 				"*/accounts/:accountId/pages/projects/:projectName",

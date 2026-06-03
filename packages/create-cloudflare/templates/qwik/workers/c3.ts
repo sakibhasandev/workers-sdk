@@ -1,10 +1,14 @@
-import { crash, endSection } from "@cloudflare/cli";
-import { brandColor } from "@cloudflare/cli/colors";
-import { spinner } from "@cloudflare/cli/interactive";
+import { endSection } from "@cloudflare/cli-shared-helpers";
+import { brandColor } from "@cloudflare/cli-shared-helpers/colors";
+import {
+	quoteShellArgs,
+	runCommand,
+} from "@cloudflare/cli-shared-helpers/command";
+import { spinner } from "@cloudflare/cli-shared-helpers/interactive";
+import { transformFile } from "@cloudflare/codemod";
 import { runFrameworkGenerator } from "frameworks/index";
-import { loadTemplateSnippets, transformFile } from "helpers/codemod";
-import { quoteShellArgs, runCommand } from "helpers/command";
-import { removeFile, usesTypescript } from "helpers/files";
+import { loadTemplateSnippets } from "helpers/codemod";
+import { usesTypescript } from "helpers/files";
 import { detectPackageManager } from "helpers/packageManagers";
 import * as recast from "recast";
 import type { TemplateConfig } from "../../../src/templates";
@@ -17,19 +21,19 @@ const generate = async (ctx: C3Context) => {
 };
 
 const configure = async (ctx: C3Context) => {
-	// Add the pages integration
+	// Add the workers integration
 	// For some reason `pnpx qwik add` fails for qwik so we use `pnpm qwik add` instead.
-	const cmd = [name === "pnpm" ? npm : npx, "qwik", "add", "cloudflare-pages"];
+	const cmd = [
+		name === "pnpm" ? npm : npx,
+		"qwik",
+		"add",
+		"cloudflare-workers",
+		"--skipConfirmation=true",
+	];
 	endSection(`Running ${quoteShellArgs(cmd)}`);
 	await runCommand(cmd);
 
-	// Remove the extraneous Pages files
-	removeFile("./public/_headers");
-	removeFile("./public/_redirects");
-	removeFile("./public/_routes.json");
-
 	addBindingsProxy(ctx);
-	populateCloudflareEnv();
 };
 
 const addBindingsProxy = (ctx: C3Context) => {
@@ -49,7 +53,7 @@ const addBindingsProxy = (ctx: C3Context) => {
 		// Insert the env declaration after the last import (but before the rest of the body)
 		visitProgram: function (n) {
 			const lastImportIndex = n.node.body.findLastIndex(
-				(t) => t.type === "ImportDeclaration",
+				(t) => t.type === "ImportDeclaration"
 			);
 			const lastImport = n.get("body", lastImportIndex);
 			lastImport.insertAfter(...snippets.getPlatformProxyTs);
@@ -81,7 +85,7 @@ const addBindingsProxy = (ctx: C3Context) => {
 			}
 
 			if (configArgument.type !== "ObjectExpression") {
-				crash("Failed to update `vite.config.ts`");
+				throw new Error("Failed to update `vite.config.ts`");
 			}
 
 			// Add the `platform` object to the object
@@ -92,40 +96,6 @@ const addBindingsProxy = (ctx: C3Context) => {
 	});
 
 	s.stop(`${brandColor("updated")} \`vite.config.ts\``);
-};
-
-const populateCloudflareEnv = () => {
-	const entrypointPath = "src/entry.cloudflare-pages.tsx";
-
-	const s = spinner();
-	s.start(`Updating \`${entrypointPath}\``);
-
-	transformFile(entrypointPath, {
-		visitTSInterfaceDeclaration: function (n) {
-			const b = recast.types.builders;
-			const id = n.node.id as recast.types.namedTypes.Identifier;
-			if (id.name !== "QwikCityPlatform") {
-				this.traverse(n);
-			}
-
-			const newBody = [
-				["env", "Env"],
-				// Qwik doesn't supply `cf` to the platform object. Should they do so, uncomment this
-				// ["cf", "CfProperties"],
-			].map(([varName, type]) =>
-				b.tsPropertySignature(
-					b.identifier(varName),
-					b.tsTypeAnnotation(b.tsTypeReference(b.identifier(type))),
-				),
-			);
-
-			n.node.body.body = newBody;
-
-			return false;
-		},
-	});
-
-	s.stop(`${brandColor("updated")} \`${entrypointPath}\``);
 };
 
 const config: TemplateConfig = {
@@ -150,5 +120,6 @@ const config: TemplateConfig = {
 	devScript: "dev",
 	deployScript: "deploy",
 	previewScript: "preview",
+	workersTypes: "installed",
 };
 export default config;

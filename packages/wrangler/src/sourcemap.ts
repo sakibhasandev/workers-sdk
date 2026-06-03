@@ -1,7 +1,7 @@
 import assert from "node:assert";
 import url from "node:url";
+import { maybeGetFile } from "@cloudflare/workers-shared";
 import { getFreshSourceMapSupport } from "miniflare";
-import { maybeGetFile } from "./utils/filesystem";
 import type { Options } from "@cspotcode/source-map-support";
 import type Protocol from "devtools-protocol";
 
@@ -67,7 +67,6 @@ function getSourceMappingPrepareStackTrace(
 		return sourceMappingPrepareStackTrace;
 	}
 
-	// eslint-disable-next-line @typescript-eslint/consistent-type-imports
 	const support: typeof import("@cspotcode/source-map-support") =
 		getFreshSourceMapSupport();
 	const originalPrepareStackTrace = Error.prepareStackTrace;
@@ -190,7 +189,7 @@ export function getSourceMappedString(
 const CALL_SITE_REGEXP =
 	// Validation errors from `wrangler deploy` have a 2 space indent, whereas
 	// regular stack traces have a 4 space indent.
-	// eslint-disable-next-line no-control-regex
+	// eslint-disable-next-line no-control-regex -- Intentionally matches ANSI escape sequences in stack traces
 	/^(?:\s+(?:\x1B\[\d+m)?'?)? {2,4}at (?:(.+?)\s+\()?(?:(.+?):(\d+)(?::(\d+))?|([^)]+))\)?/gm;
 function lineMatchToCallSite(lineMatch: RegExpMatchArray): CallSite {
 	let object: string | null = null;
@@ -231,7 +230,7 @@ function lineMatchToCallSite(lineMatch: RegExpMatchArray): CallSite {
 		typeName,
 		functionName,
 		methodName,
-		fileName: lineMatch[2] || null,
+		fileName: lineMatch[2],
 		lineNumber: parseInt(lineMatch[3]) || null,
 		columnNumber: parseInt(lineMatch[4]) || null,
 		native: isNative,
@@ -242,7 +241,7 @@ interface CallSiteOptions {
 	typeName: string | null;
 	functionName: string | null;
 	methodName: string | null;
-	fileName: string | null;
+	fileName: string;
 	lineNumber: number | null;
 	columnNumber: number | null;
 	native: boolean;
@@ -253,14 +252,25 @@ interface CallSiteOptions {
 // https://github.com/felixge/node-stack-trace/blob/4c41a4526e74470179b3b6dd5d75191ca8c56c17/index.js
 class CallSite implements NodeJS.CallSite {
 	constructor(private readonly opts: CallSiteOptions) {}
-
+	getScriptHash(): string {
+		throw new Error("Method not implemented.");
+	}
+	getEnclosingColumnNumber(): number {
+		throw new Error("Method not implemented.");
+	}
+	getEnclosingLineNumber(): number {
+		throw new Error("Method not implemented.");
+	}
+	getPosition(): number {
+		throw new Error("Method not implemented.");
+	}
 	getThis(): unknown {
 		return null;
 	}
 	getTypeName(): string | null {
 		return this.opts.typeName;
 	}
-	// eslint-disable-next-line @typescript-eslint/ban-types
+	// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type -- V8 CallSite interface requires Function return type
 	getFunction(): Function | undefined {
 		return undefined;
 	}
@@ -270,10 +280,10 @@ class CallSite implements NodeJS.CallSite {
 	getMethodName(): string | null {
 		return this.opts.methodName;
 	}
-	getFileName(): string | undefined {
-		return this.opts.fileName ?? undefined;
+	getFileName(): string | null {
+		return this.opts.fileName ?? null;
 	}
-	getScriptNameOrSourceURL(): string | null {
+	getScriptNameOrSourceURL(): string {
 		return this.opts.fileName;
 	}
 	getLineNumber(): number | null {

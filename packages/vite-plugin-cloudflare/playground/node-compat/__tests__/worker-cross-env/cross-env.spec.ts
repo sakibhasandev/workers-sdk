@@ -1,7 +1,11 @@
-import { expect, test } from "vitest";
-import { getTextResponse } from "../../../__test-utils__";
+import { test, vi } from "vitest";
+import { getTextResponse, WAIT_FOR_OPTIONS } from "../../../__test-utils__";
 
-test("import unenv aliased 3rd party packages (e.g. cross-env)", async () => {
-	const result = await getTextResponse();
-	expect(result).toBe(`"OK!"`);
+test("import unenv aliased 3rd party packages (e.g. cross-env)", async ({
+	expect,
+}) => {
+	await vi.waitFor(
+		async () => expect(await getTextResponse()).toBe(`"OK!"`),
+		WAIT_FOR_OPTIONS
+	);
 });

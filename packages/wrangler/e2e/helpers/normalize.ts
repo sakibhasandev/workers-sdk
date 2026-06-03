@@ -1,4 +1,6 @@
-import stripAnsi from "strip-ansi";
+import { stripVTControlCharacters } from "node:util";
+import { CLOUDFLARE_ACCOUNT_ID } from "./account-id";
+import type { ExpectStatic } from "vitest";
 
 export function normalizeOutput(
 	stdout: string,
@@ -13,19 +15,22 @@ export function normalizeOutput(
 		removeUUID,
 		removeBinding,
 		removeKVId,
+		normalizeTempResourceName,
 		normalizeErrorMarkers,
 		replaceByte,
 		stripTrailingWhitespace,
 		normalizeSlashes,
 		normalizeTempDirs,
 		stripTimings,
-		stripAnsi,
+		stripVTControlCharacters,
 		removeTimestamp,
 		stripDevTimings,
 		stripEmptyNewlines,
 		normalizeDebugLogFilepath,
 		removeLocalPort,
 		removeZeroWidthSpaces,
+		normalizeAuthor,
+		normalizeAccountId,
 	];
 	for (const f of functions) {
 		stdout = f(stdout);
@@ -43,7 +48,7 @@ function stripEmptyNewlines(stdout: string): string {
 }
 
 function stripDevTimings(stdout: string): string {
-	return stdout.replace(/\(\dms\)/g, "(TIMINGS)");
+	return stdout.replace(/\(\d+ms\)/g, "(TIMINGS)");
 }
 
 function removeWorkerPreviewUrl(str: string) {
@@ -61,8 +66,15 @@ function removeWorkersDev(str: string) {
 
 function removeTimestamp(str: string) {
 	return str
-		.replace(/\d\d\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+?Z/g, "TIMESTAMP")
-		.replace(/\d\d:\d\d:\d\d/g, "TIMESTAMP");
+		.replaceAll(/\d\d\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.\d+?Z/g, "TIMESTAMP")
+		.replaceAll(/\d\d:\d\d:\d\d/g, "TIMESTAMP");
+}
+
+function normalizeTempResourceName(str: string) {
+	return str.replace(
+		/tmp[-_]e2e[-_](\d{4}[-_]\d{2}[-_]\d{2})[-_](\w+)[-_]([a-z0-9-]+)/g,
+		"tmp-e2e-$1-$2-00000000-0000-0000-0000-000000000000"
+	);
 }
 
 function removeUUID(str: string) {
@@ -71,6 +83,7 @@ function removeUUID(str: string) {
 		"00000000-0000-0000-0000-000000000000"
 	);
 }
+
 function removeBinding(str: string) {
 	return str.replace(
 		/\w{8}_\w{4}_\w{4}_\w{4}_\w{12}/g,
@@ -86,7 +99,7 @@ function removeKVId(str: string) {
  * Remove the Wrangler version/update check header
  */
 function removeVersionHeader(str: string): string {
-	const header = str.match(/⛅️ wrangler .*\n----+\n/);
+	const header = str.match(/⛅️ wrangler .*\n───+\n/);
 	if (header !== null && header.index) {
 		return str.slice(header.index + header[0].length);
 	} else {
@@ -156,7 +169,7 @@ function replaceByte(stdout: string): string {
  * Temp directories are created with random names, so we replace all comments temp dirs in them
  */
 function normalizeTempDirs(stdout: string): string {
-	return stdout.replaceAll(/\/\/.+\/wrangler-smoke-.+/g, "//tmpdir");
+	return stdout.replaceAll(/\S+\/wrangler-smoke-.+/g, "/tmpdir");
 }
 
 /**
@@ -176,8 +189,8 @@ function normalizeDebugLogFilepath(stdout: string): string {
  */
 function removeLocalPort(stdout: string): string {
 	return stdout.replace(
-		/\[wrangler:inf\] Ready on (https?):\/\/(.+):\d{4,5}/,
-		"[wrangler:inf] Ready on $1://$2:<PORT>"
+		/\[wrangler:info\] Ready on (https?):\/\/(.+):\d{4,5}/,
+		"[wrangler:info] Ready on $1://<HOST>:<PORT>"
 	);
 }
 
@@ -193,4 +206,55 @@ function removeStandardPricingWarning(stdout: string): string {
 
 function removeZeroWidthSpaces(stdout: string) {
 	return stdout.replaceAll(/\u200a|\u200b/g, " ");
+}
+
+function normalizeAuthor(stdout: string) {
+	return stdout.replaceAll(/^Author:.*$/gm, "Author:      person@example.com");
+}
+
+function normalizeAccountId(stdout: string) {
+	return CLOUDFLARE_ACCOUNT_ID
+		? stdout.replaceAll(CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID")
+		: stdout;
+}
+
+/**
+ * Checks the logs that are output during asset upload to ensure they are correct.
+ *
+ * @param output The output from the `wrangler deploy` command.
+ * @param files An array of file paths that should be uploaded.
+ * @param includeDebug Whether to check for debug logs as well. Default is false.
+ */
+export function validateAssetUploadLogs(
+	expect: ExpectStatic,
+	output: { stdout: string },
+	files: string[],
+	{ includeDebug = false } = {}
+) {
+	const normalizedStdout = normalizeOutput(output.stdout);
+	const plural = files.length === 1 ? "" : "s";
+
+	expect(normalizedStdout).toContain(`🌀 Building list of assets...`);
+	expect(normalizedStdout).toMatch(
+		/✨ Read \d+ files? from the assets directory \/tmpdir/
+	);
+
+	expect(normalizedStdout).toContain("🌀 Starting asset upload...");
+	expect(normalizedStdout).toContain(
+		`🌀 Found ${files.length} new or modified static asset${plural} to upload. Proceeding with upload...`
+	);
+
+	// We can't guarantee that the files will be uploaded one at a time
+	expect(normalizedStdout).toMatch(
+		new RegExp(`Uploaded \\d+ of ${files.length} asset${plural}`)
+	);
+	if (includeDebug) {
+		for (let i = 1; i <= files.length; i++) {
+			expect(normalizedStdout).toContain(`✨ ${files[i - 1]}`);
+		}
+	}
+
+	expect(normalizedStdout).toContain(
+		`✨ Success! Uploaded ${files.length} file${plural} (TIMINGS)`
+	);
 }

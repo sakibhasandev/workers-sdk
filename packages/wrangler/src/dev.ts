@@ -1,57 +1,30 @@
 import assert from "node:assert";
 import events from "node:events";
-import path from "node:path";
-import util from "node:util";
+import {
+	configFileName,
+	formatConfigSnippet,
+	UserError,
+} from "@cloudflare/workers-utils";
+import { getHostFromRoute } from "@cloudflare/workers-utils";
 import { isWebContainer } from "@webcontainer/env";
-import { DevEnv } from "./api";
-import { MultiworkerRuntimeController } from "./api/startDevWorker/MultiworkerRuntimeController";
-import { NoOpProxyController } from "./api/startDevWorker/NoOpProxyController";
-import {
-	convertCfWorkerInitBindingstoBindings,
-	extractBindingsOfType,
-} from "./api/startDevWorker/utils";
+import { convertConfigToBindings } from "./api/startDevWorker/utils";
 import { getAssetsOptions } from "./assets";
-import { configFileName, formatConfigSnippet } from "./config";
 import { createCommand } from "./core/create-command";
-import { validateRoutes } from "./deploy/deploy";
-import { validateNodeCompatMode } from "./deployment-bundle/node-compat";
-import { devRegistry, getBoundRegisteredWorkers } from "./dev-registry";
+import { validateRoutes } from "./deployment-bundle/resolve-config-args";
 import { getVarsForDev } from "./dev/dev-vars";
-import registerDevHotKeys from "./dev/hotkeys";
-import { maybeRegisterLocalWorker } from "./dev/local";
-import { UserError } from "./errors";
-import isInteractive from "./is-interactive";
+import { startDev } from "./dev/start-dev";
 import { logger } from "./logger";
-import { getSiteAssetPaths } from "./sites";
-import { loginOrRefreshIfRequired, requireApiToken, requireAuth } from "./user";
-import {
-	collectKeyValues,
-	collectPlainTextVars,
-} from "./utils/collectKeyValues";
-import { mergeWithOverride } from "./utils/mergeWithOverride";
-import { getHostFromRoute } from "./zones";
+import type { StartDevWorkerInput, Trigger } from "./api";
+import type { EnablePagesAssetsServiceBindingOptions } from "./miniflare-cli/types";
 import type {
-	AsyncHook,
-	ReloadCompleteEvent,
-	StartDevWorkerInput,
-	Trigger,
-} from "./api";
-import type { Config, Environment } from "./config";
-import type {
-	EnvironmentNonInheritable,
+	Binding,
+	CfModule,
+	Config,
+	Environment,
 	Route,
 	Rule,
-} from "./config/environment";
-import type { INHERIT_SYMBOL } from "./deployment-bundle/bindings";
-import type {
-	CfKvNamespace,
-	CfModule,
-	CfWorkerInit,
-} from "./deployment-bundle/worker";
-import type { WorkerRegistry } from "./dev-registry";
-import type { CfAccount } from "./dev/create-worker-preview";
-import type { EnablePagesAssetsServiceBindingOptions } from "./miniflare-cli/types";
-import type { watch } from "chokidar";
+} from "@cloudflare/workers-utils";
+import type { EventName } from "chokidar/handler.js";
 import type { Json } from "miniflare";
 
 export const dev = createCommand({
@@ -60,12 +33,15 @@ export const dev = createCommand({
 		overrideExperimentalFlags: (args) => ({
 			MULTIWORKER: Array.isArray(args.config),
 			RESOURCES_PROVISION: args.experimentalProvision ?? false,
+			AUTOCREATE_RESOURCES: args.experimentalAutoCreate,
 		}),
+		printMetricsBanner: true,
 	},
 	metadata: {
 		description: "👂 Start a local server for developing your Worker",
 		owner: "Workers: Authoring and Testing",
 		status: "stable",
+		category: "Compute & AI",
 	},
 	positionalArgs: ["script"],
 	args: {
@@ -126,6 +102,10 @@ export const dev = createCommand({
 			describe: "Port for devtools to connect to",
 			type: "number",
 		},
+		"inspector-ip": {
+			describe: "IP address for devtools to connect to",
+			type: "string",
+		},
 		routes: {
 			describe: "Routes to upload",
 			alias: "route",
@@ -156,6 +136,11 @@ export const dev = createCommand({
 			type: "string",
 			describe:
 				"Host to act as origin in local mode, defaults to dev.host or route",
+		},
+		"enable-containers": {
+			type: "boolean",
+			describe: "Whether to build and enable containers during development",
+			hidden: true,
 		},
 		site: {
 			describe: "Root folder of static assets for Workers Sites",
@@ -228,10 +213,8 @@ export const dev = createCommand({
 		},
 		local: {
 			alias: "l",
-			describe: "Run on my machine",
+			describe: "Run locally with remote bindings disabled",
 			type: "boolean",
-			deprecated: true,
-			hidden: true,
 		},
 		minify: {
 			describe: "Minify the script",
@@ -272,29 +255,38 @@ export const dev = createCommand({
 				"Show interactive dev session (defaults to true if the terminal supports interactivity)",
 			type: "boolean",
 		},
-		"experimental-vectorize-bind-to-prod": {
+		types: {
+			describe: "Generate types from your Worker configuration",
 			type: "boolean",
-			describe:
-				"Bind to production Vectorize indexes in local development mode",
-			default: false,
 		},
-		"experimental-images-local-mode": {
-			type: "boolean",
+		tunnel: {
 			describe:
-				"Use a local lower-fidelity implementation of the Images binding",
-			default: false,
+				"Expose your local dev server via a Cloudflare Tunnel. Use `--tunnel` for a Quick Tunnel and `--tunnel-name` with `--tunnel` for a named tunnel.",
+			type: "boolean",
+		},
+		"tunnel-name": {
+			describe:
+				"Use an existing named Cloudflare Tunnel when `--tunnel` is enabled.",
+			type: "string",
 		},
 	},
 	async validateArgs(args) {
 		if (args.nodeCompat) {
 			throw new UserError(
-				`The --node-compat flag is no longer supported as of Wrangler v4. Instead, use the \`nodejs_compat\` compatibility flag. This includes the functionality from legacy \`node_compat\` polyfills and natively implemented Node.js APIs. See https://developers.cloudflare.com/workers/runtime-apis/nodejs for more information.`
+				`The --node-compat flag is no longer supported as of Wrangler v4. Instead, use the \`nodejs_compat\` compatibility flag. This includes the functionality from legacy \`node_compat\` polyfills and natively implemented Node.js APIs. See https://developers.cloudflare.com/workers/runtime-apis/nodejs for more information.`,
+				{ telemetryMessage: "dev command node compat unsupported" }
 			);
 		}
 		if (args.liveReload && args.remote) {
 			throw new UserError(
-				"--live-reload is only supported in local mode. Please just use one of either --remote or --live-reload."
+				"--live-reload is only supported in local mode. Please just use one of either --remote or --live-reload.",
+				{ telemetryMessage: "dev command live reload remote conflict" }
 			);
+		}
+		if (args.tunnel && args.remote) {
+			throw new UserError("--tunnel is only supported in local mode.", {
+				telemetryMessage: "dev command tunnel remote conflict",
+			});
 		}
 
 		if (isWebContainer()) {
@@ -305,34 +297,27 @@ export const dev = createCommand({
 			process.exitCode = 1;
 			return;
 		}
-
-		if (args.remote) {
-			const isLoggedIn = await loginOrRefreshIfRequired();
-			if (!isLoggedIn) {
-				throw new UserError(
-					"You must be logged in to use wrangler dev in remote mode. Try logging in, or run wrangler dev --local."
-				);
-			}
-		}
 	},
 	async handler(args) {
 		const devInstance = await startDev(args);
 		assert(devInstance.devEnv !== undefined);
 		await events.once(devInstance.devEnv, "teardown");
 		await Promise.all(devInstance.secondary.map((d) => d.teardown()));
-		if (devInstance.teardownRegistryPromise) {
-			const teardownRegistry = await devInstance.teardownRegistryPromise;
-			await teardownRegistry(devInstance.devEnv.config.latestConfig?.name);
-		}
+
 		devInstance.unregisterHotKeys?.();
 	},
 });
 
 export type AdditionalDevProps = {
+	/**
+	 * Default vars that can be overridden by config vars.
+	 * Useful for injecting environment-specific defaults like CF_PAGES variables.
+	 */
+	defaultBindings?: Record<string, Extract<Binding, { type: "plain_text" }>>;
 	vars?: Record<string, string | Json>;
 	kv?: {
 		binding: string;
-		id?: string | typeof INHERIT_SYMBOL;
+		id?: string;
 		preview_id?: string;
 	}[];
 	durableObjects?: {
@@ -349,19 +334,23 @@ export type AdditionalDevProps = {
 	}[];
 	r2?: {
 		binding: string;
-		bucket_name?: string | typeof INHERIT_SYMBOL;
+		bucket_name?: string;
 		preview_bucket_name?: string;
 		jurisdiction?: string;
 	}[];
 	ai?: {
 		binding: string;
 	};
+	stream?: {
+		binding: string;
+		remote?: boolean;
+	};
 	version_metadata?: {
 		binding: string;
 	};
 	d1Databases?: Array<
 		Omit<Environment["d1_databases"][number], "database_id"> & {
-			database_id?: string | typeof INHERIT_SYMBOL;
+			database_id?: string;
 		}
 	>;
 	processEntrypoint?: boolean;
@@ -371,7 +360,7 @@ export type AdditionalDevProps = {
 	showInteractiveDevSession?: boolean;
 };
 
-type DevArguments = (typeof dev)["args"];
+type DevArguments = Omit<(typeof dev)["args"], "installSkills">;
 
 export type StartDevOptions = DevArguments &
 	// These options can be passed in directly when called with the `wrangler.dev()` API.
@@ -383,383 +372,11 @@ export type StartDevOptions = DevArguments &
 		enablePagesAssetsServiceBinding?: EnablePagesAssetsServiceBindingOptions;
 		onReady?: (ip: string, port: number) => void;
 		enableIpc?: boolean;
+		dockerPath?: string;
+		containerEngine?: string;
+		/** Set to `false` to disable persistence. When `true` or `undefined`, uses default persistence path. */
+		persist?: boolean;
 	};
-
-async function updateDevEnvRegistry(
-	devEnv: DevEnv,
-	registry: WorkerRegistry | undefined
-) {
-	// Make sure we're not patching an empty config
-	if (!devEnv.config.latestConfig) {
-		await events.once(devEnv.config, "configUpdate");
-	}
-
-	let boundWorkers = await getBoundRegisteredWorkers(
-		{
-			name: devEnv.config.latestConfig?.name,
-			services: extractBindingsOfType(
-				"service",
-				devEnv.config.latestConfig?.bindings
-			),
-			durableObjects: {
-				bindings: extractBindingsOfType(
-					"durable_object_namespace",
-					devEnv.config.latestConfig?.bindings
-				),
-			},
-		},
-		registry
-	);
-
-	// Normalise an empty registry to undefined
-	if (boundWorkers && Object.keys(boundWorkers).length === 0) {
-		boundWorkers = undefined;
-	}
-
-	if (
-		util.isDeepStrictEqual(
-			boundWorkers,
-			devEnv.config.latestConfig?.dev?.registry
-		)
-	) {
-		return;
-	}
-
-	void devEnv.config.patch({
-		dev: {
-			...devEnv.config.latestConfig?.dev,
-			registry: boundWorkers,
-		},
-	});
-}
-
-async function getPagesAssetsFetcher(
-	options: EnablePagesAssetsServiceBindingOptions | undefined
-): Promise<StartDevWorkerInput["bindings"] | undefined> {
-	if (options !== undefined) {
-		// `./miniflare-cli/assets` dynamically imports`@cloudflare/pages-shared/environment-polyfills`.
-		// `@cloudflare/pages-shared/environment-polyfills/types.ts` defines `global`
-		// augmentations that pollute the `import`-site's typing environment.
-		//
-		// We `require` instead of `import`ing here to avoid polluting the main
-		// `wrangler` TypeScript project with the `global` augmentations. This
-		// relies on the fact that `require` is untyped.
-		//
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const generateASSETSBinding = require("./miniflare-cli/assets").default;
-		return {
-			ASSETS: {
-				type: "fetcher",
-				fetcher: await generateASSETSBinding({
-					log: logger,
-					...options,
-				}),
-			},
-		};
-	}
-}
-
-async function setupDevEnv(
-	devEnv: DevEnv,
-	configPath: string | undefined,
-	auth: AsyncHook<CfAccount, [Pick<Config, "account_id">]>,
-	args: Partial<StartDevOptions> & { multiworkerPrimary?: boolean }
-) {
-	await devEnv.config.set(
-		{
-			name: args.name,
-			config: configPath,
-			entrypoint: args.script,
-			compatibilityDate: args.compatibilityDate,
-			compatibilityFlags: args.compatibilityFlags,
-			triggers: args.routes?.map<Extract<Trigger, { type: "route" }>>((r) => ({
-				type: "route",
-				pattern: r,
-			})),
-			env: args.env,
-			build: {
-				bundle: args.bundle !== undefined ? args.bundle : undefined,
-				define: collectKeyValues(args.define),
-				jsxFactory: args.jsxFactory,
-				jsxFragment: args.jsxFragment,
-				tsconfig: args.tsconfig,
-				minify: args.minify,
-				processEntrypoint: args.processEntrypoint,
-				additionalModules: args.additionalModules,
-				moduleRoot: args.moduleRoot,
-				moduleRules: args.rules,
-				nodejsCompatMode: (parsedConfig: Config) =>
-					validateNodeCompatMode(
-						args.compatibilityDate ?? parsedConfig.compatibility_date,
-						args.compatibilityFlags ?? parsedConfig.compatibility_flags ?? [],
-						{
-							noBundle: args.noBundle ?? parsedConfig.no_bundle,
-						}
-					),
-			},
-			bindings: {
-				...(await getPagesAssetsFetcher(args.enablePagesAssetsServiceBinding)),
-				...collectPlainTextVars(args.var),
-				...convertCfWorkerInitBindingstoBindings({
-					kv_namespaces: args.kv,
-					vars: args.vars,
-					send_email: undefined,
-					wasm_modules: undefined,
-					text_blobs: undefined,
-					browser: undefined,
-					ai: args.ai,
-					images: undefined,
-					version_metadata: args.version_metadata,
-					data_blobs: undefined,
-					durable_objects: { bindings: args.durableObjects ?? [] },
-					workflows: undefined,
-					queues: undefined,
-					r2_buckets: args.r2,
-					d1_databases: args.d1Databases,
-					vectorize: undefined,
-					hyperdrive: undefined,
-					secrets_store_secrets: undefined,
-					services: args.services,
-					analytics_engine_datasets: undefined,
-					dispatch_namespaces: undefined,
-					mtls_certificates: undefined,
-					pipelines: undefined,
-					logfwdr: undefined,
-					unsafe: undefined,
-					assets: undefined,
-				}),
-			},
-			dev: {
-				auth,
-				remote: !args.forceLocal && args.remote,
-				server: {
-					hostname: args.ip,
-					port: args.port,
-					secure:
-						args.localProtocol === undefined
-							? undefined
-							: args.localProtocol === "https",
-					httpsCertPath: args.httpsCertPath,
-					httpsKeyPath: args.httpsKeyPath,
-				},
-				inspector: {
-					port: args.inspectorPort,
-				},
-				origin: {
-					hostname: args.host ?? args.localUpstream,
-					secure:
-						args.upstreamProtocol === undefined
-							? undefined
-							: args.upstreamProtocol === "https",
-				},
-				persist: args.persistTo,
-				liveReload: args.liveReload,
-				testScheduled: args.testScheduled,
-				logLevel: args.logLevel,
-				registry: args.disableDevRegistry
-					? null
-					: devEnv.config.latestConfig?.dev.registry,
-				bindVectorizeToProd: args.experimentalVectorizeBindToProd,
-				imagesLocalMode: args.experimentalImagesLocalMode,
-				multiworkerPrimary: args.multiworkerPrimary,
-			},
-			legacy: {
-				site: (configParam) => {
-					const legacyAssetPaths = getResolvedSiteAssetPaths(args, configParam);
-					return Boolean(args.site || configParam.site) && legacyAssetPaths
-						? {
-								bucket: path.join(
-									legacyAssetPaths.baseDirectory,
-									legacyAssetPaths?.assetDirectory
-								),
-								include: legacyAssetPaths.includePatterns,
-								exclude: legacyAssetPaths.excludePatterns,
-							}
-						: undefined;
-				},
-				enableServiceEnvironments: !(args.legacyEnv ?? true),
-			},
-			assets: args.assets,
-		} satisfies StartDevWorkerInput,
-		true
-	);
-	return devEnv;
-}
-
-export async function startDev(args: StartDevOptions) {
-	let configFileWatcher: ReturnType<typeof watch> | undefined;
-	let assetsWatcher: ReturnType<typeof watch> | undefined;
-	let devEnv: DevEnv | DevEnv[] | undefined;
-	let teardownRegistryPromise:
-		| Promise<(name?: string) => Promise<void>>
-		| undefined;
-
-	let unregisterHotKeys: (() => void) | undefined;
-	try {
-		if (args.logLevel) {
-			logger.loggerLevel = args.logLevel;
-		}
-
-		const authHook: AsyncHook<CfAccount, [Pick<Config, "account_id">]> = async (
-			config
-		) => {
-			const hotkeysDisplayed = !!unregisterHotKeys;
-			let accountId = args.accountId;
-			if (!accountId) {
-				unregisterHotKeys?.();
-				accountId = await requireAuth(config);
-				if (hotkeysDisplayed) {
-					assert(devEnv !== undefined);
-					unregisterHotKeys = registerDevHotKeys(
-						Array.isArray(devEnv) ? devEnv[0] : devEnv,
-						args
-					);
-				}
-			}
-			return {
-				accountId,
-				apiToken: requireApiToken(),
-			};
-		};
-
-		if (Array.isArray(args.config)) {
-			const runtime = new MultiworkerRuntimeController(args.config.length);
-
-			const primaryDevEnv = new DevEnv({ runtimes: [runtime] });
-
-			if (isInteractive() && args.showInteractiveDevSession !== false) {
-				unregisterHotKeys = registerDevHotKeys(primaryDevEnv, args);
-			}
-
-			// Set up the primary DevEnv (the one that the ProxyController will connect to)
-			devEnv = [
-				await setupDevEnv(primaryDevEnv, args.config[0], authHook, {
-					...args,
-					disableDevRegistry: true,
-					multiworkerPrimary: true,
-				}),
-			];
-
-			// Set up all auxiliary DevEnvs
-			devEnv.push(
-				...(await Promise.all(
-					(args.config as string[]).slice(1).map((c) => {
-						return setupDevEnv(
-							new DevEnv({
-								runtimes: [runtime],
-								proxy: new NoOpProxyController(),
-							}),
-							c,
-							authHook,
-							{
-								disableDevRegistry: true,
-								multiworkerPrimary: false,
-							}
-						);
-					})
-				))
-			);
-		} else {
-			devEnv = new DevEnv();
-
-			// The ProxyWorker will have a stable host and port, so only listen for the first update
-			void devEnv.proxy.ready.promise.then(({ url }) => {
-				if (args.onReady) {
-					args.onReady(url.hostname, parseInt(url.port));
-				}
-
-				if (
-					(args.enableIpc || !args.onReady) &&
-					process.send &&
-					typeof vitest === "undefined"
-				) {
-					process.send(
-						JSON.stringify({
-							event: "DEV_SERVER_READY",
-							ip: url.hostname,
-							port: parseInt(url.port),
-						})
-					);
-				}
-			});
-
-			if (!args.disableDevRegistry) {
-				teardownRegistryPromise = devRegistry((registry) => {
-					assert(devEnv !== undefined && !Array.isArray(devEnv));
-					void updateDevEnvRegistry(devEnv, registry);
-				});
-
-				devEnv.runtimes.forEach((runtime) => {
-					runtime.on(
-						"reloadComplete",
-						async (reloadEvent: ReloadCompleteEvent) => {
-							if (!reloadEvent.config.dev?.remote) {
-								assert(devEnv !== undefined && !Array.isArray(devEnv));
-								const { url } = await devEnv.proxy.ready.promise;
-
-								await maybeRegisterLocalWorker(
-									url,
-									reloadEvent.config.name,
-									reloadEvent.proxyData.internalDurableObjects,
-									reloadEvent.proxyData.entrypointAddresses
-								);
-							}
-						}
-					);
-				});
-			}
-
-			if (isInteractive() && args.showInteractiveDevSession !== false) {
-				unregisterHotKeys = registerDevHotKeys(devEnv, args);
-			}
-
-			await setupDevEnv(devEnv, args.config, authHook, args);
-		}
-
-		return {
-			devEnv: Array.isArray(devEnv) ? devEnv[0] : devEnv,
-			secondary: Array.isArray(devEnv) ? devEnv.slice(1) : [],
-			unregisterHotKeys,
-			teardownRegistryPromise,
-		};
-	} catch (e) {
-		await Promise.allSettled([
-			configFileWatcher?.close(),
-			assetsWatcher?.close(),
-			...(Array.isArray(devEnv)
-				? devEnv.map((d) => d.teardown())
-				: [devEnv?.teardown()]),
-			(async () => {
-				if (teardownRegistryPromise) {
-					assert(devEnv === undefined || !Array.isArray(devEnv));
-					const teardownRegistry = await teardownRegistryPromise;
-					await teardownRegistry(devEnv?.config.latestConfig?.name);
-				}
-				unregisterHotKeys?.();
-			})(),
-		]);
-		throw e;
-	}
-}
-
-/**
- * mask anything that was overridden in .dev.vars
- * so that we don't log potential secrets into the terminal
- */
-export function maskVars(
-	bindings: CfWorkerInit["bindings"],
-	configParam: Config
-) {
-	const maskedVars = { ...bindings.vars };
-	for (const key of Object.keys(maskedVars)) {
-		if (maskedVars[key] !== configParam.vars[key]) {
-			// This means it was overridden in .dev.vars
-			// so let's mask it
-			maskedVars[key] = "(hidden)";
-		}
-	}
-	return maskedVars;
-}
 
 export async function getHostAndRoutes(
 	args:
@@ -790,7 +407,12 @@ export async function getHostAndRoutes(
 		}
 	});
 	if (routes) {
-		const assetOptions = getAssetsOptions({ assets: args.assets }, config);
+		const assetOptions = getAssetsOptions({
+			args: {
+				assets: args.assets,
+			},
+			config,
+		});
 		validateRoutes(routes, assetOptions);
 	}
 	return { host, routes };
@@ -821,123 +443,32 @@ export function getInferredHost(
 		configPath
 	)}
 	\`\`\`
-`
+`,
+				{ telemetryMessage: "dev command host inference failed" }
 			);
 		}
 		return host;
 	}
 }
 
-function getResolvedSiteAssetPaths(
-	args: Partial<StartDevOptions>,
-	configParam: Config
-) {
-	return getSiteAssetPaths(
-		configParam,
-		args.site,
-		args.siteInclude,
-		args.siteExclude
-	);
-}
+/**
+ * Apply Hyperdrive connection string environment variables to config.
+ * Checks for CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_* env vars
+ * and applies them to the config's hyperdrive bindings.
+ */
+function applyHyperdriveEnvVars(config: Config, local: boolean): void {
+	for (const hyperdrive of config.hyperdrive ?? []) {
+		const prefix = `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_`;
+		const deprecatedPrefix = `WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING_`;
 
-export function getBindings(
-	configParam: Config,
-	env: string | undefined,
-	local: boolean,
-	args: AdditionalDevProps
-): CfWorkerInit["bindings"] {
-	/**
-	 * In Pages, KV, DO, D1, R2, AI and service bindings can be specified as
-	 * args to the `pages dev` command. These args will always take precedence
-	 * over the configuration file, and therefore should override corresponding
-	 * config in `wrangler.toml`.
-	 */
-	// merge KV bindings
-	const kvConfig = (configParam.kv_namespaces || []).map<CfKvNamespace>(
-		({ binding, preview_id, id }) => {
-			// In remote `dev`, we make folks use a separate kv namespace called
-			// `preview_id` instead of `id` so that they don't
-			// break production data. So here we check that a `preview_id`
-			// has actually been configured.
-			// This whole block of code will be obsoleted in the future
-			// when we have copy-on-write for previews on edge workers.
-			if (!preview_id && !local) {
-				// TODO: This error has to be a _lot_ better, ideally just asking
-				// to create a preview namespace for the user automatically
-				throw new UserError(
-					`In development, you should use a separate kv namespace than the one you'd use in production. Please create a new kv namespace with "wrangler kv namespace create <name> --preview" and add its id as preview_id to the kv_namespace "${binding}" in your ${configFileName(configParam.configPath)} file`
-				); // Ugh, I really don't like this message very much
-			}
-			return {
-				binding,
-				id: preview_id ?? id,
-			};
+		let varName = `${prefix}${hyperdrive.binding}`;
+		let connectionStringFromEnv = process.env[varName];
+
+		if (!connectionStringFromEnv) {
+			varName = `${deprecatedPrefix}${hyperdrive.binding}`;
+			connectionStringFromEnv = process.env[varName];
 		}
-	);
-	const kvArgs = args.kv || [];
-	const mergedKVBindings = mergeWithOverride(kvConfig, kvArgs, "binding");
 
-	// merge DO bindings
-	const doConfig = (configParam.durable_objects || { bindings: [] }).bindings;
-	const doArgs = args.durableObjects || [];
-	const mergedDOBindings = mergeWithOverride(doConfig, doArgs, "name");
-
-	// merge D1 bindings
-	const d1Config = (configParam.d1_databases ?? []).map((d1Db) => {
-		const database_id = d1Db.preview_database_id
-			? d1Db.preview_database_id
-			: d1Db.database_id;
-
-		if (local) {
-			return { ...d1Db, database_id };
-		}
-		// if you have a preview_database_id, we'll use it, but we shouldn't force people to use it.
-		if (!d1Db.preview_database_id && !process.env.NO_D1_WARNING) {
-			logger.log(
-				`--------------------\n💡 Recommendation: for development, use a preview D1 database rather than the one you'd use in production.\n💡 Create a new D1 database with "wrangler d1 create <name>" and add its id as preview_database_id to the d1_database "${d1Db.binding}" in your ${configFileName(configParam.configPath)} file\n--------------------\n`
-			);
-		}
-		return { ...d1Db, database_id };
-	});
-	const d1Args = args.d1Databases || [];
-	const mergedD1Bindings = mergeWithOverride(d1Config, d1Args, "binding");
-
-	// merge R2 bindings
-	const r2Config: EnvironmentNonInheritable["r2_buckets"] =
-		configParam.r2_buckets?.map(
-			({ binding, preview_bucket_name, bucket_name, jurisdiction }) => {
-				// same idea as kv namespace preview id,
-				// same copy-on-write TODO
-				if (!preview_bucket_name && !local) {
-					throw new UserError(
-						`In development, you should use a separate r2 bucket than the one you'd use in production. Please create a new r2 bucket with "wrangler r2 bucket create <name>" and add its name as preview_bucket_name to the r2_buckets "${binding}" in your ${configFileName(configParam.configPath)} file`
-					);
-				}
-				return {
-					binding,
-					bucket_name: preview_bucket_name ?? bucket_name,
-					jurisdiction,
-				};
-			}
-		) || [];
-	const r2Args = args.r2 || [];
-	const mergedR2Bindings = mergeWithOverride(r2Config, r2Args, "binding");
-
-	// merge service bindings
-	const servicesConfig = configParam.services || [];
-	const servicesArgs = args.services || [];
-	const mergedServiceBindings = mergeWithOverride(
-		servicesConfig,
-		servicesArgs,
-		"binding"
-	);
-
-	// Hyperdrive bindings
-	const hyperdriveBindings = configParam.hyperdrive.map((hyperdrive) => {
-		const connectionStringFromEnv =
-			process.env[
-				`WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING_${hyperdrive.binding}`
-			];
 		// only require a local connection string in the wrangler file or the env if not using dev --remote
 		if (
 			local &&
@@ -945,84 +476,81 @@ export function getBindings(
 			hyperdrive.localConnectionString === undefined
 		) {
 			throw new UserError(
-				`When developing locally, you should use a local Postgres connection string to emulate Hyperdrive functionality. Please setup Postgres locally and set the value of the 'WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING_${hyperdrive.binding}' variable or "${hyperdrive.binding}"'s "localConnectionString" to the Postgres connection string.`
+				`When developing locally, you should use a local Postgres connection string to emulate Hyperdrive functionality. Please setup Postgres locally and set the value of the '${prefix}${hyperdrive.binding}' variable or "${hyperdrive.binding}"'s "localConnectionString" to the Postgres connection string.`,
+				{ telemetryMessage: "no local hyperdrive connection string" }
 			);
 		}
 
 		// If there is a non-empty connection string specified in the environment,
 		// use that as our local connection string configuration.
 		if (connectionStringFromEnv) {
+			if (varName.startsWith(deprecatedPrefix)) {
+				logger.once.warn(
+					`Using "${deprecatedPrefix}<BINDING_NAME>" environment variable. This is deprecated. Please use "${prefix}<BINDING_NAME>" instead.`
+				);
+			}
 			logger.log(
-				`Found a non-empty WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING variable for binding. Hyperdrive will connect to this database during local development.`
+				`Found a non-empty ${varName} variable for binding. Hyperdrive will connect to this database during local development.`
 			);
 			hyperdrive.localConnectionString = connectionStringFromEnv;
 		}
+	}
+}
+/**
+ * Gets the bindings for the Cloudflare Worker.
+ *
+ * @param configParam The loaded configuration.
+ * @param env The environment to use, if any.
+ * @param envFiles An array of paths, relative to the project directory, of .env files to load.
+ * If `undefined` it defaults to the standard .env files from `getDefaultEnvFiles()`.
+ * @param local Whether the dev server should run locally.
+ * @param inputBindings Additional bindings to merge on top of config bindings
+ * @returns The bindings for the Cloudflare Worker.
+ */
+export function getBindings(
+	configParam: Config,
+	env: string | undefined,
+	envFiles: string[] | undefined,
+	local: boolean,
+	inputBindings: StartDevWorkerInput["bindings"],
+	defaultBindings: StartDevWorkerInput["bindings"]
+): StartDevWorkerInput["bindings"] {
+	applyHyperdriveEnvVars(configParam, local);
 
-		return hyperdrive;
+	const bindings = convertConfigToBindings(configParam, {
+		usePreviewIds: true,
 	});
 
-	// Queues bindings ??
-	const queuesBindings = [
-		...(configParam.queues.producers || []).map((queue) => {
-			return {
-				binding: queue.binding,
-				queue_name: queue.queue,
-				delivery_delay: queue.delivery_delay,
-			};
-		}),
-	];
+	// Override vars with .dev.vars (dev-specific)
+	// getVarsForDev returns typed bindings: config vars are plain_text/json,
+	// while .dev.vars/.env vars are secret_text.
+	// When secrets is defined, only declared secret keys are loaded from files.
+	const vars = getVarsForDev(
+		configParam.userConfigPath,
+		envFiles,
+		configParam.vars,
+		env,
+		false,
+		configParam.secrets
+	);
+	for (const [name, binding] of Object.entries(vars)) {
+		// Only override plain_text/json/secret_text vars, not other binding types like kv_namespace
+		const existingBinding = bindings[name];
+		if (
+			!existingBinding ||
+			existingBinding.type === "plain_text" ||
+			existingBinding.type === "json" ||
+			existingBinding.type === "secret_text"
+		) {
+			bindings[name] = binding;
+		}
+	}
 
-	const bindings: CfWorkerInit["bindings"] = {
-		// top-level fields
-		wasm_modules: configParam.wasm_modules,
-		text_blobs: configParam.text_blobs,
-		data_blobs: configParam.data_blobs,
-
-		// inheritable fields
-		dispatch_namespaces: configParam.dispatch_namespaces,
-		logfwdr: configParam.logfwdr,
-
-		// non-inheritable fields
-		vars: {
-			// Use a copy of combinedVars since we're modifying it later
-			...getVarsForDev(configParam, env),
-			...args.vars,
-		},
-		durable_objects: {
-			bindings: mergedDOBindings,
-		},
-		workflows: configParam.workflows,
-		kv_namespaces: mergedKVBindings,
-		queues: queuesBindings,
-		r2_buckets: mergedR2Bindings,
-		d1_databases: mergedD1Bindings,
-		vectorize: configParam.vectorize,
-		hyperdrive: hyperdriveBindings,
-		secrets_store_secrets: configParam.secrets_store_secrets,
-		services: mergedServiceBindings,
-		analytics_engine_datasets: configParam.analytics_engine_datasets,
-		browser: configParam.browser,
-		ai: args.ai || configParam.ai,
-		images: configParam.images,
-		version_metadata: args.version_metadata || configParam.version_metadata,
-		unsafe: {
-			bindings: configParam.unsafe.bindings,
-			metadata: configParam.unsafe.metadata,
-			capnp: configParam.unsafe.capnp,
-		},
-		mtls_certificates: configParam.mtls_certificates,
-		pipelines: configParam.pipelines,
-		send_email: configParam.send_email,
-		assets: configParam.assets?.binding
-			? { binding: configParam.assets?.binding }
-			: undefined,
-	};
-
-	return bindings;
+	return { ...defaultBindings, ...bindings, ...inputBindings };
 }
 
 export function getAssetChangeMessage(
-	eventName: "add" | "addDir" | "change" | "unlink" | "unlinkDir",
+	eventName: EventName,
 	assetPath: string
 ): string {
 	let message = `${assetPath} changed`;

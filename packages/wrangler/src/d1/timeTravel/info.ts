@@ -1,38 +1,53 @@
-import { withConfig } from "../../config";
+import dedent from "ts-dedent";
+import { createCommand } from "../../core/create-command";
 import { logger } from "../../logger";
 import { requireAuth } from "../../user";
-import { printWranglerBanner } from "../../wrangler-banner";
-import { Database } from "../options";
+import { printResourceLocation } from "../../utils/is-local";
 import { getDatabaseByNameOrBinding } from "../utils";
 import { getBookmarkIdFromTimestamp, throwIfDatabaseIsAlpha } from "./utils";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../../yargs-types";
 
-export function InfoOptions(yargs: CommonYargsArgv) {
-	return Database(yargs)
-		.option("timestamp", {
-			describe:
-				"accepts a Unix (seconds from epoch) or RFC3339 timestamp (e.g. 2023-07-13T08:46:42.228Z) to retrieve a bookmark for",
+export const d1TimeTravelInfoCommand = createCommand({
+	metadata: {
+		description:
+			"Retrieve information about a database at a specific point-in-time using Time Travel",
+		epilogue: dedent`
+			This command acts on remote D1 Databases.
+
+			For more information about Time Travel, see https://developers.cloudflare.com/d1/reference/time-travel/`,
+		status: "stable",
+		owner: "Product: D1",
+	},
+	behaviour: {
+		printBanner: (args) => !args.json,
+	},
+	args: {
+		database: {
 			type: "string",
-		})
-		.option("json", {
-			describe: "return output as clean JSON",
+			demandOption: true,
+			description: "The name or binding of the DB",
+		},
+		timestamp: {
+			type: "string",
+			description:
+				"Accepts a Unix (seconds from epoch) or RFC3339 timestamp (e.g. 2023-07-13T08:46:42.228Z) to retrieve a bookmark for",
+		},
+		json: {
 			type: "boolean",
+			description: "Return output as JSON",
 			default: false,
-		});
-}
-
-type HandlerOptions = StrictYargsOptionsToInterface<typeof InfoOptions>;
-
-export const InfoHandler = withConfig<HandlerOptions>(
-	async ({ database, config, json, timestamp }): Promise<void> => {
+		},
+	},
+	positionalArgs: ["database"],
+	async handler({ database, json, timestamp }, { config }) {
 		// bookmark
 		const accountId = await requireAuth(config);
+		if (!json) {
+			printResourceLocation("remote");
+		}
 		const db = await getDatabaseByNameOrBinding(config, accountId, database);
-		await throwIfDatabaseIsAlpha(accountId, db.uuid);
+		await throwIfDatabaseIsAlpha(config, accountId, db.uuid);
 		const result = await getBookmarkIdFromTimestamp(
+			config,
 			accountId,
 			db.uuid,
 			timestamp
@@ -40,7 +55,6 @@ export const InfoHandler = withConfig<HandlerOptions>(
 		if (json) {
 			logger.log(JSON.stringify(result, null, 2));
 		} else {
-			await printWranglerBanner();
 			logger.log("🚧 Time Traveling...");
 			logger.log(
 				timestamp
@@ -50,5 +64,5 @@ export const InfoHandler = withConfig<HandlerOptions>(
 			logger.log(`⚡️ To restore to this specific bookmark, run:\n \`wrangler d1 time-travel restore ${database} --bookmark=${result.bookmark}\`
       `);
 		}
-	}
-);
+	},
+});

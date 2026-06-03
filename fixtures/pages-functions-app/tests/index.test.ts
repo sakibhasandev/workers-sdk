@@ -16,7 +16,7 @@ describe("Pages Functions", () => {
 			[
 				"--binding=NAME=VALUE",
 				"--binding=OTHER_NAME=THING=WITH=EQUALS",
-				"--r2=BUCKET",
+				"--r2=bucket",
 				"--port=0",
 				"--inspector-port=0",
 			]
@@ -56,18 +56,21 @@ describe("Pages Functions", () => {
 	it("passes environment variables", async ({ expect }) => {
 		const response = await fetch(`http://${ip}:${port}/variables`);
 		const env = await response.json();
-		expect(env).toEqual({
-			ASSETS: {},
-			BUCKET: {},
-			NAME: "VALUE",
-			OTHER_NAME: "THING=WITH=EQUALS",
-			VAR_1: "var #1 value",
-			VAR_3: "var #3 value",
-			VAR_MULTI_LINE_1: "A: line 1\nline 2",
-			VAR_MULTI_LINE_2: "B: line 1\nline 2",
-			EMPTY: "",
-			UNQUOTED: "unquoted value", // Note that whitespace is trimmed
-		});
+		// Use objectContaining to allow for additional CF_PAGES_* variables
+		expect(env).toEqual(
+			expect.objectContaining({
+				ASSETS: {},
+				bucket: {},
+				NAME: "VALUE",
+				OTHER_NAME: "THING=WITH=EQUALS",
+				VAR_1: "var #1 value",
+				VAR_3: "var #3 value",
+				VAR_MULTI_LINE_1: "A: line 1\nline 2",
+				VAR_MULTI_LINE_2: "B: line 1\nline 2",
+				EMPTY: "",
+				UNQUOTED: "unquoted value", // Note that whitespace is trimmed
+			})
+		);
 	});
 
 	it("intercepts static requests with next()", async ({ expect }) => {
@@ -332,7 +335,7 @@ describe("Pages Functions", () => {
 			});
 		});
 
-		it("allows middleware to be overriden and not merged", async ({
+		it("allows middleware to be overridden and not merged", async ({
 			expect,
 		}) => {
 			const response = await fetch(

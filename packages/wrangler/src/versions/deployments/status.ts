@@ -1,12 +1,11 @@
-import assert from "assert";
-import { logRaw } from "@cloudflare/cli";
-import { brandColor, gray } from "@cloudflare/cli/colors";
+import assert from "node:assert";
+import { logRaw } from "@cloudflare/cli-shared-helpers";
+import { brandColor, gray } from "@cloudflare/cli-shared-helpers/colors";
+import { UserError } from "@cloudflare/workers-utils";
 import { createCommand } from "../../core/create-command";
-import { UserError } from "../../errors";
 import * as metrics from "../../metrics";
 import { requireAuth } from "../../user";
 import formatLabelledValues from "../../utils/render-labelled-values";
-import { printWranglerBanner } from "../../wrangler-banner";
 import { fetchLatestDeployment, fetchVersions } from "../api";
 import { getDeploymentSource } from "./list";
 import type { VersionCache } from "../types";
@@ -26,26 +25,18 @@ export const deploymentsStatusCommand = createCommand({
 			requiresArg: true,
 		},
 		json: {
-			describe: "Display output as clean JSON",
+			describe: "Display output as JSON",
 			type: "boolean",
 			default: false,
 		},
 	},
 	behaviour: {
-		printBanner: false,
+		printBanner: (args) => !args.json,
 	},
 	handler: async function versionsDeploymentsStatusHandler(args, { config }) {
-		if (!args.json) {
-			await printWranglerBanner();
-		}
-
-		metrics.sendMetricsEvent(
-			"view latest versioned deployment",
-			{},
-			{
-				sendMetrics: config.send_metrics,
-			}
-		);
+		metrics.sendMetricsEvent("view latest versioned deployment", {
+			sendMetrics: config.send_metrics,
+		});
 
 		const accountId = await requireAuth(config);
 		const workerName = args.name ?? config.name;
@@ -53,11 +44,17 @@ export const deploymentsStatusCommand = createCommand({
 		if (workerName === undefined) {
 			throw new UserError(
 				'You need to provide a name for your Worker. Either pass it as a cli arg with `--name <name>` or in your configuration file as `name = "<name>"`',
-				{ telemetryMessage: true }
+				{
+					telemetryMessage: "versions deployments status missing worker name",
+				}
 			);
 		}
 
-		const latestDeployment = await fetchLatestDeployment(accountId, workerName);
+		const latestDeployment = await fetchLatestDeployment(
+			config,
+			accountId,
+			workerName
+		);
 
 		if (!latestDeployment) {
 			throw new UserError(`The Worker ${workerName} has no deployments.`, {
@@ -72,7 +69,13 @@ export const deploymentsStatusCommand = createCommand({
 
 		const versionCache: VersionCache = new Map();
 		const versionIds = latestDeployment.versions.map((v) => v.version_id);
-		await fetchVersions(accountId, workerName, versionCache, ...versionIds);
+		await fetchVersions(
+			config,
+			accountId,
+			workerName,
+			versionCache,
+			...versionIds
+		);
 
 		const formattedVersions = latestDeployment.versions.map((traffic) => {
 			const version = versionCache.get(traffic.version_id);

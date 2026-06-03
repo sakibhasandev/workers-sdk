@@ -1,9 +1,12 @@
-from js import Response, URL, crypto
+from workers import Response, WorkerEntrypoint
+from uuid import uuid4
+from urllib.parse import urlparse
 
-async def on_fetch(request, env):
-	url = URL.new(request.url)
-	if url.pathname == '/message':
-		return Response.new('Hello, World!')
-	if url.pathname == '/random':
-		return Response.new(crypto.randomUUID())
-	return Response.new('Not Found', {'status': 404})
+class Default(WorkerEntrypoint):
+    async def fetch(self, request):
+        url = urlparse(request.url)
+        if url.path == '/message':
+            return Response('Hello, World!')
+        if url.path == '/random':
+            return Response(str(uuid4()))
+        return Response('Not Found', status=404)

@@ -1,5 +1,10 @@
 import fs from "node:fs";
-import { thrownIsDoesNotExistError } from "../utils/filesystem";
+import { thrownIsDoesNotExistError } from "@cloudflare/workers-shared";
+import {
+	runInTempDir,
+	writeWranglerConfig,
+} from "@cloudflare/workers-utils/test-helpers";
+import { afterAll, afterEach, beforeEach, describe, it } from "vitest";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { clearDialogs } from "./helpers/mock-dialogs";
@@ -12,9 +17,7 @@ import {
 	mswSuccessOauthHandlers,
 	mswSuccessUserHandlers,
 } from "./helpers/msw";
-import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
-import { writeWranglerConfig } from "./helpers/write-wrangler-config";
 
 // This is testing the old deployments behaviour, which is now deprecated
 // and replaced by the versions one - see the new tests in versions/deployments/...
@@ -48,7 +51,9 @@ describe("deployments", () => {
 		}
 	});
 
-	it("should log a help message for deployments command", async () => {
+	it("should log a help message for deployments command", async ({
+		expect,
+	}) => {
 		await runWrangler("deployments --help");
 		expect(std.out).toMatchInlineSnapshot(`
 			"wrangler deployments
@@ -60,17 +65,19 @@ describe("deployments", () => {
 			  wrangler deployments status  View the current state of your production
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]"
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
 	describe("deployments subcommands", () => {
 		describe("deployment view", () => {
-			it("should error with no flag", async () => {
+			it("should error with no flag", async ({ expect }) => {
 				writeWranglerConfig();
 
 				await expect(

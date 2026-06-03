@@ -1,5 +1,5 @@
 import { setTimeout } from "node:timers/promises";
-import { vitest } from "vitest";
+import { beforeEach, describe, it, vi, vitest } from "vitest";
 import registerHotKeys from "../cli-hotkeys";
 import { logger } from "../logger";
 import { mockConsoleMethods } from "./helpers/mock-console";
@@ -37,7 +37,7 @@ describe("Hot Keys", () => {
 	});
 
 	describe("callbacks", () => {
-		it("calls handlers when a key is pressed", async () => {
+		it("calls handlers when a key is pressed", async ({ expect }) => {
 			const handlerA = vi.fn();
 			const handlerB = vi.fn();
 			const handlerC = vi.fn();
@@ -68,7 +68,7 @@ describe("Hot Keys", () => {
 			handlerC.mockClear();
 		});
 
-		it("handles CAPSLOCK", async () => {
+		it("handles CAPSLOCK", async ({ expect }) => {
 			const handlerA = vi.fn();
 			const options = [
 				{ keys: ["a"], label: "first option", handler: handlerA },
@@ -80,12 +80,50 @@ describe("Hot Keys", () => {
 			expect(handlerA).toHaveBeenCalled();
 			handlerA.mockClear();
 
-			writeToMockedStdin("A");
+			// Caps Lock and Shift+A both come through readline as { name: "a", shift: true }.
+			writeToMockedStdin({
+				name: "a",
+				sequence: "A",
+				ctrl: false,
+				meta: false,
+				shift: true,
+			});
 			expect(handlerA).toHaveBeenCalled();
 			handlerA.mockClear();
 		});
 
-		it("handles meta keys", async () => {
+		it("does not fire plain key handler when ctrl or meta is also held with shift", async ({
+			expect,
+		}) => {
+			const handlerA = vi.fn();
+			const options = [
+				{ keys: ["a"], label: "first option", handler: handlerA },
+			];
+
+			registerHotKeys(options);
+
+			// ctrl+shift+a should NOT fire the "a" handler
+			writeToMockedStdin({
+				name: "a",
+				sequence: "",
+				ctrl: true,
+				meta: false,
+				shift: true,
+			});
+			expect(handlerA).not.toHaveBeenCalled();
+
+			// meta+shift+a should NOT fire the "a" handler
+			writeToMockedStdin({
+				name: "a",
+				sequence: "",
+				ctrl: false,
+				meta: true,
+				shift: true,
+			});
+			expect(handlerA).not.toHaveBeenCalled();
+		});
+
+		it("handles meta keys", async ({ expect }) => {
 			const handlerCtrl = vi.fn();
 			const handlerMeta = vi.fn();
 			const handlerShift = vi.fn();
@@ -113,7 +151,7 @@ describe("Hot Keys", () => {
 			handlerShift.mockClear();
 		});
 
-		it("ignores missing key names", async () => {
+		it("ignores missing key names", async ({ expect }) => {
 			const handlerA = vi.fn();
 			const options = [
 				{ keys: ["a"], label: "first option", handler: handlerA },
@@ -127,7 +165,7 @@ describe("Hot Keys", () => {
 			expect(handlerA).not.toHaveBeenCalled();
 		});
 
-		it("ignores unbound keys", async () => {
+		it("ignores unbound keys", async ({ expect }) => {
 			const handlerA = vi.fn();
 			const handlerD = vi.fn();
 			const options = [
@@ -144,7 +182,9 @@ describe("Hot Keys", () => {
 			expect(handlerD).not.toHaveBeenCalled();
 		});
 
-		it("calls handler if any additional key bindings are pressed", async () => {
+		it("calls handler if any additional key bindings are pressed", async ({
+			expect,
+		}) => {
 			const handlerA = vi.fn();
 			const options = [
 				{ keys: ["a", "b", "c"], label: "first option", handler: handlerA },
@@ -165,7 +205,7 @@ describe("Hot Keys", () => {
 			handlerA.mockClear();
 		});
 
-		it("surfaces errors in handlers", async () => {
+		it("surfaces errors in handlers", async ({ expect }) => {
 			const handlerA = vi.fn().mockImplementation(() => {
 				throw new Error("sync error");
 			});
@@ -198,7 +238,9 @@ describe("Hot Keys", () => {
 	});
 
 	describe("instructions", () => {
-		it("provides formatted instructions to Wrangler's & Miniflare's logger implementations", async () => {
+		it("provides formatted instructions to Wrangler's & Miniflare's logger implementations", async ({
+			expect,
+		}) => {
 			const handlerA = vi.fn();
 			const handlerB = vi.fn();
 			const handlerC = vi.fn();
@@ -214,39 +256,35 @@ describe("Hot Keys", () => {
 			const unregisterHotKeys = registerHotKeys(options);
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"╭─────────────────────────────────────────────────────────╮
-				│  [a] first option, [b] second option, [c] third option  │
-				╰─────────────────────────────────────────────────────────╯"
+				"╭───────────────────────────────────────────────────────╮
+				│  [a] first option [b] second option [c] third option │
+				╰───────────────────────────────────────────────────────╯"
 			`);
 
 			logger.log("something 1");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"╭─────────────────────────────────────────────────────────╮
-				│  [a] first option, [b] second option, [c] third option  │
-				╰─────────────────────────────────────────────────────────╯
-				something 1
-				╭─────────────────────────────────────────────────────────╮
-				│  [a] first option, [b] second option, [c] third option  │
-				╰─────────────────────────────────────────────────────────╯"
+				"╭───────────────────────────────────────────────────────╮
+				│  [a] first option [b] second option [c] third option │
+				╰───────────────────────────────────────────────────────╯
+				something 1"
 			`);
 
 			unregisterHotKeys();
 			logger.log("something 2");
 
 			expect(std.out).toMatchInlineSnapshot(`
-				"╭─────────────────────────────────────────────────────────╮
-				│  [a] first option, [b] second option, [c] third option  │
-				╰─────────────────────────────────────────────────────────╯
+				"╭───────────────────────────────────────────────────────╮
+				│  [a] first option [b] second option [c] third option │
+				╰───────────────────────────────────────────────────────╯
 				something 1
-				╭─────────────────────────────────────────────────────────╮
-				│  [a] first option, [b] second option, [c] third option  │
-				╰─────────────────────────────────────────────────────────╯
 				something 2"
 			`);
 		});
 
-		it("provides stacked formatted instructions in narrow views", async () => {
+		it("provides stacked formatted instructions in narrow views", async ({
+			expect,
+		}) => {
 			const originalColumns = process.stdout.columns;
 			try {
 				process.stdout.columns = 30;
@@ -267,15 +305,40 @@ describe("Hot Keys", () => {
 
 				expect(std.out).toMatchInlineSnapshot(`
 					"╭─────────────────────╮
-					│  [a] first option   │
-					│  [b] second option  │
-					│  [c] third option   │
+					│  [a] first option │
+					│  [b] second option │
+					│  [c] third option │
 					╰─────────────────────╯"
 				`);
 				unregisterHotKeys();
 			} finally {
 				process.stdout.columns = originalColumns;
 			}
+		});
+
+		it("hides options with disabled property enabled", async ({ expect }) => {
+			const handlerA = vi.fn();
+			const handlerB = vi.fn();
+
+			registerHotKeys([
+				{
+					keys: ["a"],
+					label: "visible option",
+					handler: handlerA,
+				},
+				{
+					keys: ["b"],
+					label: "hidden option",
+					disabled: true,
+					handler: handlerB,
+				},
+			]);
+
+			expect(std.out).toMatchInlineSnapshot(`
+				"╭──────────────────────╮
+				│  [a] visible option │
+				╰──────────────────────╯"
+			`);
 		});
 	});
 });

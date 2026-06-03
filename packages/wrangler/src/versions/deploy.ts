@@ -1,22 +1,21 @@
-import assert from "assert";
-import * as cli from "@cloudflare/cli";
-import { brandColor, gray, white } from "@cloudflare/cli/colors";
+import assert from "node:assert";
+import * as cli from "@cloudflare/cli-shared-helpers";
+import { brandColor, gray, white } from "@cloudflare/cli-shared-helpers/colors";
 import {
 	grayBar,
 	inputPrompt,
 	leftT,
 	spinnerWhile,
-} from "@cloudflare/cli/interactive";
+} from "@cloudflare/cli-shared-helpers/interactive";
+import { UserError } from "@cloudflare/workers-utils";
 import { fetchResult } from "../cfetch";
 import { createCommand } from "../core/create-command";
-import { UserError } from "../errors";
 import { isNonInteractiveOrCI } from "../is-interactive";
-import { logger } from "../logger";
 import * as metrics from "../metrics";
 import { writeOutput } from "../output";
-import { APIError } from "../parse";
 import { requireAuth } from "../user";
 import formatLabelledValues from "../utils/render-labelled-values";
+import { isWorkerNotFoundError } from "../utils/worker-not-found-error";
 import {
 	createDeployment,
 	fetchDeployableVersions,
@@ -25,7 +24,6 @@ import {
 	fetchVersions,
 	patchNonVersionedScriptSettings,
 } from "./api";
-import type { Config } from "../config";
 import type {
 	ApiDeployment,
 	ApiVersion,
@@ -33,6 +31,7 @@ import type {
 	VersionCache,
 	VersionId,
 } from "./types";
+import type { ComplianceConfig, Config } from "@cloudflare/workers-utils";
 
 const EPSILON = 0.001; // used to avoid floating-point errors. Comparions to a value +/- EPSILON will mean "roughly equals the value".
 const BLANK_INPUT = "-"; // To be used where optional user-input is displayed and the value is nullish
@@ -49,6 +48,7 @@ export const versionsDeployCommand = createCommand({
 	},
 	behaviour: {
 		useConfigRedirectIfAvailable: true,
+		warnIfMultipleEnvsConfiguredButNoneSpecified: true,
 	},
 
 	args: {
@@ -72,7 +72,7 @@ export const versionsDeployCommand = createCommand({
 		},
 		"version-specs": {
 			describe:
-				"Shorthand notation to deploy Worker Version(s) [<version-id>@<percentage>..]",
+				"Shorthand notation to deploy Worker Version(s) [<version-id>@<percentage>..]. Omitted percentages share the remaining traffic.",
 			type: "string",
 			array: true,
 		},
@@ -101,13 +101,9 @@ export const versionsDeployCommand = createCommand({
 	},
 	positionalArgs: ["version-specs"],
 	handler: async function versionsDeployHandler(args, { config }) {
-		metrics.sendMetricsEvent(
-			"deploy worker versions",
-			{},
-			{
-				sendMetrics: config.send_metrics,
-			}
-		);
+		metrics.sendMetricsEvent("deploy worker versions", {
+			sendMetrics: config.send_metrics,
+		});
 
 		const accountId = await requireAuth(config);
 		const workerName = args.name ?? config.name;
@@ -115,16 +111,13 @@ export const versionsDeployCommand = createCommand({
 		if (workerName === undefined) {
 			throw new UserError(
 				'You need to provide a name of your worker. Either pass it as a cli arg with `--name <name>` or in your config file as `name = "<name>"`',
-				{ telemetryMessage: true }
+				{ telemetryMessage: "versions deploy missing worker name" }
 			);
-		}
-
-		if (config.workflows?.length) {
-			logger.once.warn("Workflows is currently in open beta.");
 		}
 
 		const versionCache: VersionCache = new Map();
 		const optionalVersionTraffic = parseVersionSpecs(args);
+		const acceptPromptDefaults = args.yes || optionalVersionTraffic.size > 0;
 
 		cli.startSection(
 			"Deploy Worker Versions",
@@ -132,21 +125,22 @@ export const versionsDeployCommand = createCommand({
 			true
 		);
 
-		await printLatestDeployment(accountId, workerName, versionCache);
+		await printLatestDeployment(config, accountId, workerName, versionCache);
 
 		// prompt to confirm or change the versionIds from the args
 		const confirmedVersionsToDeploy = await promptVersionsToDeploy(
+			config,
 			accountId,
 			workerName,
 			[...optionalVersionTraffic.keys()],
 			versionCache,
-			args.yes
+			acceptPromptDefaults
 		);
 
 		// validate we have at least 1 version
 		if (confirmedVersionsToDeploy.length === 0) {
 			throw new UserError("You must select at least 1 version to deploy.", {
-				telemetryMessage: true,
+				telemetryMessage: "versions deploy missing selected versions",
 			});
 		}
 
@@ -154,7 +148,7 @@ export const versionsDeployCommand = createCommand({
 		if (confirmedVersionsToDeploy.length > args.maxVersions) {
 			throw new UserError(
 				`You must select at most ${args.maxVersions} versions to deploy.`,
-				{ telemetryMessage: "You must select at most 2 versions to deploy.`" }
+				{ telemetryMessage: "versions deploy too many selected versions" }
 			);
 		}
 
@@ -162,7 +156,7 @@ export const versionsDeployCommand = createCommand({
 		const confirmedVersionTraffic = await promptPercentages(
 			confirmedVersionsToDeploy,
 			optionalVersionTraffic,
-			args.yes
+			acceptPromptDefaults
 		);
 
 		// prompt for deployment message
@@ -170,7 +164,7 @@ export const versionsDeployCommand = createCommand({
 			type: "text",
 			label: "Deployment message",
 			defaultValue: args.message,
-			acceptDefault: args.yes,
+			acceptDefault: acceptPromptDefaults,
 			question: "Add a deployment message",
 			helpText: "(optional)",
 		});
@@ -186,6 +180,7 @@ export const versionsDeployCommand = createCommand({
 			startMessage: `Deploying ${confirmedVersionsToDeploy.length} version(s)`,
 			promise() {
 				return createDeployment(
+					config,
 					accountId,
 					workerName,
 					confirmedVersionTraffic,
@@ -194,7 +189,7 @@ export const versionsDeployCommand = createCommand({
 			},
 		});
 
-		await maybePatchSettings(accountId, workerName, config);
+		await maybePatchSettings(config, accountId, workerName);
 
 		const elapsedMilliseconds = Date.now() - start;
 		const elapsedSeconds = elapsedMilliseconds / 1000;
@@ -215,7 +210,7 @@ export const versionsDeployCommand = createCommand({
 		try {
 			const serviceMetaData = await fetchResult<{
 				default_environment: { script: { tag: string } };
-			}>(`/accounts/${accountId}/workers/services/${workerName}`);
+			}>(config, `/accounts/${accountId}/workers/services/${workerName}`);
 			workerTag = serviceMetaData.default_environment.script.tag;
 		} catch {
 			// If the fetch fails then we just output a null for the workerTag.
@@ -236,11 +231,12 @@ export const versionsDeployCommand = createCommand({
  * Prompts the user for confirmation when overwriting the latest deployment, given that it's split.
  */
 export async function confirmLatestDeploymentOverwrite(
+	config: Config,
 	accountId: string,
 	scriptName: string
 ) {
 	try {
-		const latest = await fetchLatestDeployment(accountId, scriptName);
+		const latest = await fetchLatestDeployment(config, accountId, scriptName);
 		if (latest && latest.versions.length >= 2) {
 			const versionCache: VersionCache = new Map();
 
@@ -252,6 +248,7 @@ export async function confirmLatestDeploymentOverwrite(
 			);
 			cli.newline();
 			await printDeployment(
+				config,
 				accountId,
 				scriptName,
 				latest,
@@ -268,8 +265,7 @@ export async function confirmLatestDeploymentOverwrite(
 			});
 		}
 	} catch (e) {
-		const isNotFound = e instanceof APIError && e.code == 10007;
-		if (!isNotFound) {
+		if (!isWorkerNotFoundError(e)) {
 			throw e;
 		}
 	}
@@ -277,6 +273,7 @@ export async function confirmLatestDeploymentOverwrite(
 }
 
 export async function printLatestDeployment(
+	config: Config,
 	accountId: string,
 	workerName: string,
 	versionCache: VersionCache
@@ -284,10 +281,11 @@ export async function printLatestDeployment(
 	const latestDeployment = await spinnerWhile({
 		startMessage: "Fetching latest deployment",
 		async promise() {
-			return fetchLatestDeployment(accountId, workerName);
+			return fetchLatestDeployment(config, accountId, workerName);
 		},
 	});
 	await printDeployment(
+		config,
 		accountId,
 		workerName,
 		latestDeployment,
@@ -297,6 +295,7 @@ export async function printLatestDeployment(
 }
 
 async function printDeployment(
+	config: Config,
 	accountId: string,
 	workerName: string,
 	deployment: ApiDeployment | undefined,
@@ -304,6 +303,7 @@ async function printDeployment(
 	versionCache: VersionCache
 ) {
 	const [versions, traffic] = await fetchDeploymentVersions(
+		config,
 		accountId,
 		workerName,
 		deployment,
@@ -352,21 +352,36 @@ function formatVersions(
  * @param accountId
  * @param workerName
  * @param defaultSelectedVersionIds
- * @param yesFlag
+ * @param acceptDefault
  * @returns
  */
 async function promptVersionsToDeploy(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	workerName: string,
 	defaultSelectedVersionIds: VersionId[],
 	versionCache: VersionCache,
-	yesFlag: boolean
+	acceptDefault: boolean
 ): Promise<VersionId[]> {
+	// If the user has already specified all versions they want to deploy and
+	// the defaults will be accepted (so there's no interactive prompt), skip fetching the
+	// full deployable-versions list and only fetch the specific versions needed.
+	const skipDeployableVersionsFetch =
+		acceptDefault && defaultSelectedVersionIds.length > 0;
+
 	await spinnerWhile({
-		startMessage: "Fetching deployable versions",
+		startMessage: "Fetching versions",
 		async promise() {
-			await fetchDeployableVersions(accountId, workerName, versionCache);
+			if (!skipDeployableVersionsFetch) {
+				await fetchDeployableVersions(
+					complianceConfig,
+					accountId,
+					workerName,
+					versionCache
+				);
+			}
 			await fetchVersions(
+				complianceConfig,
 				accountId,
 				workerName,
 				versionCache,
@@ -400,7 +415,7 @@ ${ZERO_WIDTH_SPACE}       Message:  ${
 		label: "",
 		helpText: "Use SPACE to select/unselect version(s) and ENTER to submit.",
 		defaultValue: defaultSelectedVersionIds,
-		acceptDefault: yesFlag,
+		acceptDefault,
 		validate(versionIds) {
 			if (versionIds === undefined) {
 				return `You must select at least 1 version to deploy.`;
@@ -450,14 +465,14 @@ ${grayBar} ${gray(
  *
  * @param versionIds The Version IDs the user has selected to deploy
  * @param optionalVersionTraffic The percentages the user has specified as args (if any)
- * @param yesFlag Whether the user specified the --yes flag
+ * @param acceptDefault Whether prompt defaults should be accepted automatically
  * @param confirmedVersionTraffic The percentages the user has already entered. Used for recursive calls.
  * @returns A Map of Version IDs to their respective percentages confirmed by the user, totaling 100%
  */
 async function promptPercentages(
 	versionIds: VersionId[],
 	optionalVersionTraffic: Map<VersionId, OptionalPercentage>,
-	yesFlag: boolean,
+	acceptDefault: boolean,
 	confirmedVersionTraffic = new Map<VersionId, Percentage>()
 ): Promise<Map<VersionId, Percentage>> {
 	let n = 0;
@@ -483,7 +498,7 @@ async function promptPercentages(
 			label: `Traffic`,
 			defaultValue,
 			initialValue: confirmedVersionTraffic.get(versionId)?.toString(), // if the user already entered a value, override the default
-			acceptDefault: yesFlag,
+			acceptDefault,
 			format: (val) => `${val}%`,
 			validate: (val) => {
 				const input = val !== "" ? val : defaultValue;
@@ -524,9 +539,9 @@ async function promptPercentages(
 		validateTrafficSubtotal(subtotal);
 	} catch (err) {
 		if (err instanceof UserError) {
-			// if the user has indicated they'll accept all defaults (yesFlag)
+			// if the user has indicated they'll accept all defaults
 			// then rethrow to avoid an infinite loop of reprompting
-			if (yesFlag) {
+			if (acceptDefault) {
 				throw err;
 			}
 
@@ -535,7 +550,7 @@ async function promptPercentages(
 			return promptPercentages(
 				versionIds,
 				optionalVersionTraffic,
-				yesFlag,
+				acceptDefault,
 				confirmedVersionTraffic
 			);
 		}
@@ -547,13 +562,14 @@ async function promptPercentages(
 }
 
 async function maybePatchSettings(
+	config: Config,
 	accountId: string,
-	workerName: string,
-	config: Pick<Config, "logpush" | "tail_consumers" | "observability">
+	workerName: string
 ) {
 	const maybeUndefinedSettings = {
 		logpush: config.logpush,
 		tail_consumers: config.tail_consumers,
+		streaming_tail_consumers: config.streaming_tail_consumers,
 		observability: config.observability, // TODO reconcile with how regular deploy handles empty state
 	};
 	const definedSettings = Object.fromEntries(
@@ -572,6 +588,7 @@ async function maybePatchSettings(
 		startMessage: `Syncing non-versioned settings`,
 		async promise() {
 			return await patchNonVersionedScriptSettings(
+				config,
 				accountId,
 				workerName,
 				definedSettings
@@ -600,6 +617,10 @@ async function maybePatchSettings(
 					?.map((tc) =>
 						tc.environment ? `${tc.service} (${tc.environment})` : tc.service
 					)
+					.join("\n") ?? "<skipped>",
+			streaming_tail_consumers:
+				patchedSettings.streaming_tail_consumers
+					?.map((stc) => stc.service)
 					.join("\n") ?? "<skipped>",
 		},
 		{
@@ -636,13 +657,18 @@ export function parseVersionSpecs(
 		if (percentage !== null) {
 			if (isNaN(percentage)) {
 				throw new UserError(
-					`Could not parse percentage value from version-spec positional arg "${spec}"`
+					`Could not parse percentage value from version-spec positional arg "${spec}"`,
+					{ telemetryMessage: "versions deploy percentage parse failed" }
 				);
 			}
 
 			if (percentage < 0 || percentage > 100) {
 				throw new UserError(
-					`Percentage value (${percentage}%) parsed from version-spec positional arg "${spec}" must be between 0 and 100.`
+					`Percentage value (${percentage}%) parsed from version-spec positional arg "${spec}" must be between 0 and 100.`,
+					{
+						telemetryMessage:
+							"versions deploy positional percentage out of range",
+					}
 				);
 			}
 		}
@@ -658,7 +684,9 @@ export function parseVersionSpecs(
 		/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 	for (const versionId of args.versionId ?? []) {
 		if (!UUID_REGEX.test(versionId)) {
-			throw new UserError(`Version ID must be a valid UUID (${versionId}).`);
+			throw new UserError(`Version ID must be a valid UUID (${versionId}).`, {
+				telemetryMessage: "versions deploy invalid version id",
+			});
 		}
 
 		versionIds.push(versionId);
@@ -667,7 +695,8 @@ export function parseVersionSpecs(
 	for (const percentage of args.percentage ?? []) {
 		if (percentage < 0 || percentage > 100) {
 			throw new UserError(
-				`Percentage value (${percentage}%) must be between 0 and 100.`
+				`Percentage value (${percentage}%) must be between 0 and 100.`,
+				{ telemetryMessage: "versions deploy percentage out of range" }
 			);
 		}
 
@@ -735,17 +764,24 @@ export function validateTrafficSubtotal(
 
 	if (max === min && (isAbove || isBelow)) {
 		throw new UserError(
-			`Sum of specified percentages (${subtotal}%) must be ${max}%`
+			`Sum of specified percentages (${subtotal}%) must be ${max}%`,
+			{ telemetryMessage: "versions deploy traffic subtotal mismatch" }
 		);
 	}
 	if (isAbove) {
 		throw new UserError(
-			`Sum of specified percentages (${subtotal}%) must be at most ${max}%`
+			`Sum of specified percentages (${subtotal}%) must be at most ${max}%`,
+			{
+				telemetryMessage: "versions deploy traffic subtotal above maximum",
+			}
 		);
 	}
 	if (isBelow) {
 		throw new UserError(
-			`Sum of specified percentages (${subtotal}%) must be at least ${min}%`
+			`Sum of specified percentages (${subtotal}%) must be at least ${min}%`,
+			{
+				telemetryMessage: "versions deploy traffic subtotal below minimum",
+			}
 		);
 	}
 }

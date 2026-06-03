@@ -1,6 +1,10 @@
-import assert from "assert";
-import { ReadableStream } from "stream/web";
-import { MessageChannel, receiveMessageOnPort, Worker } from "worker_threads";
+import assert from "node:assert";
+import { ReadableStream } from "node:stream/web";
+import {
+	MessageChannel,
+	receiveMessageOnPort,
+	Worker,
+} from "node:worker_threads";
 import { Headers } from "../../../http";
 import { CoreHeaders } from "../../../workers";
 import { JsonErrorSchema, reviveError } from "../errors";
@@ -46,14 +50,18 @@ let dispatcher;
 
 port.addEventListener("message", async (event) => {
   const { id, method, url, headers, body } = event.data;
-  if (dispatcherUrl !== url) {
-    dispatcherUrl = url;
-    dispatcher = new Pool(url, {
-      connect: { rejectUnauthorized: false },
-    });
-  }
-  headers["${CoreHeaders.OP_SYNC}"] = "true";
   try {
+    if (dispatcherUrl !== url) {
+      dispatcherUrl = url;
+      dispatcher = new Pool(new URL(url).origin, {
+        connect: { rejectUnauthorized: false },
+              // Disable timeouts for local dev — long-running responses (streaming,
+      // slow uploads, long-polling) should not be killed by undici defaults.
+      headersTimeout: 0,
+      bodyTimeout: 0,
+      });
+    }
+    headers["${CoreHeaders.OP_SYNC}"] = "true";
     // body cannot be a ReadableStream, so no need to specify duplex
     const response = await fetch(url, { method, headers, body, dispatcher });
     const responseBody = response.headers.get("${CoreHeaders.OP_RESULT_TYPE}") === "ReadableStream"
@@ -78,10 +86,13 @@ port.addEventListener("message", async (event) => {
       // If error failed to serialise, post simplified version
       port.postMessage({ id, error: new Error(String(error)) });
     }
+  } finally {
+    Atomics.store(notifyHandle, /* index */ 0, /* value */ 1);
+    Atomics.notify(notifyHandle, /* index */ 0);
   }
-  Atomics.store(notifyHandle, /* index */ 0, /* value */ 1);
-  Atomics.notify(notifyHandle, /* index */ 0);
 });
+
+port.start();
 `;
 
 // Ideally we would just have a single, shared `unref()`ed `Worker`, and an

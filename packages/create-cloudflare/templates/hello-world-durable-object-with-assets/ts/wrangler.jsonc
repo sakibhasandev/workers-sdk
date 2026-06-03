@@ -1,7 +1,7 @@
 {
-  "name": "<TBD>",
+  "name": "<WORKER_NAME>",
   "main": "src/index.ts",
-  "compatibility_date": "<TBD>",
+  "compatibility_date": "<COMPATIBILITY_DATE>",
   "migrations": [
     {
       "new_sqlite_classes": [
@@ -11,7 +11,7 @@
     }
   ],
   "assets": {
-    "binding": "ASSETS",
+    // The path to the directory containing the `index.html` file to be served at `/`
     "directory": "./public"
   },
   "durable_objects": {

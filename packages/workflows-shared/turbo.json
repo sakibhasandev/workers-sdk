@@ -3,8 +3,10 @@
 	"extends": ["//"],
 	"tasks": {
 		"build": {
-			"inputs": ["src/**", "*.js", "*.ts", "*.json"],
 			"outputs": ["dist/**"]
+		},
+		"check:type": {
+			"dependsOn": ["build", "@cloudflare/workers-utils#build"]
 		}
 	}
 }

@@ -1,4 +1,5 @@
-from js import Response
-
-async def on_fetch(request, env):
-    return Response.new("Hello World!")
+from workers import Response, WorkerEntrypoint
+from submodule import get_hello_message
+class Default(WorkerEntrypoint):
+    async def fetch(self, request):
+        return Response(get_hello_message())

@@ -1,5 +1,5 @@
 {
-	"name": "get-platform-proxy-fixture",
+	"name": "@fixture/get-platform-proxy",
 	"private": true,
 	"description": "A test for the getPlatformProxy utility",
 	"scripts": {
@@ -9,13 +9,12 @@
 	},
 	"devDependencies": {
 		"@cloudflare/workers-tsconfig": "workspace:*",
-		"@cloudflare/workers-types": "^4.20250409.0",
+		"@cloudflare/workers-types": "catalog:default",
+		"@types/jest-image-snapshot": "^6.4.0",
+		"jest-image-snapshot": "^6.5.1",
 		"typescript": "catalog:default",
 		"undici": "catalog:default",
 		"vitest": "catalog:default",
 		"wrangler": "workspace:*"
-	},
-	"volta": {
-		"extends": "../../package.json"
 	}
 }

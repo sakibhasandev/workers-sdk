@@ -1,5 +1,5 @@
+import { UserError } from "@cloudflare/workers-utils";
 import { getNodeCompat } from "miniflare";
-import { UserError } from "../errors";
 import { logger } from "../logger";
 import type { NodeJSCompatMode } from "miniflare";
 
@@ -32,13 +32,15 @@ import type { NodeJSCompatMode } from "miniflare";
 
 	if (hasExperimentalNodejsCompatV2Flag) {
 		throw new UserError(
-			"The `experimental:` prefix on `nodejs_compat_v2` is no longer valid. Please remove it and try again."
+			"The `experimental:` prefix on `nodejs_compat_v2` is no longer valid. Please remove it and try again.",
+			{ telemetryMessage: "experimental nodejs compat v2 prefix unsupported" }
 		);
 	}
 
 	if (hasNodejsCompatFlag && hasNodejsCompatV2Flag) {
 		throw new UserError(
-			"The `nodejs_compat` and `nodejs_compat_v2` compatibility flags cannot be used in together. Please select just one."
+			"The `nodejs_compat` and `nodejs_compat_v2` compatibility flags cannot be used in together. Please select just one.",
+			{ telemetryMessage: "conflicting nodejs compat flags" }
 		);
 	}
 

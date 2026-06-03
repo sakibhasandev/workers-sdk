@@ -1,8 +1,6 @@
-import { readdir, readFile, stat } from "fs/promises";
-import { homedir, userInfo } from "os";
-import { exit } from "process";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { homedir, userInfo } from "node:os";
 import {
-	crash,
 	endSection,
 	log,
 	logRaw,
@@ -11,32 +9,38 @@ import {
 	status,
 	success,
 	updateStatus,
-} from "@cloudflare/cli";
-import { brandColor, dim } from "@cloudflare/cli/colors";
-import { inputPrompt, spinner } from "@cloudflare/cli/interactive";
+} from "@cloudflare/cli-shared-helpers";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import {
+	inputPrompt,
+	spinner,
+} from "@cloudflare/cli-shared-helpers/interactive";
+import { SshPublicKeysService } from "@cloudflare/containers-shared";
+import { UserError } from "@cloudflare/workers-utils";
+import { createCommand, createNamespace } from "../../core/create-command";
+import { isNonInteractiveOrCI } from "../../is-interactive";
 import { logger } from "../../logger";
 import { pollSSHKeysUntilCondition } from "../cli";
-import { SshPublicKeysService } from "../client";
 import {
 	checkEverythingIsSet,
-	handleFailure,
-	interactWithUser,
+	cloudchamberScope,
+	fillOpenAPIConfiguration,
 } from "../common";
 import { wrap } from "../helpers/wrap";
 import { validatePublicSSHKeyCLI, validateSSHKey } from "./validate";
-import type { Config } from "../../config";
 import type {
-	CommonYargsArgvJSON,
-	CommonYargsArgvSanitizedJSON,
-	StrictYargsOptionsToInterfaceJSON,
+	CommonYargsArgv,
+	CommonYargsArgvSanitized,
+	StrictYargsOptionsToInterface,
 } from "../../yargs-types";
 import type {
 	ListSSHPublicKeys,
 	SSHPublicKeyID,
 	SSHPublicKeyItem,
-} from "../client";
+} from "@cloudflare/containers-shared";
+import type { Config } from "@cloudflare/workers-utils";
 
-function createSSHPublicKeyOptionalYargs(yargs: CommonYargsArgvJSON) {
+function _createSSHPublicKeyOptionalYargs(yargs: CommonYargsArgv) {
 	return yargs
 		.option("name", {
 			type: "string",
@@ -65,7 +69,7 @@ async function retrieveSSHKey(
 		const file = (await readFile(sshKeyPath)).toString();
 		validatePublicSSHKeyCLI(file, { json });
 		return file;
-	} catch (err) {
+	} catch {
 		if (!json) {
 			logger.debug("couldn't read the file, assuming input is an ssh key");
 		}
@@ -75,7 +79,7 @@ async function retrieveSSHKey(
 }
 
 export async function sshPrompts(
-	args: CommonYargsArgvSanitizedJSON,
+	args: CommonYargsArgvSanitized,
 	keys: ListSSHPublicKeys | undefined = undefined
 ): Promise<SSHPublicKeyID | undefined> {
 	const [key, prompt] = await shouldPromptForNewSSHKeyAppear(keys);
@@ -107,57 +111,40 @@ export async function sshPrompts(
 	return key || undefined;
 }
 
-export const sshCommand = (yargs: CommonYargsArgvJSON) => {
-	return yargs
-		.command(
-			"list",
-			"list the ssh keys added to your account",
-			(args) => args,
-			(args) =>
-				handleFailure(async (sshArgs: CommonYargsArgvSanitizedJSON, config) => {
-					// check we are in CI or if the user wants to just use JSON
-					if (!interactWithUser(sshArgs)) {
-						const sshKeys = await SshPublicKeysService.listSshPublicKeys();
-						console.log(JSON.stringify(sshKeys, null, 4));
-						return;
-					}
+async function sshListHandler(
+	sshArgs: CommonYargsArgvSanitized,
+	config: Config
+) {
+	if (isNonInteractiveOrCI()) {
+		const sshKeys = await SshPublicKeysService.listSshPublicKeys();
+		logger.json(sshKeys);
+		return;
+	}
 
-					await handleListSSHKeysCommand(sshArgs, config);
-				})(args)
-		)
-		.command(
-			"create",
-			"create an ssh key",
-			(args) => createSSHPublicKeyOptionalYargs(args),
-			(args) =>
-				handleFailure(
-					async (
-						sshArgs: StrictYargsOptionsToInterfaceJSON<
-							typeof createSSHPublicKeyOptionalYargs
-						>,
-						_config
-					) => {
-						// check we are in CI or if the user wants to just use JSON
-						if (!interactWithUser(sshArgs)) {
-							const body = checkEverythingIsSet(sshArgs, ["publicKey", "name"]);
-							const sshKey = await retrieveSSHKey(body.publicKey, {
-								json: true,
-							});
-							const addedSSHKey = await SshPublicKeysService.createSshPublicKey(
-								{
-									...body,
-									public_key: sshKey.trim(),
-								}
-							);
-							console.log(JSON.stringify(addedSSHKey, null, 4));
-							return;
-						}
+	await handleListSSHKeysCommand(sshArgs, config);
+}
 
-						await handleCreateSSHPublicKeyCommand(sshArgs);
-					}
-				)(args)
-		);
-};
+async function sshCreateHandler(
+	sshArgs: StrictYargsOptionsToInterface<
+		typeof _createSSHPublicKeyOptionalYargs
+	>
+) {
+	// check we are in CI or if the user wants to just use JSON
+	if (isNonInteractiveOrCI()) {
+		const body = checkEverythingIsSet(sshArgs, ["publicKey", "name"]);
+		const sshKey = await retrieveSSHKey(body.publicKey, {
+			json: true,
+		});
+		const addedSSHKey = await SshPublicKeysService.createSshPublicKey({
+			...body,
+			public_key: sshKey.trim(),
+		});
+		logger.json(addedSSHKey);
+		return;
+	}
+
+	await handleCreateSSHPublicKeyCommand(sshArgs);
+}
 
 async function tryToRetrieveAllDefaultSSHKeyPaths(): Promise<string[]> {
 	const HOME = homedir();
@@ -173,7 +160,7 @@ async function tryToRetrieveAllDefaultSSHKeyPaths(): Promise<string[]> {
 				}
 			}
 		}
-	} catch (err) {
+	} catch {
 		// well, we tried with good defaults.
 		return [];
 	}
@@ -254,7 +241,7 @@ async function shouldPromptForNewSSHKeyAppear(
 		// we found a valid ssh key that doesn't exist in the API,
 		// and the user doesn't have any of their ssh keys added
 		return [undefined, foundValidSSHKeyThatDontExist];
-	} catch (err) {
+	} catch {
 		// ignore error and return false
 		return [undefined, false];
 	}
@@ -298,9 +285,7 @@ async function handleListSSHKeysCommand(_args: unknown, _config: Config) {
  *
  */
 async function handleCreateSSHPublicKeyCommand(
-	args: StrictYargsOptionsToInterfaceJSON<
-		typeof createSSHPublicKeyOptionalYargs
-	>
+	args: StrictYargsOptionsToInterface<typeof _createSSHPublicKeyOptionalYargs>
 ) {
 	startSection(
 		"Choose an ssh key to add",
@@ -319,9 +304,7 @@ async function handleCreateSSHPublicKeyCommand(
 }
 
 async function promptForSSHKey(
-	args: StrictYargsOptionsToInterfaceJSON<
-		typeof createSSHPublicKeyOptionalYargs
-	>
+	args: StrictYargsOptionsToInterface<typeof _createSSHPublicKeyOptionalYargs>
 ): Promise<SSHPublicKeyItem> {
 	const { username } = userInfo();
 	const name = await inputPrompt({
@@ -382,9 +365,64 @@ async function promptForSSHKey(
 	);
 	stop();
 	if (err != null) {
-		crash("Error adding your public ssh key: " + err.message);
-		exit(1);
+		throw new UserError("Error adding your public ssh key: " + err.message, {
+			telemetryMessage: "cloudchamber ssh public key add failed",
+		});
 	}
 
 	return res;
 }
+
+export const cloudchamberSshNamespace = createNamespace({
+	metadata: {
+		description: "Manage the ssh keys of your account",
+		status: "alpha",
+		owner: "Product: Cloudchamber",
+		hidden: false,
+	},
+});
+
+export const cloudchamberSshListCommand = createCommand({
+	metadata: {
+		description: "List the ssh keys added to your account",
+		status: "alpha",
+		owner: "Product: Cloudchamber",
+		hidden: false,
+	},
+	behaviour: {
+		printBanner: () => !isNonInteractiveOrCI(),
+	},
+	args: {},
+	async handler(args, { config }) {
+		await fillOpenAPIConfiguration(config, cloudchamberScope);
+		await sshListHandler(args, config);
+	},
+});
+
+export const cloudchamberSshCreateCommand = createCommand({
+	metadata: {
+		description: "Create an ssh key",
+		status: "alpha",
+		owner: "Product: Cloudchamber",
+		hidden: false,
+	},
+	behaviour: {
+		printBanner: () => !isNonInteractiveOrCI(),
+	},
+	args: {
+		name: {
+			type: "string",
+			describe:
+				"The alias to your ssh key, you can put a recognisable name for you here",
+		},
+		"public-key": {
+			type: "string",
+			describe:
+				"An SSH public key, you can specify either a path or the ssh key directly here",
+		},
+	},
+	async handler(args, { config }) {
+		await fillOpenAPIConfiguration(config, cloudchamberScope);
+		await sshCreateHandler(args);
+	},
+});

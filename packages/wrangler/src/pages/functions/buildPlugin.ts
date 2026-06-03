@@ -5,8 +5,8 @@ import { createModuleCollector } from "../../deployment-bundle/module-collection
 import { getBasePath } from "../../paths";
 import { getPagesProjectRoot } from "../utils";
 import { buildNotifierPlugin } from "./buildWorker";
-import type { Entry } from "../../deployment-bundle/entry";
 import type { Options as WorkerOptions } from "./buildWorker";
+import type { Entry } from "@cloudflare/workers-utils";
 
 type Options = Omit<
 	WorkerOptions,
@@ -17,6 +17,7 @@ export function buildPluginFromFunctions({
 	routesModule,
 	outdir,
 	minify = false,
+	keepNames = true,
 	sourcemap = false,
 	watch = false,
 	onEnd = () => {},
@@ -30,6 +31,7 @@ export function buildPluginFromFunctions({
 	const entry: Entry = {
 		file: resolve(getBasePath(), "templates/pages-template-plugin.ts"),
 		projectRoot: functionsDirectory,
+		configPath: undefined,
 		format: "modules",
 		moduleRoot: functionsDirectory,
 		exports: [],
@@ -45,12 +47,15 @@ export function buildPluginFromFunctions({
 		inject: [routesModule],
 		entryName: "index",
 		minify,
+		keepNames,
 		sourcemap,
 		watch,
 		// We don't currently have a mechanism for Plugins 'requiring' a specific compat date/flag,
 		// but if someone wants to publish a Plugin which does require this new `nodejs_compat` flag
 		// and they document that on their README.md, we should let them.
 		nodejsCompatMode: nodejsCompatMode ?? "v1",
+		compatibilityDate: undefined,
+		compatibilityFlags: undefined,
 		define: {},
 		alias: {},
 		doBindings: [], // Pages functions don't support internal Durable Objects
@@ -108,8 +113,6 @@ export function buildPluginFromFunctions({
 			},
 		],
 		checkFetch: local && checkFetch,
-		// TODO: mock AE datasets in Pages functions for dev
-		mockAnalyticsEngineDatasets: [],
 		targetConsumer: local ? "dev" : "deploy",
 		local,
 		projectRoot: getPagesProjectRoot(),
@@ -120,5 +123,6 @@ export function buildPluginFromFunctions({
 		tsconfig: undefined,
 		testScheduled: undefined,
 		isOutfile: undefined,
+		metafile: undefined,
 	});
 }

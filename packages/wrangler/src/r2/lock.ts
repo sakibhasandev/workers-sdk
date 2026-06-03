@@ -1,18 +1,17 @@
+import { ParseError, readFileSync, UserError } from "@cloudflare/workers-utils";
 import { createCommand, createNamespace } from "../core/create-command";
 import { confirm, prompt } from "../dialogs";
-import { UserError } from "../errors";
 import { isNonInteractiveOrCI } from "../is-interactive";
 import { logger } from "../logger";
-import { ParseError, readFileSync } from "../parse";
 import { requireAuth } from "../user";
 import formatLabelledValues from "../utils/render-labelled-values";
 import {
 	getBucketLockRules,
-	isValidDate,
 	putBucketLockRules,
 	tableFromBucketLockRulesResponse,
-} from "./helpers";
-import type { BucketLockRule } from "./helpers";
+} from "./helpers/bucket";
+import { isValidDate } from "./helpers/misc";
+import type { BucketLockRule } from "./helpers/bucket";
 
 export const r2BucketLockNamespace = createNamespace({
 	metadata: {
@@ -49,7 +48,12 @@ export const r2BucketLockListCommand = createCommand({
 
 		logger.log(`Listing lock rules for bucket '${bucket}'...`);
 
-		const rules = await getBucketLockRules(accountId, bucket, jurisdiction);
+		const rules = await getBucketLockRules(
+			config,
+			accountId,
+			bucket,
+			jurisdiction
+		);
 
 		if (rules.length === 0) {
 			logger.log(`There are no lock rules for bucket '${bucket}'.`);
@@ -129,7 +133,12 @@ export const r2BucketLockAddCommand = createCommand({
 	) {
 		const accountId = await requireAuth(config);
 
-		const rules = await getBucketLockRules(accountId, bucket, jurisdiction);
+		const rules = await getBucketLockRules(
+			config,
+			accountId,
+			bucket,
+			jurisdiction
+		);
 
 		if (!name && !isNonInteractiveOrCI() && !force) {
 			name = await prompt("Enter a unique name for the lock rule");
@@ -137,7 +146,7 @@ export const r2BucketLockAddCommand = createCommand({
 
 		if (!name) {
 			throw new UserError("Must specify a rule name.", {
-				telemetryMessage: true,
+				telemetryMessage: "r2 lock add missing rule name",
 			});
 		}
 
@@ -237,7 +246,7 @@ export const r2BucketLockAddCommand = createCommand({
 		}
 		rules.push(newRule);
 		logger.log(`Adding lock rule '${name}' to bucket '${bucket}'...`);
-		await putBucketLockRules(accountId, bucket, rules, jurisdiction);
+		await putBucketLockRules(config, accountId, bucket, rules, jurisdiction);
 		logger.log(`✨ Added lock rule '${name}' to bucket '${bucket}'.`);
 	},
 });
@@ -275,6 +284,7 @@ export const r2BucketLockRemoveCommand = createCommand({
 		const { bucket, name, jurisdiction } = args;
 
 		const lockPolicies = await getBucketLockRules(
+			config,
 			accountId,
 			bucket,
 			jurisdiction
@@ -295,7 +305,13 @@ export const r2BucketLockRemoveCommand = createCommand({
 		lockPolicies.splice(index, 1);
 
 		logger.log(`Removing lock rule '${name}' from bucket '${bucket}'...`);
-		await putBucketLockRules(accountId, bucket, lockPolicies, jurisdiction);
+		await putBucketLockRules(
+			config,
+			accountId,
+			bucket,
+			lockPolicies,
+			jurisdiction
+		);
 		logger.log(`Lock rule '${name}' removed from bucket '${bucket}'.`);
 	},
 });
@@ -354,7 +370,7 @@ export const r2BucketLockSetCommand = createCommand({
 		if (!lockRule.rules || !Array.isArray(lockRule.rules)) {
 			throw new UserError(
 				"The lock configuration file must contain a 'rules' array.",
-				{ telemetryMessage: true }
+				{ telemetryMessage: "r2 lock set config missing rules array" }
 			);
 		}
 
@@ -371,7 +387,13 @@ export const r2BucketLockSetCommand = createCommand({
 		logger.log(
 			`Setting lock configuration (${lockRule.rules.length} rules) for bucket '${bucket}'...`
 		);
-		await putBucketLockRules(accountId, bucket, lockRule.rules, jurisdiction);
+		await putBucketLockRules(
+			config,
+			accountId,
+			bucket,
+			lockRule.rules,
+			jurisdiction
+		);
 		logger.log(`✨ Set lock configuration for bucket '${bucket}'.`);
 	},
 });

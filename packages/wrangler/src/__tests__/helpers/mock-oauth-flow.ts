@@ -2,33 +2,8 @@ import { http, HttpResponse } from "msw";
 import { Request } from "undici";
 import openInBrowser from "../../open-in-browser";
 import { mockHttpServer } from "./mock-http-server";
-import { createFetchResult, msw } from "./msw";
+import { msw } from "./msw";
 import type { Mock } from "vitest";
-
-export function mockGetMemberships(
-	accounts: { id: string; account: { id: string; name: string } }[]
-) {
-	msw.use(
-		http.get(
-			"*/memberships",
-			() => {
-				return HttpResponse.json(createFetchResult(accounts));
-			},
-			{ once: true }
-		)
-	);
-}
-export function mockGetMembershipsFail() {
-	msw.use(
-		http.get(
-			"*/memberships",
-			() => {
-				return HttpResponse.json(createFetchResult([], false));
-			},
-			{ once: true }
-		)
-	);
-}
 
 /**
  * Functions to help with mocking various parts of the OAuth Flow
@@ -216,10 +191,12 @@ export function mockExchangeRefreshTokenForAccessToken({
 type GrantResponseOptions = {
 	code?: string;
 	error?: ErrorType | ErrorType[];
+	error_description?: string;
+	error_uri?: string;
 };
 
 const toQueryParams = (
-	{ code, error }: GrantResponseOptions,
+	{ code, error, error_description, error_uri }: GrantResponseOptions,
 	wranglerRequestParams: URLSearchParams
 ): string => {
 	const queryParams = [];
@@ -229,6 +206,14 @@ const toQueryParams = (
 	if (error) {
 		const stringifiedErr = Array.isArray(error) ? error.join(",") : error;
 		queryParams.push(`error=${stringifiedErr}`);
+	}
+	if (error_description) {
+		queryParams.push(
+			`error_description=${encodeURIComponent(error_description)}`
+		);
+	}
+	if (error_uri) {
+		queryParams.push(`error_uri=${encodeURIComponent(error_uri)}`);
 	}
 
 	queryParams.push(`state=${wranglerRequestParams.get("state")}`);

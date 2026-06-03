@@ -1,14 +1,46 @@
-import process from "process";
+/**
+ * This file is the main entrypoint for the CLI, which calls `main()` from `index.ts`.
+ * It also re-exports the public API of the package.
+ */
+
+import "cloudflare/shims/web";
+import process from "node:process";
+import { FatalError } from "@cloudflare/workers-utils";
 import { hideBin } from "yargs/helpers";
 import {
+	convertConfigBindingsToStartWorkerBindings,
+	DevEnv,
+	getPlatformProxy,
+	maybeStartOrUpdateRemoteProxySession,
+	startRemoteProxySession,
+	startWorker,
 	unstable_dev,
-	DevEnv as unstable_DevEnv,
+	experimental_generateTypes,
+	unstable_getDevCompatibilityDate,
+	unstable_getDurableObjectClassNameToUseSQLiteMap,
+	unstable_getMiniflareWorkerOptions,
+	unstable_getVarsForDev,
+	unstable_getWorkerNameFromProject,
 	unstable_pages,
-	startWorker as unstable_startWorker,
+	unstable_readConfig,
 } from "./api";
-import { FatalError } from "./errors";
-import { main } from ".";
-import type { Unstable_DevOptions, Unstable_DevWorker } from "./api";
+import { main } from "./index";
+import type {
+	Binding,
+	GetPlatformProxyOptions,
+	PlatformProxy,
+	RemoteProxySession,
+	SourcelessWorkerOptions,
+	StartRemoteProxySessionOptions,
+	Unstable_Config,
+	Unstable_DevOptions,
+	Unstable_DevWorker,
+	Experimental_GenerateTypesOptions,
+	Experimental_GenerateTypesResult,
+	Unstable_MiniflareWorkerOptions,
+	Unstable_RawConfig,
+	Unstable_RawEnvironment,
+} from "./api";
 import type { Logger } from "./logger";
 import type { Request, Response } from "miniflare";
 
@@ -27,36 +59,83 @@ if (typeof vitest === "undefined" && require.main === module) {
 }
 
 /**
- * This is how we're exporting the API.
- * It makes it possible to import wrangler from 'wrangler',
- * and call wrangler.unstable_dev().
+ * Public API.
  */
-export { unstable_dev, unstable_pages, unstable_DevEnv, unstable_startWorker };
-export type { Unstable_DevWorker, Unstable_DevOptions };
 
-export * from "./api/integrations";
+export {
+	unstable_dev,
+	unstable_pages,
+	DevEnv as unstable_DevEnv,
+	startWorker as unstable_startWorker,
+	unstable_getVarsForDev,
+	unstable_readConfig,
+	experimental_generateTypes,
+	unstable_getDurableObjectClassNameToUseSQLiteMap,
+	unstable_getDevCompatibilityDate,
+	unstable_getWorkerNameFromProject,
+	getPlatformProxy,
+	unstable_getMiniflareWorkerOptions,
+};
+
+export type {
+	Unstable_DevWorker,
+	Unstable_DevOptions,
+	Unstable_Config,
+	Unstable_RawConfig,
+	Unstable_RawEnvironment,
+	GetPlatformProxyOptions,
+	PlatformProxy,
+	SourcelessWorkerOptions,
+	Unstable_MiniflareWorkerOptions,
+	Experimental_GenerateTypesOptions,
+	Experimental_GenerateTypesResult,
+};
+
+export { printBindings as unstable_printBindings } from "./utils/print-bindings";
+export { resolveNamedTunnel as unstable_resolveNamedTunnel } from "./tunnel/client";
 
 // Export internal APIs required by the Vitest integration as `unstable_`
-export { default as unstable_splitSqlQuery } from "./d1/splitter";
+export { splitSqlQuery as unstable_splitSqlQuery } from "./d1/splitter";
 
 // `miniflare-cli/assets` dynamically imports`@cloudflare/pages-shared/environment-polyfills`.
 // `@cloudflare/pages-shared/environment-polyfills/types.ts` defines `global`
 // augmentations that pollute the `import`-site's typing environment.
 //
-// We `require` instead of `import`ing here to avoid polluting the main
-// `wrangler` TypeScript project with the `global` augmentations. This
-// relies on the fact that `require` is untyped.
 export interface Unstable_ASSETSBindingsOptions {
 	log: Logger;
 	proxyPort?: number;
 	directory?: string;
+	signal?: AbortSignal;
 }
-const generateASSETSBinding: (
+export const unstable_generateASSETSBinding: (
 	opts: Unstable_ASSETSBindingsOptions
 ) => (request: Request) => Promise<Response> =
-	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	/* eslint-disable-next-line @typescript-eslint/no-require-imports --
+	   We `require` instead of `import`ing here to avoid polluting the main
+	   `wrangler` TypeScript project with the `global` augmentations. This
+	   relies on the fact that `require` is untyped.
+	*/
 	require("./miniflare-cli/assets").default;
-export { generateASSETSBinding as unstable_generateASSETSBinding };
 
-export { experimental_readRawConfig } from "./config";
-export { experimental_patchConfig } from "./config/patch-config";
+export {
+	defaultWranglerConfig as unstable_defaultWranglerConfig,
+	experimental_readRawConfig,
+} from "@cloudflare/workers-utils";
+
+// TODO: consider if we want to keep exporting `experimental_patchConfig` from wrangler.
+//       wouldn't it be better for consumers to depend and use it directly from
+//       @cloudflare/workers-utils instead?
+export { experimental_patchConfig } from "@cloudflare/workers-utils";
+
+export {
+	startRemoteProxySession,
+	maybeStartOrUpdateRemoteProxySession,
+	convertConfigBindingsToStartWorkerBindings as unstable_convertConfigBindingsToStartWorkerBindings,
+};
+export type { StartRemoteProxySessionOptions, Binding, RemoteProxySession };
+
+export { getDetailsForAutoConfig as experimental_getDetailsForAutoConfig } from "./autoconfig/details";
+export { runAutoConfig as experimental_runAutoConfig } from "./autoconfig/run";
+export { Framework as experimental_AutoConfigFramework } from "./autoconfig/frameworks/framework-class";
+
+export { experimental_getWranglerCommands } from "./experimental-commands-api";

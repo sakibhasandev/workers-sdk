@@ -1,13 +1,17 @@
 import SCRIPT_OBJECT_ENTRY from "worker:shared/object-entry";
-import {
+import SCRIPT_REMOTE_PROXY_CLIENT from "worker:shared/remote-proxy-client";
+import { CoreBindings, SharedBindings } from "../../workers";
+import type { RemoteProxyConnectionString } from ".";
+import type {
 	Worker,
 	Worker_Binding,
 	Worker_Binding_DurableObjectNamespaceDesignator,
 } from "../../runtime";
-import { CoreBindings, SharedBindings } from "../../workers";
 
 export const SOCKET_ENTRY = "entry";
 export const SOCKET_ENTRY_LOCAL = "entry:local";
+export const SOCKET_DEBUG_PORT = "debug-port";
+export const SOCKET_DEV_REGISTRY = "dev-registry";
 const SOCKET_DIRECT_PREFIX = "direct";
 
 export function getDirectSocketName(workerIndex: number, entrypoint: string) {
@@ -16,6 +20,9 @@ export function getDirectSocketName(workerIndex: number, entrypoint: string) {
 
 // Service looping back to Miniflare's Node.js process (for storage, etc)
 export const SERVICE_LOOPBACK = "loopback";
+
+// Service for the dev registry proxy worker (routes cross-process service bindings and DO proxies).
+export const SERVICE_DEV_REGISTRY_PROXY = "dev-registry-proxy";
 
 // Special host to use for Cap'n Proto connections. This is required to use
 // JS RPC over `external` services in Wrangler's service registry.
@@ -67,6 +74,49 @@ export function objectEntryWorker(
 				name: SharedBindings.DURABLE_OBJECT_NAMESPACE_OBJECT,
 				durableObjectNamespace,
 			},
+		],
+	};
+}
+
+export function remoteProxyClientWorker(
+	remoteProxyConnectionString: RemoteProxyConnectionString | undefined,
+	binding: string,
+	script?: () => string
+) {
+	const cfTraceId = process.env.CF_TRACE_ID;
+	return {
+		compatibilityDate: "2025-01-01",
+		modules: [
+			{
+				name: "index.worker.js",
+				esModule: (script ?? SCRIPT_REMOTE_PROXY_CLIENT)(),
+			},
+		],
+		bindings: [
+			...(remoteProxyConnectionString?.href
+				? [
+						{
+							name: "remoteProxyConnectionString",
+							text: remoteProxyConnectionString.href,
+						},
+					]
+				: []),
+			{
+				name: "binding",
+				text: binding,
+			},
+			...(cfTraceId
+				? [
+						{
+							name: "cfTraceId",
+							text: cfTraceId,
+						},
+					]
+				: []),
+			// Loopback binding so the proxy client can report diagnostics
+			// (e.g. a Cloudflare Access block on the remote proxy server)
+			// back to the Miniflare host for a single, actionable warning.
+			WORKER_BINDING_SERVICE_LOOPBACK,
 		],
 	};
 }

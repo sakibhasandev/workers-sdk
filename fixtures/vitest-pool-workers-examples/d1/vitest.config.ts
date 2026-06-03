@@ -1,22 +1,23 @@
 import path from "node:path";
 import {
-	defineWorkersProject,
+	cloudflareTest,
 	readD1Migrations,
-} from "@cloudflare/vitest-pool-workers/config";
+} from "@cloudflare/vitest-pool-workers";
+import { defineConfig, defineProject, mergeConfig } from "vitest/config";
+import configShared from "../../../vitest.shared";
 
-export default defineWorkersProject(async () => {
+export default defineConfig(async () => {
 	// Read all migrations in the `migrations` directory
 	const migrationsPath = path.join(__dirname, "migrations");
 	const migrations = await readD1Migrations(migrationsPath);
 
-	return {
-		test: {
-			setupFiles: ["./test/apply-migrations.ts"],
-			poolOptions: {
-				workers: {
-					singleWorker: true,
+	return mergeConfig(
+		configShared,
+		defineProject({
+			plugins: [
+				cloudflareTest({
 					wrangler: {
-						configPath: "./wrangler.toml",
+						configPath: "./wrangler.jsonc",
 						environment: "production",
 					},
 					miniflare: {
@@ -24,8 +25,11 @@ export default defineWorkersProject(async () => {
 						// setup file
 						bindings: { TEST_MIGRATIONS: migrations },
 					},
-				},
+				}),
+			],
+			test: {
+				setupFiles: ["./test/apply-migrations.ts"],
 			},
-		},
-	};
+		})
+	);
 });

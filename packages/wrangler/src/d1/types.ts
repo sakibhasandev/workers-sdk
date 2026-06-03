@@ -1,11 +1,21 @@
 export type Database = {
 	uuid: string;
 	previewDatabaseUuid?: string;
-	name: string;
+	name?: string;
 	binding: string;
 	internal_env?: string;
 	migrationsTableName: string;
-	migrationsFolderPath: string;
+	/**
+	 * The raw `migrations_dir` value the user set in their Wrangler config,
+	 * or undefined if they did not set one.
+	 */
+	migrationsDirRaw?: string;
+	/**
+	 * Optional glob (relative to the Wrangler config file) for discovering
+	 * migration files. When not set, callers should default to
+	 * `${migrationsDirRaw ?? DEFAULT_MIGRATION_PATH}/*.sql`.
+	 */
+	migrationsPattern?: string;
 };
 
 export type DatabaseCreationResult = {
@@ -18,10 +28,13 @@ export type DatabaseCreationResult = {
 export type DatabaseInfo = {
 	uuid: string;
 	name: string;
-	version: "alpha" | "beta";
+	version: "alpha" | "beta" | "production";
 	num_tables: number;
 	file_size: number;
 	running_in_region?: string;
+	read_replication?: {
+		mode: "auto" | "disabled";
+	};
 };
 
 export type Backup = {

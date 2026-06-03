@@ -1,5 +1,7 @@
-import type { WorkerMetadataBinding } from "../deployment-bundle/create-worker-upload-form";
-import type { CfUserLimits } from "../deployment-bundle/worker";
+import type {
+	CfUserLimits,
+	WorkerMetadataBinding,
+} from "@cloudflare/workers-utils";
 
 export type Percentage = number;
 type UUID = string;
@@ -36,7 +38,7 @@ export type ApiVersion = {
 		bindings: WorkerMetadataBinding[];
 		script: {
 			etag: string;
-			handlers: string[];
+			handlers: string[] | null;
 			placement_mode?: "smart";
 			last_deployed_from: string;
 		};

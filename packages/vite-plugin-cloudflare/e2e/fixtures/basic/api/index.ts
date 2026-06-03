@@ -7,8 +7,10 @@ interface Env {
 	AI: Ai;
 }
 
+let requestAborted = false;
+
 export default {
-	async fetch(request, env) {
+	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
 
 		if (url.pathname.startsWith("/api/")) {
@@ -17,26 +19,44 @@ export default {
 			});
 		}
 
-		if (url.pathname.startsWith("/ai/")) {
-			const messages = [
-				{
-					role: "user",
-					// This prompt generates the same output relatively reliably
-					content:
-						"Respond with the exact text 'This is a response from Workers AI.'. Do not include any other text",
-				},
-			];
+		if (url.pathname === "/env/") {
+			return Response.json(env);
+		}
 
-			const content = await env.AI.run("@hf/thebloke/zephyr-7b-beta-awq", {
-				messages,
+		if (url.pathname === "/wait") {
+			request.signal.addEventListener("abort", () => {
+				requestAborted = true;
 			});
-			if ("response" in content) {
-				return Response.json({
-					response: content.response,
-				});
-			} else {
-				return new Response("", { status: 500 });
-			}
+
+			const { readable, writable } = new IdentityTransformStream();
+			// Acquire the writer immediately before returning the Response
+			// to ensure the stream stays open for writes
+			const writer = writable.getWriter();
+			const enc = new TextEncoder();
+
+			ctx.waitUntil(
+				(async () => {
+					try {
+						for (let i = 0; i < 6; i++) {
+							// Send 'ping' every 500ms to keep the connection alive for 3 seconds
+							await writer.write(enc.encode("ping\r\n"));
+							await scheduler.wait(500);
+						}
+					} finally {
+						await writer.close();
+					}
+				})()
+			);
+
+			return new Response(readable, {
+				headers: { "Content-Type": "text/plain" },
+			});
+		}
+
+		if (url.pathname === "/aborted") {
+			return new Response(
+				requestAborted ? "Request aborted" : "Request not aborted"
+			);
 		}
 
 		return env.ASSETS.fetch(request);

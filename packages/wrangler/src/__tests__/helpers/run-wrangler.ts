@@ -1,6 +1,7 @@
+import { normalizeString } from "@cloudflare/workers-utils/test-helpers";
+import { vi } from "vitest";
 import { main } from "../../index";
 import * as shellquote from "../../utils/shell-quote";
-import { normalizeString } from "./normalize";
 
 /**
  * A helper to 'run' wrangler commands for tests.
@@ -9,9 +10,10 @@ export async function runWrangler(
 	cmd = "",
 	env: Record<string, string | undefined> = {}
 ) {
-	const originalEnv = process.env;
+	for (const [key, value] of Object.entries(env)) {
+		vi.stubEnv(key, value);
+	}
 	try {
-		process.env = { ...originalEnv, ...env };
 		const argv = shellquote.parse(cmd);
 		await main(argv);
 	} catch (err) {
@@ -19,7 +21,5 @@ export async function runWrangler(
 			err.message = normalizeString(err.message);
 		}
 		throw err;
-	} finally {
-		process.env = originalEnv;
 	}
 }

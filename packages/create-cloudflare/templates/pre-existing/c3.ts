@@ -1,9 +1,10 @@
-import { cp, mkdtemp } from "fs/promises";
-import { tmpdir } from "os";
-import { join } from "path";
-import { brandColor, dim } from "@cloudflare/cli/colors";
+import { existsSync } from "node:fs";
+import { cp, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import { runCommand } from "@cloudflare/cli-shared-helpers/command";
 import { processArgument } from "helpers/args";
-import { runCommand } from "helpers/command";
 import { detectPackageManager } from "helpers/packageManagers";
 import { chooseAccount, wranglerLogin } from "../../src/wrangler/accounts";
 import type { TemplateConfig } from "../../src/templates";
@@ -22,7 +23,7 @@ export async function copyExistingWorkerFiles(ctx: C3Context) {
 					"Please specify the name of the existing worker in this account?",
 				label: "worker",
 				defaultValue: ctx.project.name,
-			},
+			}
 		);
 	}
 
@@ -45,23 +46,36 @@ export async function copyExistingWorkerFiles(ctx: C3Context) {
 			env: { CLOUDFLARE_ACCOUNT_ID: ctx.account?.id },
 			startText: "Downloading existing worker files",
 			doneText: `${brandColor("downloaded")} ${dim(
-				`existing "${ctx.args.existingScript}" worker files`,
+				`existing "${ctx.args.existingScript}" worker files`
 			)}`,
-		},
+		}
 	);
 
 	// copy src/* files from the downloaded Worker
 	await cp(
 		join(tempdir, ctx.args.existingScript, "src"),
 		join(ctx.project.path, "src"),
-		{ recursive: true },
+		{ recursive: true }
 	);
 
-	// copy ./wrangler.toml from the downloaded Worker
-	await cp(
-		join(tempdir, ctx.args.existingScript, "wrangler.toml"),
-		join(ctx.project.path, "wrangler.toml"),
-	);
+	// copy wrangler config file from the downloaded Worker
+	const configFiles = ["wrangler.jsonc", "wrangler.json", "wrangler.toml"];
+	let configFileCopied = false;
+
+	for (const configFile of configFiles) {
+		const sourcePath = join(tempdir, ctx.args.existingScript, configFile);
+		if (existsSync(sourcePath)) {
+			await cp(sourcePath, join(ctx.project.path, configFile));
+			configFileCopied = true;
+			break;
+		}
+	}
+
+	if (!configFileCopied) {
+		throw new Error(
+			`No wrangler configuration file found in downloaded worker. Expected one of: ${configFiles.join(", ")}`
+		);
+	}
 }
 
 const config: TemplateConfig = {

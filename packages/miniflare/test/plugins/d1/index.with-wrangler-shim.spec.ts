@@ -8,6 +8,8 @@ import type {
 	D1SessionBookmark,
 	D1SessionConstraint,
 } from "@cloudflare/workers-types/experimental";
+// Import suite tests - this registers the tests with vitest
+import "./suite";
 import type { Miniflare } from "miniflare";
 
 const kSend = Symbol("kSend");
@@ -47,8 +49,7 @@ export class TestD1Database implements D1Database {
 	}
 
 	withSession(
-		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		constraintOrBookmark?: D1SessionBookmark | D1SessionConstraint
+		_constraintOrBookmark?: D1SessionBookmark | D1SessionConstraint
 	): D1DatabaseSession {
 		throw new Error("Method not implemented for D1 Wrangler shim.");
 	}
@@ -93,4 +94,3 @@ setupTest(
 	"worker.dist.mjs",
 	async (mf) => new TestD1Database(mf)
 );
-require("./suite");

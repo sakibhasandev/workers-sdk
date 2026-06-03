@@ -1,6 +1,7 @@
 name: Validate PR Description
 
 on:
+  merge_group:
   pull_request:
     types:
       [
@@ -14,33 +15,32 @@ on:
         converted_to_draft,
       ]
 
+permissions:
+  contents: read
+
 jobs:
   check:
-    # Don't check the Version Packages PR
-    if: github.head_ref != 'changeset-release/main'
+    # Don't check the Version Packages PR or merge queue jobs
+    if: github.event_name != 'merge_group' && github.head_ref != 'changeset-release/main'
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-add-pr
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.head_ref != 'changeset-release/main' }}
     timeout-minutes: 30
     name: Check
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-slim
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          persist-credentials: false
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
         id: changes
         with:
           filters: |
             everything_but_markdown:
               - '!**/*.md'
-
-      - uses: Ana06/get-changed-files@v1.2
-        id: files
-        with:
-          format: "json"
 
       - name: Install Dependencies
         if: steps.changes.outputs.everything_but_markdown == 'true'
@@ -50,6 +50,13 @@ jobs:
           turbo-team: ${{ secrets.TURBO_TEAM }}
           turbo-token: ${{ secrets.TURBO_TOKEN }}
           turbo-signature: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+
+      - name: List changed files
+        if: steps.changes.outputs.everything_but_markdown == 'true'
+        id: files
+        uses: Ana06/get-changed-files@25f79e676e7ea1868813e21465014798211fad8c # v2.3.0
+        with:
+          format: "json"
 
       - run: node -r esbuild-register tools/deployments/validate-pr-description.ts
         if: steps.changes.outputs.everything_but_markdown == 'true'

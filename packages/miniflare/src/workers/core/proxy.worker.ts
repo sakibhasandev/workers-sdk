@@ -6,6 +6,7 @@ import {
 	CoreBindings,
 	CoreHeaders,
 	isFetcherFetch,
+	isImagesInput,
 	isR2ObjectWriteHttpMetadata,
 	ProxyAddresses,
 	ProxyOps,
@@ -15,12 +16,11 @@ import {
 	createHTTPReducers,
 	createHTTPRevivers,
 	parseWithReadableStreams,
-	PlatformImpl,
-	ReducersRevivers,
 	stringifyWithStreams,
 	structuredSerializableReducers,
 	structuredSerializableRevivers,
 } from "./devalue";
+import type { PlatformImpl, ReducersRevivers } from "./devalue";
 
 const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder();
@@ -235,6 +235,7 @@ export class ProxyServer implements DurableObject {
 		let status = 200;
 		let result: unknown;
 		let unbufferedRest: ReadableStream | undefined;
+		let rpcAwaited = false;
 		if (opHeader === ProxyOps.GET) {
 			// If no key header is specified, just return the target
 			result = keyHeader === null ? target : target[keyHeader];
@@ -268,7 +269,9 @@ export class ProxyServer implements DurableObject {
 
 			// See `isFetcherFetch()` comment for why this special
 			if (isFetcherFetch(targetName, keyHeader)) {
-				const originalUrl = request.headers.get(CoreHeaders.ORIGINAL_URL);
+				const originalUrl =
+					request.headers.get(CoreHeaders.OP_ORIGINAL_URL) ??
+					request.headers.get(CoreHeaders.ORIGINAL_URL);
 				const url = new URL(originalUrl ?? request.url);
 				// Create a new request to allow header mutation and use original URL
 				request = new Request(url, request);
@@ -276,6 +279,7 @@ export class ProxyServer implements DurableObject {
 				request.headers.delete(CoreHeaders.OP);
 				request.headers.delete(CoreHeaders.OP_TARGET);
 				request.headers.delete(CoreHeaders.OP_KEY);
+				request.headers.delete(CoreHeaders.OP_ORIGINAL_URL);
 				request.headers.delete(CoreHeaders.ORIGINAL_URL);
 				request.headers.delete(CoreHeaders.DISABLE_PRETTY_ERROR);
 				return func.call(target, request);
@@ -305,9 +309,19 @@ export class ProxyServer implements DurableObject {
 			}
 			assert(Array.isArray(args));
 			try {
-				if (["RpcProperty", "RpcStub"].includes(func.constructor.name)) {
+				// See #createMediaProxy() for why this is special
+				if (isImagesInput(targetName, keyHeader)) {
+					let transform = func.apply(target, [args[0]]);
+					for (const operation of args[1]) {
+						transform = transform[operation.type](...operation.arguments);
+					}
+					// We intentionally don't await this `output()` call so that it's treated as a regular promise
+					result = transform.output(args[2]);
+				} else if (["RpcProperty", "RpcStub"].includes(func.constructor.name)) {
 					// let's resolve RpcPromise instances right away (to support serialization)
 					result = await func(...args);
+					// Mark that we've awaited this RPC call, so we set the Promise header below
+					rpcAwaited = true;
 				} else {
 					result = func.apply(target, args);
 				}
@@ -325,7 +339,7 @@ export class ProxyServer implements DurableObject {
 		}
 
 		const headers = new Headers();
-		if (allowAsync && result instanceof Promise) {
+		if (allowAsync && (result instanceof Promise || rpcAwaited)) {
 			// Note we only resolve `Promise`s if we're allowing async operations.
 			// Otherwise, we'll treat the `Promise` as a native target. This allows
 			// us to use regular HTTP status/headers to indicate whether the `Promise`

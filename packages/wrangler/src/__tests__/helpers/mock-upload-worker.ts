@@ -1,23 +1,42 @@
+import {
+	getSubdomainValues,
+	getSubdomainValuesAPIMock,
+} from "@cloudflare/deploy-helpers";
+import { ParseError } from "@cloudflare/workers-utils";
 import { http, HttpResponse } from "msw";
-import { mockGetWorkerSubdomain } from "./mock-workers-subdomain";
+/* eslint-disable-next-line no-restricted-imports --
+ * Helper used outside test callbacks, needs module-level expect
+ * TODO: remove this `expect` import
+ */
+import { expect } from "vitest";
+import {
+	mockGetWorkerSubdomain,
+	mockUpdateWorkerSubdomain,
+} from "./mock-workers-subdomain";
 import { createFetchResult, msw } from "./msw";
 import { serialize, toString } from "./serialize-form-data-entry";
+import { readWranglerConfig } from "./write-wrangler-config";
+import type { NonVersionedScriptSettings } from "../../versions/api";
 import type {
 	AssetConfigMetadata,
+	CfWorkerInit,
+	RawConfig,
+	RawEnvironment,
 	WorkerMetadata,
-} from "../../deployment-bundle/create-worker-upload-form";
-import type { CfWorkerInit } from "../../deployment-bundle/worker";
-import type { NonVersionedScriptSettings } from "../../versions/api";
+} from "@cloudflare/workers-utils";
 import type { HttpResponseResolver } from "msw";
 
 /** Create a mock handler for the request to upload a worker script. */
 export function mockUploadWorkerRequest(
 	options: {
+		wranglerConfigPath?: string;
+		expectedBaseUrl?: string;
 		expectedEntry?: string | RegExp | ((entry: string | null) => void);
 		expectedMainModule?: string;
 		expectedType?: "esm" | "sw" | "none";
 		expectedBindings?: unknown;
 		expectedModules?: Record<string, string | null>;
+		excludedModules?: string[];
 		expectedCompatibilityDate?: string;
 		expectedCompatibilityFlags?: string[];
 		expectedMigrations?: CfWorkerInit["migrations"];
@@ -26,7 +45,7 @@ export function mockUploadWorkerRequest(
 		expectedCapnpSchema?: string;
 		expectedLimits?: CfWorkerInit["limits"];
 		env?: string;
-		legacyEnv?: boolean;
+		useServiceEnvironments?: boolean;
 		keepVars?: boolean;
 		keepSecrets?: boolean;
 		tag?: string;
@@ -40,16 +59,18 @@ export function mockUploadWorkerRequest(
 		expectedObservability?: CfWorkerInit["observability"];
 		expectedSettingsPatch?: Partial<NonVersionedScriptSettings>;
 		expectedContainers?: { class_name: string }[];
+		expectedAnnotations?: Record<string, string | undefined>;
+		expectedDeploymentMessage?: string;
 	} = {}
 ) {
-	const expectedScriptName = (options.expectedScriptName ??= "test-name");
 	const handleUpload: HttpResponseResolver = async ({ params, request }) => {
 		const url = new URL(request.url);
-		expect(params.accountId).toEqual("some-account-id");
-		expect(params.scriptName).toEqual(
-			legacyEnv && env ? `${expectedScriptName}-${env}` : expectedScriptName
+		expect(url.hostname).toMatch(
+			options.expectedBaseUrl ?? "api.cloudflare.com"
 		);
-		if (!legacyEnv) {
+		expect(params.accountId).toEqual("some-account-id");
+		expect(params.scriptName).toEqual(expectedScriptName);
+		if (useServiceEnvironments) {
 			expect(params.envName).toEqual(env);
 		}
 		if (useOldUploadApi) {
@@ -90,7 +111,13 @@ export function mockUploadWorkerRequest(
 		}
 
 		if ("expectedBindings" in options) {
-			expect(metadata.bindings).toEqual(expectedBindings);
+			// Compare the provided bindings with the expected bindings, without requireing the order to match
+			expect(metadata.bindings).toEqual(
+				expect.arrayContaining(expectedBindings as unknown[])
+			);
+			expect(metadata.bindings?.length).toEqual(
+				(expectedBindings as unknown[])?.length
+			);
 		}
 		if ("expectedCompatibilityDate" in options) {
 			expect(metadata.compatibility_date).toEqual(expectedCompatibilityDate);
@@ -121,6 +148,9 @@ export function mockUploadWorkerRequest(
 		if ("expectedContainers" in options) {
 			expect(metadata.containers).toEqual(expectedContainers);
 		}
+		if ("expectedAnnotations" in options) {
+			expect(metadata.annotations).toEqual(expectedAnnotations);
+		}
 
 		if (expectedUnsafeMetaData !== undefined) {
 			Object.keys(expectedUnsafeMetaData).forEach((key) => {
@@ -129,6 +159,9 @@ export function mockUploadWorkerRequest(
 		}
 		for (const [name, content] of Object.entries(expectedModules)) {
 			expect(await serialize(formBody.get(name))).toEqual(content);
+		}
+		for (const name of excludedModules) {
+			expect(formBody.get(name)).toBeNull();
 		}
 
 		if (useOldUploadApi) {
@@ -168,24 +201,32 @@ export function mockUploadWorkerRequest(
 		expectedType = "esm",
 		expectedBindings,
 		expectedModules = {},
+		excludedModules = [],
 		expectedCompatibilityDate,
 		expectedCompatibilityFlags,
 		env = undefined,
-		legacyEnv = false,
+		useServiceEnvironments = true,
 		expectedMigrations,
 		expectedTailConsumers,
 		expectedUnsafeMetaData,
 		expectedCapnpSchema,
 		expectedLimits,
 		expectedContainers,
+		expectedAnnotations,
 		keepVars,
 		keepSecrets,
 		expectedDispatchNamespace,
 		useOldUploadApi,
 		expectedObservability,
 		expectedSettingsPatch,
+		expectedDeploymentMessage,
 	} = options;
-	if (env && !legacyEnv) {
+
+	const expectedScriptName =
+		options.expectedScriptName ??
+		"test-name" + (!useServiceEnvironments && env ? `-${env}` : "");
+
+	if (env && useServiceEnvironments) {
 		msw.use(
 			http.put(
 				"*/accounts/:accountId/workers/services/:scriptName/environments/:envName",
@@ -214,7 +255,17 @@ export function mockUploadWorkerRequest(
 			),
 			http.post(
 				"*/accounts/:accountId/workers/scripts/:scriptName/deployments",
-				() => HttpResponse.json(createFetchResult({ id: "Deployment-ID" }))
+				async ({ request }) => {
+					if ("expectedDeploymentMessage" in options) {
+						const body = (await request.json()) as {
+							annotations?: { "workers/message"?: string };
+						};
+						expect(body.annotations?.["workers/message"]).toEqual(
+							expectedDeploymentMessage
+						);
+					}
+					return HttpResponse.json(createFetchResult({ id: "Deployment-ID" }));
+				}
 			),
 			http.patch(
 				"*/accounts/:accountId/workers/scripts/:scriptName/script-settings",
@@ -230,11 +281,48 @@ export function mockUploadWorkerRequest(
 			)
 		);
 	}
-	// TODO make explicit by callers?
+	// Every upload is followed by subdomain requests, to check and set subdomain status.
+	// TODO: make this explicit by callers?
+	let config: RawConfig = {};
+	try {
+		config = readWranglerConfig(options.wranglerConfigPath);
+	} catch (e) {
+		if (e instanceof ParseError) {
+			// Ignore, config is either bad or doesn't exist.
+		} else {
+			throw e;
+		}
+	}
+	let envConfig: RawEnvironment = config;
+	if (env) {
+		envConfig = config.env?.[env] ?? {};
+	}
+	const subdomainDefaults = getSubdomainValuesAPIMock(
+		envConfig.workers_dev,
+		envConfig.preview_urls,
+		envConfig.routes ?? []
+	);
 	mockGetWorkerSubdomain({
-		enabled: true,
+		enabled: subdomainDefaults.workers_dev,
+		previews_enabled: subdomainDefaults.preview_urls,
 		env,
-		legacyEnv,
+		useServiceEnvironments,
+		expectedScriptName,
+	});
+	const subdomainValues = getSubdomainValues(
+		envConfig.workers_dev,
+		envConfig.preview_urls,
+		envConfig.routes ?? []
+	);
+	mockUpdateWorkerSubdomain({
+		enabled: subdomainValues.workers_dev,
+		previews_enabled: subdomainValues.preview_urls,
+		response: {
+			enabled: subdomainDefaults.workers_dev,
+			previews_enabled: subdomainDefaults.preview_urls,
+		},
+		env,
+		useServiceEnvironments,
 		expectedScriptName,
 	});
 }

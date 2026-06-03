@@ -1,10 +1,10 @@
 import assert from "node:assert";
 import { readdir, readFile, stat } from "node:fs/promises";
 import * as path from "node:path";
-import { createPatternMatcher } from "@cloudflare/workers-shared/utils/helpers";
+import { createPatternMatcher } from "@cloudflare/workers-shared";
+import { UserError } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import xxhash from "xxhash-wasm";
-import { UserError } from "./errors";
 import {
 	BATCH_KEY_MAX,
 	createKVNamespace,
@@ -17,8 +17,12 @@ import {
 	putKVKeyValue,
 } from "./kv/helpers";
 import { logger, LOGGER_LEVELS } from "./logger";
-import type { Config } from "./config";
 import type { KeyValue } from "./kv/helpers";
+import type {
+	ComplianceConfig,
+	Config,
+	LegacyAssetPaths,
+} from "@cloudflare/workers-utils";
 import type { XXHashAPI } from "xxhash-wasm";
 
 /** Paths to always ignore. */
@@ -77,19 +81,20 @@ function hashAsset(
 }
 
 async function createKVNamespaceIfNotAlreadyExisting(
+	complianceConfig: ComplianceConfig,
 	title: string,
 	accountId: string
 ) {
 	// check if it already exists
 	// TODO: this is super inefficient, should be made better
-	const namespaces = await listKVNamespaces(accountId);
+	const namespaces = await listKVNamespaces(complianceConfig, accountId);
 	const found = namespaces.find((ns) => ns.title === title);
 	if (found) {
 		return { created: false, id: found.id };
 	}
 
 	// else we make the namespace
-	const id = await createKVNamespace(accountId, title);
+	const id = await createKVNamespace(complianceConfig, accountId, title);
 	logger.log(`🌀 Created namespace for Workers Site "${title}"`);
 
 	return {
@@ -119,6 +124,7 @@ function pluralise(count: number) {
  * asset in the KV namespace.
  */
 export async function syncWorkersSite(
+	complianceConfig: ComplianceConfig,
 	accountId: string | undefined,
 	scriptName: string,
 	siteAssets: LegacyAssetPaths | undefined,
@@ -144,12 +150,17 @@ export async function syncWorkersSite(
 	}`;
 
 	const { id: namespace } = await createKVNamespaceIfNotAlreadyExisting(
+		complianceConfig,
 		title,
 		accountId
 	);
 	// Get all existing keys in asset namespace
 	logger.info("Fetching list of already uploaded assets...");
-	const namespaceKeysResponse = await listKVNamespaceKeys(accountId, namespace);
+	const namespaceKeysResponse = await listKVNamespaceKeys(
+		complianceConfig,
+		accountId,
+		namespace
+	);
 	const namespaceKeyInfoMap = new Map<
 		string,
 		(typeof namespaceKeysResponse)[0]
@@ -304,6 +315,7 @@ export async function syncWorkersSite(
 			// Upload the bucket to the KV namespace, suppressing logs, we do our own
 			try {
 				await putKVBulkKeyValue(
+					complianceConfig,
 					accountId,
 					namespace,
 					bucket,
@@ -358,6 +370,7 @@ export async function syncWorkersSite(
 
 		if (!oldAssetTTL) {
 			await deleteKVBulkKeyValue(
+				complianceConfig,
 				accountId,
 				namespace,
 				Array.from(namespaceKeys)
@@ -377,11 +390,12 @@ export async function syncWorkersSite(
 				}
 
 				const currentValue = await getKVKeyValue(
+					complianceConfig,
 					accountId,
 					namespace,
 					namespaceKey
 				);
-				await putKVKeyValue(accountId, namespace, {
+				await putKVKeyValue(complianceConfig, accountId, namespace, {
 					key: namespaceKey,
 					value: Buffer.from(currentValue),
 					expiration_ttl: oldAssetTTL,
@@ -407,7 +421,8 @@ async function validateAssetSize(
 	const { size } = await stat(absFilePath);
 	if (size > 25 * 1024 * 1024) {
 		throw new UserError(
-			`File ${relativeFilePath} is too big, it should be under 25 MiB. See https://developers.cloudflare.com/workers/platform/limits#kv-limits`
+			`File ${relativeFilePath} is too big, it should be under 25 MiB. See https://developers.cloudflare.com/workers/platform/limits#kv-limits`,
+			{ telemetryMessage: "sites asset size too large" }
 		);
 	}
 }
@@ -415,7 +430,8 @@ async function validateAssetSize(
 function validateAssetKey(assetKey: string) {
 	if (assetKey.length > 512) {
 		throw new UserError(
-			`The asset path key "${assetKey}" exceeds the maximum key size limit of 512. See https://developers.cloudflare.com/workers/platform/limits#kv-limits",`
+			`The asset path key "${assetKey}" exceeds the maximum key size limit of 512. See https://developers.cloudflare.com/workers/platform/limits#kv-limits",`,
+			{ telemetryMessage: "sites asset key too long" }
 		);
 	}
 }
@@ -427,30 +443,6 @@ function validateAssetKey(assetKey: string) {
  */
 function urlSafe(filePath: string): string {
 	return filePath.replace(/\\/g, "/");
-}
-
-/**
- * Information about the assets that should be uploaded
- */
-export interface LegacyAssetPaths {
-	/**
-	 * Absolute path to the root of the project.
-	 *
-	 * This is the directory containing wrangler.toml or cwd if no config.
-	 */
-	baseDirectory: string;
-	/**
-	 * The path to the assets directory, relative to the `baseDirectory`.
-	 */
-	assetDirectory: string;
-	/**
-	 * An array of patterns that match files that should be uploaded.
-	 */
-	includePatterns: string[];
-	/**
-	 * An array of patterns that match files that should not be uploaded.
-	 */
-	excludePatterns: string[];
 }
 
 /**

@@ -1,5 +1,5 @@
 {
-	"name": "pages-redirected-config",
+	"name": "@fixture/config-redirected-pages",
 	"private": true,
 	"description": "",
 	"license": "ISC",
@@ -16,8 +16,5 @@
 		"undici": "catalog:default",
 		"vitest": "catalog:default",
 		"wrangler": "workspace:*"
-	},
-	"volta": {
-		"extends": "../../package.json"
 	}
 }

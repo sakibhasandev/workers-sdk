@@ -2,7 +2,7 @@ import { createCommand, createNamespace } from "../core/create-command";
 import { confirm } from "../dialogs";
 import { logger } from "../logger";
 import { requireAuth } from "../user";
-import { getR2DevDomain, updateR2DevDomain } from "./helpers";
+import { getR2DevDomain, updateR2DevDomain } from "./helpers/domain";
 
 export const r2BucketDevUrlNamespace = createNamespace({
 	metadata: {
@@ -37,7 +37,12 @@ export const r2BucketDevUrlGetCommand = createCommand({
 
 		const { bucket, jurisdiction } = args;
 
-		const devDomain = await getR2DevDomain(accountId, bucket, jurisdiction);
+		const devDomain = await getR2DevDomain(
+			config,
+			accountId,
+			bucket,
+			jurisdiction
+		);
 
 		if (devDomain.enabled) {
 			logger.log(`Public access is enabled at 'https://${devDomain.domain}'.`);
@@ -93,6 +98,7 @@ export const r2BucketDevUrlEnableCommand = createCommand({
 		logger.log(`Enabling public access for bucket '${bucket}'...`);
 
 		const devDomain = await updateR2DevDomain(
+			config,
 			accountId,
 			bucket,
 			true,
@@ -149,6 +155,7 @@ export const r2BucketDevUrlDisableCommand = createCommand({
 		logger.log(`Disabling public access for bucket '${bucket}'...`);
 
 		const devDomain = await updateR2DevDomain(
+			config,
 			accountId,
 			bucket,
 			false,

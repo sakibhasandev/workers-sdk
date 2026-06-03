@@ -7,7 +7,6 @@
 export {
 	env,
 	SELF,
-	fetchMock,
 	runInDurableObject,
 	runDurableObjectAlarm,
 	listDurableObjectIds,
@@ -17,5 +16,10 @@ export {
 	createMessageBatch,
 	getQueueResult,
 	applyD1Migrations,
+	adminSecretsStore,
 	createPagesEventContext,
+	introspectWorkflowInstance,
+	introspectWorkflow,
+	reset,
+	abortAllDurableObjects,
 } from "cloudflare:test-internal";

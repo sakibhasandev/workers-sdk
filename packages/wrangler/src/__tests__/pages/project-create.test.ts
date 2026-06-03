@@ -1,9 +1,10 @@
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { afterEach, describe, it, vi } from "vitest";
 import { endEventLoop } from "../helpers/end-event-loop";
 import { mockAccountId, mockApiToken } from "./../helpers/mock-account-id";
 import { mockConsoleMethods } from "./../helpers/mock-console";
 import { msw } from "./../helpers/msw";
-import { runInTempDir } from "./../helpers/run-in-tmp";
 import { runWrangler } from "./../helpers/run-wrangler";
 
 describe("pages project create", () => {
@@ -21,7 +22,7 @@ describe("pages project create", () => {
 		msw.restoreHandlers();
 	});
 
-	it("should create a project with a production branch", async () => {
+	it("should create a project with a production branch", async ({ expect }) => {
 		msw.use(
 			http.post(
 				"*/accounts/:accountId/pages/projects",
@@ -60,12 +61,15 @@ describe("pages project create", () => {
 		);
 
 		expect(std.out).toMatchInlineSnapshot(`
-            "✨ Successfully created the 'a-new-project' project. It will be available at https://a-new-project.pages.dev/ once you create your first deployment.
-            To deploy a folder of assets, run 'wrangler pages deploy [directory]'."
-        `);
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Successfully created the 'a-new-project' project. It will be available at https://a-new-project.pages.dev/ once you create your first deployment.
+			To deploy a folder of assets, run 'wrangler pages deploy [directory]'."
+		`);
 	});
 
-	it("should create a project with compatibility flags", async () => {
+	it("should create a project with compatibility flags", async ({ expect }) => {
 		msw.use(
 			http.post(
 				"*/accounts/:accountId/pages/projects",
@@ -102,12 +106,17 @@ describe("pages project create", () => {
 		);
 
 		expect(std.out).toMatchInlineSnapshot(`
-            "✨ Successfully created the 'a-new-project' project. It will be available at https://a-new-project.pages.dev/ once you create your first deployment.
-            To deploy a folder of assets, run 'wrangler pages deploy [directory]'."
-        `);
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Successfully created the 'a-new-project' project. It will be available at https://a-new-project.pages.dev/ once you create your first deployment.
+			To deploy a folder of assets, run 'wrangler pages deploy [directory]'."
+		`);
 	});
 
-	it("should create a project with a compatibility date", async () => {
+	it("should create a project with a compatibility date", async ({
+		expect,
+	}) => {
 		msw.use(
 			http.post(
 				"*/accounts/:accountId/pages/projects",
@@ -144,12 +153,17 @@ describe("pages project create", () => {
 		);
 
 		expect(std.out).toMatchInlineSnapshot(`
-            "✨ Successfully created the 'a-new-project' project. It will be available at https://a-new-project.pages.dev/ once you create your first deployment.
-            To deploy a folder of assets, run 'wrangler pages deploy [directory]'."
-        `);
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			✨ Successfully created the 'a-new-project' project. It will be available at https://a-new-project.pages.dev/ once you create your first deployment.
+			To deploy a folder of assets, run 'wrangler pages deploy [directory]'."
+		`);
 	});
 
-	it("should override cached accountId with CLOUDFLARE_ACCOUNT_ID environmental variable if provided", async () => {
+	it("should override cached accountId with CLOUDFLARE_ACCOUNT_ID environmental variable if provided", async ({
+		expect,
+	}) => {
 		msw.use(
 			http.post(
 				"*/accounts/:accountId/pages/projects",

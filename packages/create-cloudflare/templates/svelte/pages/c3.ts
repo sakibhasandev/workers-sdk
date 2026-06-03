@@ -1,9 +1,8 @@
 import { existsSync } from "node:fs";
-import { platform } from "node:os";
-import { logRaw, updateStatus } from "@cloudflare/cli";
-import { blue, brandColor, dim } from "@cloudflare/cli/colors";
+import { logRaw, updateStatus } from "@cloudflare/cli-shared-helpers";
+import { blue, brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import { transformFile } from "@cloudflare/codemod";
 import { runFrameworkGenerator } from "frameworks/index";
-import { transformFile } from "helpers/codemod";
 import { usesTypescript } from "helpers/files";
 import { detectPackageManager } from "helpers/packageManagers";
 import { installPackages } from "helpers/packages";
@@ -99,21 +98,21 @@ const updateTypeDefinitions = (ctx: C3Context) => {
 					b.tsInterfaceBody([
 						b.tsPropertySignature(
 							b.identifier("env"),
-							b.tsTypeAnnotation(b.tsTypeReference(b.identifier("Env"))),
+							b.tsTypeAnnotation(b.tsTypeReference(b.identifier("Env")))
 						),
 						b.tsPropertySignature(
 							b.identifier("cf"),
 							b.tsTypeAnnotation(
-								b.tsTypeReference(b.identifier("CfProperties")),
-							),
+								b.tsTypeReference(b.identifier("CfProperties"))
+							)
 						),
 						b.tsPropertySignature(
 							b.identifier("ctx"),
 							b.tsTypeAnnotation(
-								b.tsTypeReference(b.identifier("ExecutionContext")),
-							),
+								b.tsTypeReference(b.identifier("ExecutionContext"))
+							)
 						),
-					]),
+					])
 				);
 
 				moduleBlock.body.unshift(platformInterface);
@@ -124,6 +123,7 @@ const updateTypeDefinitions = (ctx: C3Context) => {
 	});
 };
 
+const typesPath = "src/worker-configuration.d.ts";
 const config: TemplateConfig = {
 	configVersion: 1,
 	id: "svelte",
@@ -144,10 +144,9 @@ const config: TemplateConfig = {
 		};
 
 		if (usesTypescript(ctx)) {
-			const mv = platform() === "win32" ? "move" : "mv";
 			scripts = {
 				...scripts,
-				"cf-typegen": `wrangler types && ${mv} worker-configuration.d.ts src/`,
+				"cf-typegen": `wrangler types ${typesPath}`,
 			};
 		}
 
@@ -156,5 +155,6 @@ const config: TemplateConfig = {
 	devScript: "dev",
 	deployScript: "deploy",
 	previewScript: "preview",
+	typesPath,
 };
 export default config;

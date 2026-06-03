@@ -1,43 +1,95 @@
+import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { getWranglerHiddenDirPath, UserError } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import globToRegExp from "glob-to-regexp";
-import { UserError } from "../errors";
 import { logger } from "../logger";
 import { getBundleType } from "./bundle-type";
 import { RuleTypeToModuleType } from "./module-collection";
 import { parseRules } from "./rules";
 import { tryAttachSourcemapToModule } from "./source-maps";
-import type { Rule } from "../config/environment";
-import type { Entry } from "./entry";
 import type { ParsedRules } from "./rules";
-import type { CfModule } from "./worker";
+import type {
+	Entry,
+	CfModule,
+	CfModuleType,
+	Rule,
+} from "@cloudflare/workers-utils";
 
 async function* getFiles(
-	root: string,
-	relativeTo: string
+	configPath: string | undefined,
+	moduleRoot: string,
+	relativeTo: string,
+	projectRoot: string
 ): AsyncGenerator<string> {
-	for (const file of await readdir(root, { withFileTypes: true })) {
+	const wranglerHiddenDirPath = getWranglerHiddenDirPath(projectRoot);
+	for (const file of await readdir(moduleRoot, { withFileTypes: true })) {
+		const absPath = path.join(moduleRoot, file.name);
 		if (file.isDirectory()) {
-			yield* getFiles(path.join(root, file.name), relativeTo);
+			// Skip the hidden Wrangler directory so we don't accidentally bundle non-user files.
+			if (absPath !== wranglerHiddenDirPath) {
+				yield* getFiles(configPath, absPath, relativeTo, projectRoot);
+			}
 		} else {
-			// Module names should always use `/`. This is also required to match globs correctly on Windows. Later code will
-			// `path.resolve()` with these names to read contents which will perform appropriate normalisation.
-			yield path
-				.relative(relativeTo, path.join(root, file.name))
-				.replaceAll("\\", "/");
+			// don't bundle the wrangler config file
+			if (absPath !== configPath) {
+				// Module names should always use `/`. This is also required to match globs correctly on Windows. Later code will
+				// `path.resolve()` with these names to read contents which will perform appropriate normalisation.
+				yield path.relative(relativeTo, absPath).replaceAll("\\", "/");
+			}
 		}
 	}
 }
 
 /**
- * Checks if a given string is a valid Python package identifier.
- * See https://packaging.python.org/en/latest/specifications/name-normalization/
- * @param name The package name to validate
+ * Checks if a given module name is a Python vendor module.
+ * @param moduleName The module name to check
  */
-function isValidPythonPackageName(name: string): boolean {
-	const regex = /^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$/i;
-	return regex.test(name);
+function isPythonVendorModule(moduleName: string): boolean {
+	// separator should be forward slash, as we always use forward slash for module names
+	// see `getFiles()` for more details
+	return moduleName.startsWith("python_modules/");
+}
+
+const VENDORED_JS_EXTENSIONS = new Set([".mjs", ".js"]);
+
+/**
+ * Returns the module type for vendored modules in Python workers.
+ * This function is used to handle JavaScript files from the Python workers SDK package,
+ * which should be registered as ES modules so they can be dynamically imported at runtime.
+ * @param name The module name
+ * @param fallback The fallback module type
+ */
+function getVendoredModuleType(
+	name: string,
+	fallback: CfModuleType | undefined
+): CfModuleType | undefined {
+	// This is only enabled for python workers SDK package,
+	// which is under the `workers/` directory
+	if (!name.startsWith("workers/")) {
+		return fallback;
+	}
+	const ext = path.extname(name);
+	if (VENDORED_JS_EXTENSIONS.has(ext)) {
+		return "esm";
+	}
+	return fallback;
+}
+
+function removePythonVendorModules(
+	isPythonEntrypoint: boolean,
+	modules: CfModule[]
+): CfModule[] {
+	if (!isPythonEntrypoint) {
+		return modules;
+	}
+	return modules.filter((m) => !isPythonVendorModule(m.name));
+}
+
+function getPythonVendorModulesSize(modules: CfModule[]): number {
+	const vendorModules = modules.filter((m) => isPythonVendorModule(m.name));
+	return vendorModules.reduce((total, m) => total + m.content.length, 0);
 }
 
 /**
@@ -47,9 +99,15 @@ function isValidPythonPackageName(name: string): boolean {
 export async function findAdditionalModules(
 	entry: Entry,
 	rules: Rule[] | ParsedRules,
-	attachSourcemaps = false
+	attachSourcemaps = false,
+	pythonModulesExcludes: string[] = []
 ): Promise<CfModule[]> {
-	const files = getFiles(entry.moduleRoot, entry.moduleRoot);
+	const files = getFiles(
+		entry.configPath,
+		entry.moduleRoot,
+		entry.moduleRoot,
+		entry.projectRoot
+	);
 	const relativeEntryPoint = path
 		.relative(entry.moduleRoot, entry.file)
 		.replaceAll("\\", "/");
@@ -64,40 +122,85 @@ export async function findAdditionalModules(
 			name: m.name,
 		}));
 
-	// Try to find a requirements.txt file
 	const isPythonEntrypoint =
 		getBundleType(entry.format, entry.file) === "python";
 
 	if (isPythonEntrypoint) {
-		let pythonRequirements = "";
-		try {
-			pythonRequirements = await readFile(
-				path.resolve(entry.projectRoot, "requirements.txt"),
-				"utf-8"
-			);
-		} catch (e) {
-			// We don't care if a requirements.txt isn't found
-			logger.debug(
-				"Python entrypoint detected, but no requirements.txt file found."
+		// If a `cf-requirements.txt` file is found, show a warning instructing user to use pywrangler instead.
+		if (existsSync(path.resolve(entry.projectRoot, "cf-requirements.txt"))) {
+			logger.warn(
+				"Found a `cf-requirements.txt` file. cf-requirements.txt is no longer used, instead put your dependencies in pyproject.toml and use pywrangler."
 			);
 		}
 
-		for (const requirement of pythonRequirements.split("\n")) {
-			if (requirement === "") {
-				continue;
-			}
-			if (!isValidPythonPackageName(requirement)) {
-				throw new UserError(
-					`Invalid Python package name "${requirement}" found in requirements.txt. Note that requirements.txt should contain package names only, not version specifiers.`
-				);
-			}
+		// Look for a `python_modules` directory in the root of the project and add all the .py and .so files in it
+		const pythonModulesDir = path.resolve(entry.projectRoot, "python_modules");
+		const pythonModulesDirInModuleRoot = path.resolve(
+			entry.moduleRoot,
+			"python_modules"
+		);
 
-			modules.push({
-				type: "python-requirement",
-				name: requirement,
-				content: "",
-				filePath: undefined,
-			});
+		// Check for conflict between a `python_modules` directory in the module root and the project root.
+		const pythonModulesExistsInModuleRoot = existsSync(
+			pythonModulesDirInModuleRoot
+		);
+		if (
+			pythonModulesExistsInModuleRoot &&
+			entry.projectRoot !== entry.moduleRoot
+		) {
+			throw new UserError(
+				"The 'python_modules' directory cannot exist in your module root. Delete it to continue.",
+				{ telemetryMessage: "python modules directory in module root" }
+			);
+		}
+
+		const pythonModulesExists = existsSync(pythonModulesDir);
+		if (pythonModulesExists) {
+			const pythonModulesFiles = getFiles(
+				entry.file,
+				pythonModulesDir,
+				pythonModulesDir,
+				entry.projectRoot
+			);
+			const vendoredRules: Rule[] = [
+				{ type: "Data", globs: ["**/*"], fallthrough: true },
+			];
+			const vendoredModules = (
+				await matchFiles(pythonModulesFiles, pythonModulesDir, {
+					rules: vendoredRules,
+					removedRules: [],
+				})
+			)
+				.filter((m) => {
+					// Check if the file matches any exclusion pattern
+					for (const pattern of pythonModulesExcludes) {
+						const regexp = globToRegExp(pattern, { globstar: true });
+						if (regexp.test(m.name)) {
+							return false; // Exclude this file
+						}
+					}
+					return true; // Include this file
+				})
+				.map((m) => {
+					// Always use forward slashes for module names, regardless of platform.
+					// path.join() uses backslashes on Windows, but module names must use
+					// forward slashes for proper directory structure when deployed.
+					const prefixedPath = `python_modules/${m.name}`;
+					return {
+						...m,
+						name: prefixedPath,
+						// JavaScript files from Python workers sdk (workers-runtime-sdk)
+						// are registered as esModule, so that they can be dynamically
+						// imported via import_from_javascript() at runtime.
+						type: getVendoredModuleType(m.name, m.type),
+					};
+				});
+
+			modules.push(...vendoredModules);
+		} else {
+			logger.debug(
+				"Python entrypoint detected, but no python_modules directory found."
+			);
 		}
 	}
 
@@ -109,13 +212,19 @@ export async function findAdditionalModules(
 
 	if (modules.length > 0) {
 		logger.info(`Attaching additional modules:`);
+		const filteredModules = removePythonVendorModules(
+			isPythonEntrypoint,
+			modules
+		);
+		const vendorModulesSize = getPythonVendorModulesSize(modules);
+
 		const totalSize = modules.reduce(
 			(previous, { content }) => previous + content.length,
 			0
 		);
 
-		logger.table([
-			...modules.map(({ name, type, content }) => {
+		const tableEntries = [
+			...filteredModules.map(({ name, type, content }) => {
 				return {
 					Name: name,
 					Type: type ?? "",
@@ -125,12 +234,23 @@ export async function findAdditionalModules(
 							: `${(content.length / 1024).toFixed(2)} KiB`,
 				};
 			}),
-			{
-				Name: `Total (${modules.length} module${modules.length > 1 ? "s" : ""})`,
+		];
+
+		if (isPythonEntrypoint && vendorModulesSize > 0) {
+			tableEntries.push({
+				Name: "Vendored Modules",
 				Type: "",
-				Size: `${(totalSize / 1024).toFixed(2)} KiB`,
-			},
-		]);
+				Size: `${(vendorModulesSize / 1024).toFixed(2)} KiB`,
+			});
+		}
+
+		tableEntries.push({
+			Name: `Total (${modules.length} module${modules.length > 1 ? "s" : ""})`,
+			Type: "",
+			Size: `${(totalSize / 1024).toFixed(2)} KiB`,
+		});
+
+		logger.table(tableEntries);
 	}
 
 	return modules;
@@ -189,7 +309,8 @@ async function matchFiles(
 					throw new UserError(
 						`The file ${filePath} matched a module rule in your configuration (${JSON.stringify(
 							rule
-						)}), but was ignored because a previous rule with the same type was not marked as \`fallthrough = true\`.`
+						)}), but was ignored because a previous rule with the same type was not marked as \`fallthrough = true\`.`,
+						{ telemetryMessage: "module rule ignored without fallthrough" }
 					);
 				}
 			}

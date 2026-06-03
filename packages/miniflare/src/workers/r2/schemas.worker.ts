@@ -1,5 +1,5 @@
-import { ValueOf } from "miniflare:shared";
 import { Base64DataSchema, HexDataSchema, z } from "miniflare:zod";
+import type { ValueOf } from "miniflare:shared";
 
 export type ObjectRow = {
 	key: string;
@@ -316,7 +316,7 @@ export interface R2UploadPartResponse {
 
 export type R2CompleteMultipartUploadResponse = R2PutResponse;
 
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- empty interface is intentional; represents an R2 response with no body fields
 export interface R2AbortMultipartUploadResponse {}
 
 export interface R2ListResponse {
@@ -326,5 +326,5 @@ export interface R2ListResponse {
 	delimitedPrefixes: string[];
 }
 
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type -- Empty interface is intentional; represents an R2 response with no body fields
 export interface R2DeleteResponse {}

@@ -1,4 +1,4 @@
-import { WorkerOptions } from "./plugins";
+import type { WorkerOptions } from "./plugins";
 
 // https://github.com/Rich-Harris/devalue/blob/50af63e2b2c648f6e6ea29904a14faac25a581fc/src/utils.js#L31-L51
 const objectProtoNames = Object.getOwnPropertyNames(Object.prototype)
@@ -24,9 +24,9 @@ type ArrayRecordKeys<O extends object, K extends keyof O> = K extends unknown
 			: K
 	: never;
 // "kvNamespaces" | "r2Buckets" | "queueProducers" | "queueConsumers" | ...
-type WorkerOptionsArrayRecordKeys = ArrayRecordKeys<
-	WorkerOptions,
-	keyof WorkerOptions
+type WorkerOptionsArrayRecordKeys = Exclude<
+	ArrayRecordKeys<WorkerOptions, keyof WorkerOptions>,
+	"unsafeBindings"
 >;
 // Get the record type that can be used for key `K` in `WorkerOptions`
 type WorkerOptionsRecord<K extends WorkerOptionsArrayRecordKeys> = Extract<
@@ -37,7 +37,6 @@ type WorkerOptionsRecord<K extends WorkerOptionsArrayRecordKeys> = Extract<
 function convertWorkerOptionsArrayToObject<
 	K extends WorkerOptionsArrayRecordKeys,
 >(key: K, array: Extract<WorkerOptions[K], unknown[]>): WorkerOptionsRecord<K> {
-	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	const _: string[] = array; // Static assert that `array` is a `string[]`
 	if (key === "queueConsumers") {
 		// Unfortunately, we can't just `return Object.fromEntries(...)` here, as

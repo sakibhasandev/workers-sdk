@@ -1,98 +1,130 @@
+import { statSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spinner, spinnerWhile } from "@cloudflare/cli/interactive";
+import {
+	spinner,
+	spinnerWhile,
+} from "@cloudflare/cli-shared-helpers/interactive";
+import { APIError, configFileName, UserError } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import { Miniflare } from "miniflare";
 import { fetch } from "undici";
 import { fetchResult } from "../cfetch";
-import { configFileName, readConfig } from "../config";
+import { createCommand } from "../core/create-command";
 import { getLocalPersistencePath } from "../dev/get-local-persistence-path";
-import { UserError } from "../errors";
+import { confirm } from "../dialogs";
 import { logger } from "../logger";
-import { APIError } from "../parse";
 import { readableRelative } from "../paths";
 import { requireAuth } from "../user";
-import { printWranglerBanner } from "../wrangler-banner";
-import { Name } from "./options";
 import { getDatabaseByNameOrBinding, getDatabaseInfoFromConfig } from "./utils";
-import type { Config } from "../config";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../yargs-types";
 import type { Database, ExportPollingResponse, PollingFailure } from "./types";
+import type { ComplianceConfig, Config } from "@cloudflare/workers-utils";
 
-export function Options(yargs: CommonYargsArgv) {
-	return (
-		Name(yargs)
-			.option("local", {
-				type: "boolean",
-				describe: "Export from your local DB you use with wrangler dev",
-				conflicts: "remote",
-			})
-			.option("remote", {
-				type: "boolean",
-				describe: "Export from your live D1",
-				conflicts: "local",
-			})
-			.option("no-schema", {
-				type: "boolean",
-				describe: "Only output table contents, not the DB schema",
-				conflicts: "no-data",
-			})
-			.option("no-data", {
-				type: "boolean",
-				describe:
-					"Only output table schema, not the contents of the DBs themselves",
-				conflicts: "no-schema",
-			})
-			// For --no-schema and --no-data to work, we need their positive versions
-			// to be defined. But keep them hidden as they default to true
-			.option("schema", {
-				type: "boolean",
-				hidden: true,
-				default: true,
-			})
-			.option("data", {
-				type: "boolean",
-				hidden: true,
-				default: true,
-			})
-			.option("table", {
-				type: "string",
-				describe: "Specify which tables to include in export",
-			})
-			.option("output", {
-				type: "string",
-				describe: "Which .sql file to output to",
-				demandOption: true,
-			})
-	);
-}
+export const d1ExportCommand = createCommand({
+	metadata: {
+		description:
+			"Export the contents or schema of your database as a .sql file",
+		status: "stable",
+		owner: "Product: D1",
+	},
+	behaviour: {
+		printResourceLocation: true,
+	},
+	args: {
+		name: {
+			type: "string",
+			demandOption: true,
+			description: "The name of the D1 database to export",
+		},
+		local: {
+			type: "boolean",
+			description: "Export from your local DB you use with wrangler dev",
+			conflicts: "remote",
+		},
+		remote: {
+			type: "boolean",
+			description: "Export from a remote D1 database",
+			conflicts: "local",
+		},
+		"skip-confirmation": {
+			type: "boolean",
+			description: "Skip confirmation",
+			alias: "y",
+			default: false,
+		},
+		output: {
+			type: "string",
+			description: "Path to the SQL file for your export",
+			demandOption: true,
+		},
+		table: {
+			type: "string",
+			description: "Specify which tables to include in export",
+			array: true,
+		},
+		"no-schema": {
+			type: "boolean",
+			description: "Only output table contents, not the DB schema",
+			conflicts: "no-data",
+		},
+		"no-data": {
+			type: "boolean",
+			description:
+				"Only output table schema, not the contents of the DBs themselves",
+			conflicts: "no-schema",
+		},
+		// For --no-schema and --no-data to work, we need their positive versions
+		// to be defined. But keep them hidden as they default to true
+		schema: {
+			type: "boolean",
+			hidden: true,
+			default: true,
+		},
+		data: {
+			type: "boolean",
+			hidden: true,
+			default: true,
+		},
+	},
+	positionalArgs: ["name"],
+	async handler(args, { config }) {
+		const { remote, name, output, schema, data, table, skipConfirmation } =
+			args;
 
-type HandlerOptions = StrictYargsOptionsToInterface<typeof Options>;
-export const Handler = async (args: HandlerOptions): Promise<void> => {
-	const { remote, name, output, schema, data, table } = args;
-	await printWranglerBanner();
-	const config = readConfig(args);
+		if (!schema && !data) {
+			throw new UserError(`You cannot specify both --no-schema and --no-data`, {
+				telemetryMessage: "d1 export conflicting no-schema and no-data flags",
+			});
+		}
 
-	if (!schema && !data) {
-		throw new UserError(`You cannot specify both --no-schema and --no-data`);
-	}
+		const stats = statSync(output, { throwIfNoEntry: false });
+		if (stats?.isDirectory()) {
+			throw new UserError(
+				`Please specify a file path for --output, not a directory.`,
+				{ telemetryMessage: "d1 export output path is directory" }
+			);
+		}
 
-	// Allow multiple --table x --table y flags or none
-	const tables: string[] = table
-		? Array.isArray(table)
-			? table
-			: [table]
-		: [];
+		// Allow multiple --table x --table y flags or none
+		const tables = table ?? [];
 
-	if (remote) {
-		return await exportRemotely(config, name, output, tables, !schema, !data);
-	} else {
-		return await exportLocal(config, name, output, tables, !schema, !data);
-	}
-};
+		if (remote) {
+			if (!skipConfirmation) {
+				const response = await confirm(
+					`⚠️ This process may take some time, during which your D1 database will be unavailable to serve queries.\n  Ok to proceed?`
+				);
+				if (!response) {
+					logger.log(`Not exporting.`);
+					return;
+				}
+			}
+
+			return await exportRemotely(config, name, output, tables, !schema, !data);
+		} else {
+			return await exportLocal(config, name, output, tables, !schema, !data);
+		}
+	},
+});
 
 async function exportLocal(
 	config: Config,
@@ -102,10 +134,13 @@ async function exportLocal(
 	noSchema: boolean,
 	noData: boolean
 ) {
-	const localDB = getDatabaseInfoFromConfig(config, name);
+	const localDB = getDatabaseInfoFromConfig(config, name, {
+		requireDatabaseId: false,
+	});
 	if (!localDB) {
 		throw new UserError(
-			`Couldn't find a D1 DB with the name or binding '${name}' in your ${configFileName(config.configPath)} file.`
+			`Couldn't find a D1 DB with the name or binding '${name}' in your ${configFileName(config.configPath)} file.`,
+			{ telemetryMessage: "d1 export local database not found in config" }
 		);
 	}
 
@@ -142,7 +177,9 @@ async function exportLocal(
 			.raw();
 		await fs.writeFile(output, dump[0].join("\n"));
 	} catch (e) {
-		throw new UserError((e as Error).message);
+		throw new UserError((e as Error).message, {
+			telemetryMessage: "d1 export local export failed",
+		});
 	} finally {
 		await mf.dispose();
 	}
@@ -175,12 +212,15 @@ async function exportRemotely(
 	const s = spinner();
 	const finalResponse = await spinnerWhile<ExportPollingResponse>({
 		spinner: s,
-		promise: () => pollExport(s, accountId, db, dumpOptions, undefined),
+		promise: () => pollExport(s, config, accountId, db, dumpOptions, undefined),
 		startMessage: `Creating export`,
 	});
 
 	if (finalResponse.status !== "complete") {
-		throw new APIError({ text: `D1 reset before export completed!` });
+		throw new APIError({
+			text: `D1 reset before export completed!`,
+			telemetryMessage: false,
+		});
 	}
 
 	logger.log(
@@ -206,6 +246,7 @@ async function exportRemotely(
 
 async function pollExport(
 	s: ReturnType<typeof spinner>,
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	db: Database,
 	dumpOptions: {
@@ -217,6 +258,7 @@ async function pollExport(
 	num_parts_uploaded = 0
 ): Promise<ExportPollingResponse> {
 	const response = await fetchResult<ExportPollingResponse | PollingFailure>(
+		complianceConfig,
 		`/accounts/${accountId}/d1/database/${db.uuid}/export`,
 		{
 			method: "POST",
@@ -252,10 +294,12 @@ async function pollExport(
 		throw new APIError({
 			text: response.error,
 			notes: response.messages.map((text) => ({ text })),
+			telemetryMessage: false,
 		});
 	} else {
 		return await pollExport(
 			s,
+			complianceConfig,
 			accountId,
 			db,
 			dumpOptions,

@@ -1,8 +1,8 @@
-import assert from "assert";
-import { logRaw } from "@cloudflare/cli";
-import { brandColor, gray } from "@cloudflare/cli/colors";
+import assert from "node:assert";
+import { logRaw } from "@cloudflare/cli-shared-helpers";
+import { brandColor, gray } from "@cloudflare/cli-shared-helpers/colors";
+import { UserError } from "@cloudflare/workers-utils";
 import { createCommand } from "../../core/create-command";
-import { UserError } from "../../errors";
 import * as metrics from "../../metrics";
 import { requireAuth } from "../../user";
 import formatLabelledValues from "../../utils/render-labelled-values";
@@ -25,13 +25,13 @@ export const deploymentsListCommand = createCommand({
 			requiresArg: true,
 		},
 		json: {
-			describe: "Display output as clean JSON",
+			describe: "Display output as JSON",
 			type: "boolean",
 			default: false,
 		},
 	},
 	behaviour: {
-		printBanner: false,
+		printBanner: (args) => !args.json,
 	},
 	handler: async function versionsDeploymentsListHandler(args, { config }) {
 		metrics.sendMetricsEvent(
@@ -48,12 +48,14 @@ export const deploymentsListCommand = createCommand({
 		if (workerName === undefined) {
 			throw new UserError(
 				'You need to provide a name for your Worker. Either pass it as a cli arg with `--name <name>` or in your configuration file as `name = "<name>"`',
-				{ telemetryMessage: true }
+				{
+					telemetryMessage: "versions deployments list missing worker name",
+				}
 			);
 		}
 
 		const deployments = (
-			await fetchLatestDeployments(accountId, workerName)
+			await fetchLatestDeployments(config, accountId, workerName)
 		).sort((a, b) => a.created_on.localeCompare(b.created_on));
 
 		if (args.json) {
@@ -65,7 +67,13 @@ export const deploymentsListCommand = createCommand({
 		const versionIds = deployments.flatMap((d) =>
 			d.versions.map((v) => v.version_id)
 		);
-		await fetchVersions(accountId, workerName, versionCache, ...versionIds);
+		await fetchVersions(
+			config,
+			accountId,
+			workerName,
+			versionCache,
+			...versionIds
+		);
 
 		const formattedDeployments = deployments.map((deployment) => {
 			const formattedVersions = deployment.versions.map((traffic) => {

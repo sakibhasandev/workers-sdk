@@ -1,12 +1,12 @@
 import { logger } from "../logger";
-import type { Rule } from "../config/environment";
+import type { Rule } from "@cloudflare/workers-utils";
 
 export function isJavaScriptModuleRule(rule: Rule) {
 	return rule.type === "ESModule" || rule.type === "CommonJS";
 }
 
 export const DEFAULT_MODULE_RULES: Rule[] = [
-	{ type: "Text", globs: ["**/*.txt", "**/*.html"] },
+	{ type: "Text", globs: ["**/*.txt", "**/*.html", "**/*.sql"] },
 	{ type: "Data", globs: ["**/*.bin"] },
 	{ type: "CompiledWasm", globs: ["**/*.wasm", "**/*.wasm?module"] },
 ];
@@ -73,8 +73,7 @@ export function parseRules(userRules: Rule[] = []): ParsedRules {
 		}
 	}
 
-	// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-	rulesToRemove.forEach((rule) => rules!.splice(rules!.indexOf(rule), 1));
+	rulesToRemove.forEach((rule) => rules.splice(rules.indexOf(rule), 1));
 
 	return { rules, removedRules: rulesToRemove };
 }

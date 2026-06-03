@@ -1,12 +1,11 @@
+import { configFileName, UserError } from "@cloudflare/workers-utils";
 import { fetchResult } from "../../cfetch";
-import { configFileName } from "../../config";
 import { createCommand } from "../../core/create-command";
 import { confirm } from "../../dialogs";
-import { UserError } from "../../errors";
 import { logger } from "../../logger";
 import { requireAuth } from "../../user";
 import { getLegacyScriptName } from "../../utils/getLegacyScriptName";
-import { isLegacyEnv } from "../../utils/isLegacyEnv";
+import { useServiceEnvironments } from "../../utils/useServiceEnvironments";
 import { copyWorkerVersionWithNewSecrets } from "./index";
 import type { VersionDetails, WorkerVersion } from "./index";
 
@@ -18,6 +17,7 @@ export const versionsSecretDeleteCommand = createCommand({
 	},
 	behaviour: {
 		printConfigWarnings: false,
+		warnIfMultipleEnvsConfiguredButNoneSpecified: true,
 	},
 	args: {
 		key: {
@@ -46,47 +46,54 @@ export const versionsSecretDeleteCommand = createCommand({
 		const scriptName = getLegacyScriptName(args, config);
 		if (!scriptName) {
 			throw new UserError(
-				`Required Worker name missing. Please specify the Worker name in your ${configFileName(config.configPath)} file, or pass it as an argument with \`--name <worker-name>\``
+				`Required Worker name missing. Please specify the Worker name in your ${configFileName(config.configPath)} file, or pass it as an argument with \`--name <worker-name>\``,
+				{ telemetryMessage: "versions secrets delete missing worker name" }
 			);
 		}
 
 		if (args.key === undefined) {
 			throw new UserError(
-				"Secret name is required. Please specify the name of your secret."
+				"Secret name is required. Please specify the name of your secret.",
+				{ telemetryMessage: "versions secrets delete missing secret name" }
 			);
 		}
 
 		const accountId = await requireAuth(config);
 
+		const isServiceEnv = args.env && useServiceEnvironments(config);
+
 		if (
 			await confirm(
 				`Are you sure you want to permanently delete the secret ${
 					args.key
-				} on the Worker ${scriptName}${
-					args.env && !isLegacyEnv(config) ? ` (${args.env})` : ""
-				}?`
+				} on the Worker ${scriptName}${isServiceEnv ? ` (${args.env})` : ""}?`
 			)
 		) {
 			logger.log(
 				`🌀 Deleting the secret ${args.key} on the Worker ${scriptName}${
-					args.env && !isLegacyEnv(config) ? ` (${args.env})` : ""
+					isServiceEnv ? ` (${args.env})` : ""
 				}`
 			);
 
 			// Grab the latest version
 			const versions = (
 				await fetchResult<{ items: WorkerVersion[] }>(
+					config,
 					`/accounts/${accountId}/workers/scripts/${scriptName}/versions`
 				)
 			).items;
 			if (versions.length === 0) {
 				throw new UserError(
-					"There are currently no uploaded versions of this Worker - please upload a version before uploading a secret."
+					"There are currently no uploaded versions of this Worker - please upload a version before uploading a secret.",
+					{
+						telemetryMessage: "versions secrets delete no uploaded versions",
+					}
 				);
 			}
 			const latestVersion = versions[0];
 
 			const versionInfo = await fetchResult<VersionDetails>(
+				config,
 				`/accounts/${accountId}/workers/scripts/${scriptName}/versions/${latestVersion.id}`
 			);
 
@@ -103,6 +110,7 @@ export const versionsSecretDeleteCommand = createCommand({
 				}));
 
 			const newVersion = await copyWorkerVersionWithNewSecrets({
+				config,
 				accountId,
 				scriptName,
 				versionId: latestVersion.id,

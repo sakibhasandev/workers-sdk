@@ -106,6 +106,33 @@ export class CFS
 
 	private readRoot: ((value: [string, FileType][]) => void) | null = null;
 
+	/**
+	 *
+	 * Given a path this function returns the path relative to the root folder, this function also handles the case in which the root folder
+	 * is not present in the path, or present in the middle of it.
+	 *
+	 * @example
+	 *  Assuming that the root folder is `my-worker`:
+	 *    - given `/my-worker/worker.js` returns `/worker.js`
+	 *    - given `/workspace/my-worker/worker.js` returns `/worker.js`
+	 *    - given `/workspace/my-worker/sub-dir/my-worker/worker.js` returns `/sub-dir/my-worker/worker.js`
+	 *    - given `/my-worker/my-worker/util.js` returns `/my-worker/util.js`
+	 *
+	 * @param path The target path
+	 * @returns The path relative to the root folder
+	 */
+	private getRootRelativePath(path: string): string {
+		const rootFolderStr = `/${this.rootFolder}/`;
+		const indexOfRoot = path.indexOf(rootFolderStr);
+
+		if (indexOfRoot < 0) {
+			// The root folder is not in the path so let's return the path as is
+			return path;
+		}
+
+		return path.slice(indexOfRoot + rootFolderStr.length);
+	}
+
 	constructor(channel: Channel<FromQuickEditMessage, ToQuickEditMessage>) {
 		this.channel = channel;
 		this.disposable = Disposable.from(
@@ -194,16 +221,20 @@ declare module "*.bin" {
 					}
 				}
 			}
-			await this.writeFile(Uri.parse(`${this.rootFolder}/${path}`), contents, {
-				create: true,
-				overwrite: true,
-				suppressChannelUpdate: true,
-				readOnly: files.readOnly,
-			});
+			await this.writeFile(
+				Uri.parse(`cfs:/${this.rootFolder}/${path}`),
+				contents,
+				{
+					create: true,
+					overwrite: true,
+					suppressChannelUpdate: true,
+					readOnly: files.readOnly,
+				}
+			);
 		}
 		if (this.readRoot !== null) {
 			await this.readRoot(
-				await this.readDirectory(Uri.parse(`${this.rootFolder}/`))
+				await this.readDirectory(Uri.parse(`cfs:/${this.rootFolder}/`))
 			);
 		}
 	}
@@ -264,7 +295,7 @@ declare module "*.bin" {
 				this.channel.postMessage({
 					type: "CreateFile",
 					body: {
-						path: uri.path.split(this.rootFolder)[1],
+						path: this.getRootRelativePath(uri.path),
 						contents: content,
 					},
 				});
@@ -281,7 +312,7 @@ declare module "*.bin" {
 			this.channel.postMessage({
 				type: "UpdateFile",
 				body: {
-					path: uri.path.split(this.rootFolder)[1],
+					path: this.getRootRelativePath(uri.path),
 					contents: content,
 				},
 			});
@@ -311,13 +342,13 @@ declare module "*.bin" {
 		this.channel.postMessage({
 			type: "DeleteFile",
 			body: {
-				path: oldUri.path.split(this.rootFolder)[1],
+				path: this.getRootRelativePath(oldUri.path),
 			},
 		});
 		this.channel.postMessage({
 			type: "CreateFile",
 			body: {
-				path: newUri.path.split(this.rootFolder)[1],
+				path: this.getRootRelativePath(newUri.path),
 				contents: await this.readFile(newUri),
 			},
 		});
@@ -349,7 +380,7 @@ declare module "*.bin" {
 		this.channel.postMessage({
 			type: "DeleteFile",
 			body: {
-				path: uri.path.split(this.rootFolder)[1],
+				path: this.getRootRelativePath(uri.path),
 			},
 		});
 		this._fireSoon(
@@ -478,7 +509,6 @@ declare module "*.bin" {
 		let offset = haystackLen,
 			idx = -1;
 
-		// eslint-disable-next-line
 		while (true) {
 			idx = haystack.lastIndexOf(needle, offset - 1);
 			if (idx === -1 || idx + needleLen !== offset) {
@@ -511,15 +541,16 @@ declare module "*.bin" {
 		});
 	}
 
+	/* eslint-disable no-useless-escape --
+		adapted from vscode-web-playground, see: https://github.com/microsoft/vscode-web-playground/blob/fde7a272cc7de/src/memfs.ts#L399-L401
+		escapes are redundant in a character class but harmless
+	*/
 	private _convertSimple2RegExpPattern(pattern: string): string {
-		return (
-			pattern
-				// eslint-disable-next-line
-				.replace(/[\-\\\{\}\+\?\|\^\$\.\,\[\]\(\)\#\s]/g, "\\$&")
-				// eslint-disable-next-line
-				.replace(/[\*]/g, ".*")
-		);
+		return pattern
+			.replace(/[\-\\\{\}\+\?\|\^\$\.\,\[\]\(\)\#\s]/g, "\\$&")
+			.replace(/[\*]/g, ".*");
 	}
+	/* eslint-enable no-useless-escape */
 
 	// --- search provider
 

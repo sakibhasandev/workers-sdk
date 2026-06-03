@@ -4,11 +4,33 @@ Wrangler is an open-source project and we welcome contributions from you. Thank 
 
 Below you can find some guidance on how to be most effective when contributing to the project.
 
+## tl;dr for contributing to Wrangler
+
+Useful commands for developing Wrangler (all commands below should be run in the project root):
+
+- `pnpm i; pnpm build` will build everything in workers-sdk.
+- `pnpm dev -F wrangler` will watch and build changes while you develop. Fixtures use the build output from this, and are useful for messing around during dev (`fixtures/worker-ts` is a useful blank slate).
+
+Before committing/submitting a PR:
+
+- Add [tests](#pr-tests). `pnpm test -F wrangler` will run Wrangler's unit tests. You can filter tests: e.g. `pnpm test -F wrangler "containers"`.
+- Run `pnpm check` for typechecking and linting.
+- Add a [changeset](#changesets) with `pnpm changeset`.
+- Don’t squash your commits after a review.
+
 ## Before getting started
 
 We really appreciate your interest in making a contribution, and we want to make sure that the process is as smooth and transparent as possible! To this end, we note that the Workers team is actively doing development in this repository, and while we consistently strive to communicate status and current thinking around all open issues, there may be times when context surrounding certain items is not up to date. Therefore, **for non-trivial changes, please always engage on the issue or create a discussion or feature request issue first before writing your code.** This will give us opportunity to flag any considerations you should be aware of before you spend time developing. Of course, for trivial changes, please feel free to go directly to filing a PR, with the understanding that the PR itself will serve as the place to discuss details of the change.
 
 Thanks so much for helping us improve the [workers-sdk](https://github.com/cloudflare/workers-sdk), and we look forward to your contribution!
+
+## Naming experimental and unstable flags
+
+When adding Wrangler flags for behavior that is not yet stable, prefer an `experimental-` prefix for the long CLI flag name, such as `--experimental-autoconfig` or `--experimental-provision`. If the flag also needs a short opt-in alias, use the existing `x-` form, such as `--x-autoconfig` or `--x-provision`.
+
+Keep CLI flag names in kebab-case. Reserve `unstable_` and `experimental_` prefixes for exported JavaScript APIs rather than CLI flags, matching exports such as `unstable_dev` and `experimental_generateTypes`.
+
+If an experimental flag graduates or is no longer needed, keep the old flag hidden and deprecated while pointing users to the stable replacement, as with `--experimental-local` and `--experimental-include-runtime`.
 
 ## Getting started
 
@@ -162,7 +184,6 @@ For TypeScript to work properly in the Monorepo the version used in VSCode must 
 3. In the command palette, type "Select TypeScript Version" and select the command with the same name that appears in the list.
 
 4. A submenu will appear with a list of available TypeScript versions. Choose the desired version you want to use for this project. If you have multiple versions installed, they will be listed here.
-
    - Selecting "Use Workspace Version" will use the version of TypeScript installed in the project's `node_modules` directory.
 
 5. After selecting the TypeScript version, VSCode will reload the workspace using the chosen version.
@@ -258,7 +279,6 @@ Changes should be committed to a new local branch, which then gets pushed to you
   ```
 
 - Stage files to include in a commit
-
   - Use [VS Code](https://code.visualstudio.com/docs/editor/versioncontrol#_git-support)
   - Or add and commit files via the command line
 
@@ -293,15 +313,14 @@ PR review is a critical and required step in the process for landing changes. Th
 
 ## PR Previews
 
-Every PR will have an associated pre-release build for all releasable packages within the repository, powered by our [prerelease registry](packages/prerelease-registry). You can find links to prereleases for each package in a comment automatically posted by GitHub Actions on each opened PR ([for example](https://github.com/cloudflare/workers-sdk/pull/7172#issuecomment-2457244715)).
+Every PR will have an associated pre-release build for all releasable packages within the repository, powered by [pkg.pr.new](https://github.com/stackblitz-labs/pkg.pr.new). You can find links to prereleases for each package in a comment automatically posted by GitHub Actions on each opened PR ([for example](https://github.com/cloudflare/workers-sdk/pull/9492#issuecomment-2943757675)).
 
 It's also possible to generate preview builds for the applications in the repository. These aren't generated automatically because they're pretty slow CI jobs, but you can trigger preview builds by adding one of the following labels to your PR:
 
 - `preview:chrome-devtools-patches` for deploying [chrome-devtools-patches](packages/chrome-devtools-patches)
-- `preview:workers-playground` for deploying [workers-playground](packages/workers-playground)
 - `preview:quick-edit` for deploying [quick-edit](packages/quick-edit)
 
-Once built, you can find the preview link for these applications in the [Deploy Pages Previews](.github/workflows/deploy-pages-previews.yml) action output
+Once built, you can find the preview link for these applications in the [Deploy Previews](.github/workflows/deploy-previews.yml) action output
 
 ## PR Tests
 
@@ -330,99 +349,142 @@ export default mergeConfig(
 
 If you need to test the interaction of Wrangler with a real Cloudflare account, you can add an E2E test within the `packages/wrangler/e2e` folder. This lets you add a test for functionality that requires real credentials (i.e. testing whether a worker deployed from Wrangler can be accessed over the internet).
 
-When you open a PR to the `workers-sdk` repo, you should expect several checks to run in CI. For most PRs (except for those which trigger the **C3 E2E (Quarantine)** Action), every check should pass (although some will be skipped).
+A summary of this repositories actions can be found [in the `.github/workflows` folder](.github/workflows/README.md)
 
-A summary of this repositories actions can be found [here](.github/workflows/README.md)
+## Remote E2E Tests in CI
 
-## Running e2e tests locally
+E2E tests that hit the Cloudflare backend (deploying Workers, testing bindings, etc.) are inherently slow and can be flaky due to network and service dependencies. To keep PR feedback loops fast and reliable, **CI does not pass Cloudflare API credentials to E2E test jobs by default**. The E2E test suites still run on every PR, but tests that require remote access are automatically skipped when the API token is absent.
 
-To run the e2e tests locally, you'll need a Cloudflare API Token and run:
+Remote E2E tests run automatically in these cases:
 
-```sh
-WRANGLER="node ~/path/to/workers-sdk/packages/wrangler/wrangler-dist/cli.js" CLOUDFLARE_ACCOUNT_ID=$CLOUDFLARE_TESTING_ACCOUNT_ID CLOUDFLARE_API_TOKEN=$CLOUDFLARE_TESTING_API_TOKEN pnpm run test:e2e
-```
+- **Version Packages PRs** (branch `changeset-release/main`) — acts as a pre-release safety net, catching remote-test failures before packages are published.
+- **Merge queue** — final check before code lands on `main`.
 
-You may optionally want to append a filename pattern to limit which e2e tests are run. Also you may want to set `--bail=n` to limit the number of fails tests to show the error before the rest of the tests finish running and to limit the noise in that output:
+If you need remote E2E tests on your PR (e.g. you're changing deployment logic or binding behavior), apply the **`run-remote-tests`** label. This triggers a re-run of the E2E workflows with API credentials enabled.
 
-```sh
-WRANGLER="node ~/path/to/workers-sdk/packages/wrangler/wrangler-dist/cli.js" CLOUDFLARE_ACCOUNT_ID=$CLOUDFLARE_TESTING_ACCOUNT_ID CLOUDFLARE_API_TOKEN=$CLOUDFLARE_TESTING_API_TOKEN pnpm run test:e2e [file-pattern] --bail=1
-```
+> [!NOTE]
+> The `run-remote-tests` label has no effect on PRs from forks, because GitHub does not expose repository secrets to fork PRs.
+
+## Running E2E tests locally
+
+A large number of Wrangler, C3 & Vite's E2E tests don't require any authentication, and can be run with no Cloudflare account credentials. These can be run as follows, optionally providing [`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` environment variables.](#creating-an-api-token):
+
+- **Vite:** `pnpm test:e2e -F @cloudflare/vite-plugin`
+
+  You may optionally want to append a filename pattern to limit which e2e tests are run. Also you may want to set `--bail=n` to limit the number of fails tests to show the error before the rest of the tests finish running and to limit the noise in that output:
+
+  ```sh
+  pnpm test:e2e -F @cloudflare/vite-plugin [file-pattern] --bail=1
+  ```
+
+- **C3:** `pnpm test:e2e -F create-cloudflare`
+
+  See [C3 E2E tests README](packages/create-cloudflare/e2e/README.md) for more information.
+
+- **Wrangler:** `pnpm test:e2e -F wrangler` or `pnpm test:e2e:wrangler`
+
+  See [Wrangler E2E tests README](packages/wrangler/e2e/README.md) for more information.
 
 ### Creating an API Token
+
+If you want to run the E2E tests that access the Cloudflare API (e.g. for testing Worker deployment and interaction with bindings), you can create an API token for running the tests:
 
 1. Go to ["My Profile" > "User API Tokens"](https://dash.cloudflare.com/profile/api-tokens)
 1. Click "Create Token"
 1. Use the "Edit Cloudflare Workers" template
-1. Set "Account Resources" to "Include" "DevProd Testing" (you can use any account you have access to)
-1. Set "Zone Resources" to "All zones from an account" and the same account as above
+1. Set "Account Resources" to "Include" the account you want to use for running the test
+   (for internal and CI use, this needs to be the "DevProd Testing" account)
+1. No "Zone Resources" are required for general use (for internal and CI use, this needs to be set to "All Zones")
 1. Click "Continue to summary"
 1. Verify your token works by running the curl command provided
-1. Set the environment variables in your terminal or in your profile file (e.g. ~/.zshrc, ~/.bashrc, ~/.profile, etc):
+
+Once you've created the token, you can use it when running E2E tests to test against the API:
 
 ```sh
-export CLOUDFLARE_TESTING_ACCOUNT_ID="<Account ID for the token you just created>"
-export CLOUDFLARE_TESTING_API_TOKEN="<Token you just created>"
+# Vite
+CLOUDFLARE_ACCOUNT_ID="<Account ID for the token you just created>" CLOUDFLARE_API_TOKEN="<Token you just created>" pnpm test:e2e -F @cloudflare/vite-plugin
+
+# C3
+CLOUDFLARE_ACCOUNT_ID="<Account ID for the token you just created>" CLOUDFLARE_API_TOKEN="<Token you just created>" pnpm test:e2e -F @create-cloudflare
+
+# Wrangler
+CLOUDFLARE_ACCOUNT_ID="<Account ID for the token you just created>" CLOUDFLARE_API_TOKEN="<Token you just created>" pnpm test:e2e:wrangler
 ```
 
-Note: Workers created in the e2e tests that fail might not always be cleaned up (deleted). Internal users with access to the "DevProd Testing" account can rely on an automated job to clean up the Workers based on the format of the name. If you use another account, please be aware you may want to manually delete the Workers yourself.
+> [!NOTE]
+> Workers and other resources created in the E2E tests might not always be cleaned up. Internal users with access to the "DevProd Testing" account can rely on an automated job to clean up the Workers and other resources, but if you use another account, please be aware you may want to manually delete the Workers and other resources yourself.
+
+## Managing Package Dependencies
+
+Packages in this monorepo should bundle their dependencies into the distributable code rather than leaving them as runtime `dependencies` that get installed by downstream users. This prevents dependency chain poisoning where a transitive dependency could introduce unexpected or malicious code.
+
+### The Rule
+
+- **Bundle dependencies**: Most dependencies should be listed in `devDependencies` and bundled into the package output by esbuild/tsup/etc.
+- **External dependencies**: Only dependencies that _cannot_ be bundled should be listed in `dependencies`. These must be explicitly declared with documentation explaining why.
+
+### Why This Matters
+
+When users install one of our packages (e.g., `wrangler`), npm/pnpm will also install everything listed in `dependencies`. If one of those dependencies has unpinned transitive dependencies, a malicious actor could publish a compromised version that gets pulled into user installations. By bundling our dependencies, we control exactly what code ships.
+
+### Adding a New External Dependency
+
+If you need to add a dependency that cannot be bundled (native binaries, WASM modules, packages that must be resolved at runtime, etc.):
+
+1. **Add to `dependencies`** in `package.json` with a pinned version
+2. **Add to `EXTERNAL_DEPENDENCIES`** in `scripts/deps.ts` with a comment explaining why it can't be bundled
+3. **Run `pnpm check:package-deps`** to verify the allowlist is correct
+
+Example `scripts/deps.ts`:
+
+```typescript
+export const EXTERNAL_DEPENDENCIES = [
+	// Native binary - cannot be bundled
+	"workerd",
+
+	// WASM module that blows up when bundled
+	"blake3-wasm",
+
+	// Must be resolved at runtime when bundling user's worker code
+	"esbuild",
+];
+```
+
+### Valid Reasons for External Dependencies
+
+- **Native binaries**: Packages like `workerd` or `sharp` contain platform-specific binaries
+- **WASM modules**: Some WASM packages don't bundle correctly
+- **Runtime resolution**: Packages like `esbuild` or `unenv` that need to be resolved when bundling user code
+- **Peer dependencies**: Packages the user is expected to provide (e.g., `react`, `vite`)
+
+### Pinning External Dependencies
+
+Because external dependencies are installed into downstream users' dependency trees rather than bundled, their versions must be **pinned to an exact version** (e.g. `1.2.3`, not `^1.2.3`). This closes the supply-chain hole above: an unpinned external dependency could resolve to a compromised upstream release without us vetting it.
+
+This is enforced by `pnpm check:pinned-deps`, which requires:
+
+- Every `dependencies` and `optionalDependencies` entry of a published package to be an exact version, or a `workspace:`/`catalog:` reference.
+- Every entry in the pnpm `catalog:` (in `pnpm-workspace.yaml`) to be an exact version, so that any `catalog:default` reference is also pinned. Deliberate exceptions live in `CATALOG_PIN_EXCEPTIONS` in `tools/deployments/validate-pinned-dependencies.ts` (currently only `@cloudflare/workers-types`, which is consumed as a peer dependency).
+
+`peerDependencies` are exempt — ranges there are intentional, since they describe the set of consumer-provided versions a package is compatible with.
 
 ## Changesets
 
 Every non-trivial change to the project - those that should appear in the changelog - must be captured in a "changeset".
-We use the [`changesets`](https://github.com/changesets/changesets/blob/main/README.md) tool for creating changesets, publishing versions and updating the changelog.
 
-- Create a changeset for the current change.
+See the [.changeset/README.md](.changeset/README.md) for detailed guidelines on:
 
-  ```sh
-  pnpm changeset
-  ```
+- Creating changesets
+- Choosing version types (patch/minor/major)
+- Writing good changeset descriptions
+- Formatting rules
 
-- Select which workspaces are affected by the change and whether the version requires a major, minor or patch release.
-- Update the generated changeset with a description of the change.
-- Include the generate changeset in the current commit.
+Quick start:
 
-  ```sh
-  git add ./changeset/*.md
-  ```
-
-### Changeset message format
-
-Each changeset is a file that describes the change being merged. This file is used to generate the changelog when the changes are released.
-
-To help maintain consistency in the changelog, changesets should have the following format:
-
-```plain
-<TITLE>
-
-<BODY>
+```sh
+pnpm changeset
+git add .changeset/*.md
 ```
-
-- `TITLE` should be a single sentence containing an imperative description of the change.
-- `BODY` should be one or more paragraphs that go into more detail about the reason for the change and anything notable about the approach taken.
-
-### Changeset file example
-
-The generated changeset file will contain the package name and type of change (eg. `patch`, `minor`, or `major`), followed by our changeset format described above.
-
-Here's an example of a `patch` to the `wrangler` package:
-
-```plain
----
-"wrangler": patch
----
-
-Replace the word "publish" with "deploy" everywhere.
-
-We should be consistent with the word that describes how we get a worker to the edge. The command is `deploy`, so let's use that everywhere.
-```
-
-### Types of changes
-
-We use the following guidelines to determine the kind of change for a PR:
-
-- Bugfixes and experimental, beta, and pre-1.0-package features are considered to be 'patch' changes. Be sure to log warnings when experimental features are used.
-- New stable features and new deprecation warnings for future breaking changes are considered 'minor' changes. These changes shouldn't break existing code, but the deprecation warnings should suggest alternate solutions to not trigger the warning.
-- Breaking changes are considered to be 'major' changes. These are usually when deprecations take effect, or functional breaking behaviour is added with relevant logs (either as errors or warnings). Note: breaking changes for experimental, beta, or pre-1.0-package features are considered to be 'minor' changes.
 
 ### Styleguide
 
@@ -431,22 +493,3 @@ When contributing to Wrangler, please refer to the [`STYLEGUIDE.md file`](STYLEG
 ## Releases
 
 We generally cut Wrangler releases on Tuesday & Thursday each week. If you need a release cut outside of the regular cadence, please reach out to the [@cloudflare/wrangler-admins](https://github.com/orgs/cloudflare/teams/wrangler-admins) team.
-
-### Hotfix releases
-
-Only members of `@cloudflare/wrangler` can trigger a hotfix release. A hotfix release should be treated as a solution of last resort—before use, please first check whether the fix can be applied and released using the regular Version Packages release flow.
-
-If a hotfix release of Wrangler, Miniflare, or C3 is required, you should:
-
-- Prepare a hotfix release PR:
-
-  - Checkout the previous release of `workers-sdk`
-  - Apply the changes that should be in the hotfix
-  - Increment the patch version of the packages that should be released as part of the hotfix
-
-- Get approvals for that PR, and make sure CI checks are passing
-- Manually trigger a hotfix release from that PR using the ["Release a hotfix"](https://github.com/cloudflare/workers-sdk/actions/workflows/hotfix-release.yml) GitHub action.
-  - Make sure you set the dist-tag to `latest`
-  - Optionally, you can first publish it to the `hotfix` dist-tag on NPM in order to verify the release.
-- **[CRUCIAL]** Once the hotfix release is out and verified, merge the fixes into main before the next regular release of `workers-sdk`.
-- Make sure that the version number of the next changesets-based release of Wrangler/Miniflare/C3 is greater than the version used for the hotfix by adding a dummy `minor` changeset entry for each of the packages that had a hotfix published.

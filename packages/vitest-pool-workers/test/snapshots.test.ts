@@ -2,14 +2,15 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import dedent from "ts-dedent";
-import { minimalVitestConfig, test } from "./helpers";
+import { test, vitestConfig } from "./helpers";
 
 test(
 	"disk snapshots",
+	{ timeout: 90_000 },
 	async ({ expect, seed, vitestRun, tmpPath }) => {
 		// Check writes new snapshots
 		await seed({
-			"vitest.config.mts": minimalVitestConfig,
+			"vitest.config.mts": vitestConfig(),
 			"index.test.ts": dedent`
 			import { it, expect } from "vitest";
 			it("matches snapshot", () => {
@@ -108,16 +109,16 @@ test(
 		expect(result.stdout).toMatch("Snapshots  1 files removed");
 		expect(exitCode).toBe(0);
 		expect(existsSync(snapshotPath)).toBe(false);
-	},
-	{ timeout: 90_000 }
+	}
 );
 
 test.skipIf(process.platform === "win32")(
 	"inline snapshots",
+	{ timeout: 90_000 },
 	async ({ expect, seed, vitestRun, tmpPath }) => {
 		// Check writes new snapshots
 		await seed({
-			"vitest.config.mts": minimalVitestConfig,
+			"vitest.config.mts": vitestConfig(),
 			"index.test.ts": dedent`
 			import { it, expect } from "vitest";
 			it("matches snapshot", () => {
@@ -129,6 +130,7 @@ test.skipIf(process.platform === "win32")(
 		`,
 		});
 		let result = await vitestRun();
+		expect(result.stderr).toEqual("");
 		let exitCode = await result.exitCode;
 		expect(result.stdout).toMatch("Snapshots  2 written");
 		expect(exitCode).toBe(0);
@@ -146,7 +148,7 @@ test.skipIf(process.platform === "win32")(
 
 		// Check fails if snapshots differ
 		await seed({
-			"vitest.config.mts": minimalVitestConfig,
+			"vitest.config.mts": vitestConfig(),
 			"index.test.ts": dedent`
 			import { it, expect } from "vitest";
 			it("matches snapshot", () => {
@@ -183,6 +185,5 @@ test.skipIf(process.platform === "win32")(
 			expect(4).toMatchInlineSnapshot(\`4\`);
 		});"
 	`);
-	},
-	{ timeout: 90_000 }
+	}
 );

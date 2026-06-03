@@ -1,29 +1,28 @@
-import { createReadStream, promises as fs } from "fs";
 import assert from "node:assert";
+import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
-import { spinnerWhile } from "@cloudflare/cli/interactive";
+import { spinnerWhile } from "@cloudflare/cli-shared-helpers/interactive";
+import {
+	APIError,
+	configFileName,
+	createFatalError,
+	JsonFriendlyFatalError,
+	readFileSync,
+	UserError,
+} from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import md5File from "md5-file";
 import { Miniflare } from "miniflare";
 import { fetch } from "undici";
 import { fetchResult } from "../cfetch";
-import { configFileName, readConfig } from "../config";
+import { createCommand } from "../core/create-command";
 import { getLocalPersistencePath } from "../dev/get-local-persistence-path";
 import { confirm } from "../dialogs";
-import { createFatalError, JsonFriendlyFatalError, UserError } from "../errors";
 import { logger } from "../logger";
-import { APIError, readFileSync } from "../parse";
 import { readableRelative } from "../paths";
 import { requireAuth } from "../user";
-import { printWranglerBanner } from "../wrangler-banner";
-import * as options from "./options";
-import splitSqlQuery from "./splitter";
+import { splitSqlQuery } from "./splitter";
 import { getDatabaseByNameOrBinding, getDatabaseInfoFromConfig } from "./utils";
-import type { Config } from "../config";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../yargs-types";
 import type {
 	Database,
 	ImportInitResponse,
@@ -31,9 +30,10 @@ import type {
 	PollingFailure,
 } from "./types";
 import type { D1Result } from "@cloudflare/workers-types/experimental";
+import type { ComplianceConfig, Config } from "@cloudflare/workers-utils";
 
 export type QueryResult = {
-	results: Record<string, string | number | boolean>[];
+	results: Record<string, string | number | boolean | null>[];
 	success: boolean;
 	meta?: {
 		duration?: number;
@@ -41,139 +41,162 @@ export type QueryResult = {
 	query?: string;
 };
 
-export function Options(yargs: CommonYargsArgv) {
-	return options
-		.Database(yargs)
-		.option("yes", {
-			describe: 'Answer "yes" to any prompts',
+export const d1ExecuteCommand = createCommand({
+	metadata: {
+		description: "Execute a command or SQL file",
+		status: "stable",
+		owner: "Product: D1",
+		epilogue:
+			"You must provide either --command or --file for this command to run successfully.",
+	},
+	behaviour: {
+		printBanner: (args) => !args.json,
+		printResourceLocation: (args) => !args.json,
+	},
+	args: {
+		database: {
+			type: "string",
+			demandOption: true,
+			description: "The name or binding of the DB",
+		},
+		command: {
+			type: "string",
+			description:
+				"The SQL query you wish to execute, or multiple queries separated by ';'",
+		},
+		file: {
+			type: "string",
+			description: "A .sql file to ingest",
+		},
+		yes: {
 			type: "boolean",
+			description: 'Answer "yes" to any prompts',
 			alias: "y",
-		})
-		.option("local", {
-			describe:
+		},
+		local: {
+			type: "boolean",
+			description:
 				"Execute commands/files against a local DB for use with wrangler dev",
+		},
+		remote: {
 			type: "boolean",
-		})
-		.option("remote", {
-			describe:
-				"Execute commands/files against a remote DB for use with wrangler dev",
-			type: "boolean",
-		})
-		.option("file", {
-			describe: "A .sql file to ingest",
+			description:
+				"Execute commands/files against a remote D1 database for use with remote bindings or your deployed Worker",
+		},
+		"persist-to": {
 			type: "string",
-		})
-		.option("command", {
-			describe: "A single SQL statement to execute",
-			type: "string",
-		})
-		.option("persist-to", {
-			describe: "Specify directory to use for local persistence (for --local)",
-			type: "string",
+			description:
+				"Specify directory to use for local persistence (for use with --local)",
 			requiresArg: true,
-		})
-		.option("json", {
-			describe: "Return output as clean JSON",
+		},
+		json: {
 			type: "boolean",
+			description: "Return output as JSON",
 			default: false,
-		})
-		.option("preview", {
-			describe: "Execute commands/files against a preview D1 DB",
+		},
+		preview: {
 			type: "boolean",
+			description: "Execute commands/files against a preview D1 database",
 			default: false,
-		});
-}
-
-type HandlerOptions = StrictYargsOptionsToInterface<typeof Options>;
-
-export const Handler = async (args: HandlerOptions): Promise<void> => {
-	const {
-		local,
-		remote,
-		database,
-		yes,
-		persistTo,
-		file,
-		command,
-		json,
-		preview,
-	} = args;
-	const existingLogLevel = logger.loggerLevel;
-	if (json) {
-		// set loggerLevel to error to avoid readConfig warnings appearing in JSON output
-		logger.loggerLevel = "error";
-	}
-	await printWranglerBanner();
-
-	const config = readConfig(args);
-
-	if (file && command) {
-		throw createFatalError(
-			`Error: can't provide both --command and --file.`,
-			json,
-			undefined,
-			{ telemetryMessage: true }
-		);
-	}
-
-	const isInteractive = process.stdout.isTTY;
-	try {
-		const response: QueryResult[] | null = await executeSql({
+		},
+	},
+	positionalArgs: ["database"],
+	async handler(args, { config }) {
+		const {
 			local,
 			remote,
-			config,
-			name: database,
-			shouldPrompt: isInteractive && !yes && !json,
+			database,
+			yes,
 			persistTo,
 			file,
 			command,
 			json,
 			preview,
-		});
+		} = args;
 
-		// Early exit if prompt rejected
-		if (!response) {
-			return;
+		const existingLogLevel = logger.loggerLevel;
+		if (json) {
+			// set loggerLevel to error to avoid readConfig warnings appearing in JSON output
+			logger.loggerLevel = "error";
 		}
 
-		if (isInteractive && !json) {
-			for (const result of response) {
-				if (!Array.isArray(result)) {
-					const { results, query } = result;
+		if (file && command) {
+			if (json) {
+				logger.loggerLevel = existingLogLevel;
+			}
+			throw createFatalError(
+				`Error: can't provide both --command and --file.`,
+				json,
+				{ telemetryMessage: "d1 execute conflicting command and file" }
+			);
+		}
 
-					if (Array.isArray(results) && results.length > 0) {
-						const shortQuery = shorten(query, 48);
-						if (shortQuery) {
-							logger.log(chalk.dim(shortQuery));
-						}
-						logger.table(
-							results.map((r) =>
-								Object.fromEntries(
-									Object.entries(r).map(([k, v]) => [k, String(v)])
+		const isInteractive = process.stdout.isTTY;
+		try {
+			const response: QueryResult[] | null = await executeSql({
+				local,
+				remote,
+				config,
+				name: database,
+				shouldPrompt: isInteractive && !yes && !json,
+				persistTo,
+				file,
+				command,
+				json,
+				preview,
+			});
+
+			// Early exit if prompt rejected
+			if (!response) {
+				return;
+			}
+
+			if (isInteractive && !json) {
+				for (const result of response) {
+					if (!Array.isArray(result)) {
+						const { results, query } = result;
+
+						if (Array.isArray(results) && results.length > 0) {
+							const shortQuery = shorten(query, 48);
+							if (shortQuery) {
+								logger.log(chalk.dim(shortQuery));
+							}
+							logger.table(
+								results.map((r) =>
+									Object.fromEntries(
+										Object.entries(r).map(([k, v]) => [k, String(v)])
+									)
 								)
-							)
-						);
+							);
+						}
 					}
 				}
+			} else {
+				// set loggerLevel back to what it was before to actually output the JSON in stdout
+				logger.loggerLevel = existingLogLevel;
+				logger.log(JSON.stringify(response, null, 2));
 			}
-		} else {
-			// set loggerLevel back to what it was before to actually output the JSON in stdout
-			logger.loggerLevel = existingLogLevel;
-			logger.log(JSON.stringify(response, null, 2));
+		} catch (error) {
+			if (json && error instanceof Error) {
+				const messageToDisplay =
+					error.name === "APIError" ? error : { text: error.message };
+				throw new JsonFriendlyFatalError(
+					JSON.stringify({ error: messageToDisplay }, null, 2),
+					{ telemetryMessage: "d1 execute query failed" }
+				);
+			} else {
+				throw error;
+			}
+		} finally {
+			// Always restore the log level, including on the throwing paths
+			// above, so a singleton `logger` muted for `--json` output does not
+			// leak `"error"` to anything else that reuses it.
+			if (json) {
+				logger.loggerLevel = existingLogLevel;
+			}
 		}
-	} catch (error) {
-		if (json && error instanceof Error) {
-			logger.loggerLevel = existingLogLevel;
-			const messageToDisplay =
-				error.name === "APIError" ? error : { text: error.message };
-			throw new JsonFriendlyFatalError(
-				JSON.stringify({ error: messageToDisplay }, null, 2)
-			);
-		} else {
-			throw error;
-		}
-	}
-};
+	},
+});
 
 type ExecuteInput =
 	| { file: string; command: never }
@@ -208,31 +231,40 @@ export async function executeSql({
 		logger.loggerLevel = "error";
 	}
 
-	const input = file
-		? ({ file } as ExecuteInput)
-		: command
-			? ({ command } as ExecuteInput)
-			: null;
-	if (!input) {
-		throw new UserError(`Error: must provide --command or --file.`);
-	}
-	if (local && remote) {
-		throw new UserError(
-			`Error: can't use --local and --remote at the same time`
-		);
-	}
-	if (preview && !remote) {
-		throw new UserError(`Error: can't use --preview without --remote`);
-	}
-	if (persistTo && !local) {
-		throw new UserError(`Error: can't use --persist-to without --local`);
-	}
-	if (input.file) {
-		await checkForSQLiteBinary(input.file);
-	}
+	try {
+		const input = file
+			? ({ file } as ExecuteInput)
+			: command
+				? ({ command } as ExecuteInput)
+				: null;
+		if (!input) {
+			throw new UserError(`Error: must provide --command or --file.`, {
+				telemetryMessage: "d1 execute missing command or file",
+			});
+		}
+		if (local && remote) {
+			throw new UserError(
+				`Error: can't use --local and --remote at the same time`,
+				{
+					telemetryMessage: "d1 execute conflicting local and remote flags",
+				}
+			);
+		}
+		if (preview && !remote) {
+			throw new UserError(`Error: can't use --preview without --remote`, {
+				telemetryMessage: "d1 execute preview requires remote",
+			});
+		}
+		if (persistTo && !local) {
+			throw new UserError(`Error: can't use --persist-to without --local`, {
+				telemetryMessage: "d1 execute persist-to requires local",
+			});
+		}
+		if (input.file) {
+			await checkForSQLiteBinary(input.file);
+		}
 
-	const result =
-		remote || preview
+		return remote || preview
 			? await executeRemotely({
 					config,
 					name,
@@ -246,11 +278,11 @@ export async function executeSql({
 					input,
 					persistTo,
 				});
-
-	if (json) {
-		logger.loggerLevel = existingLogLevel;
+	} finally {
+		if (json) {
+			logger.loggerLevel = existingLogLevel;
+		}
 	}
-	return result;
 }
 
 async function executeLocally({
@@ -264,10 +296,13 @@ async function executeLocally({
 	input: ExecuteInput;
 	persistTo: string | undefined;
 }) {
-	const localDB = getDatabaseInfoFromConfig(config, name);
+	const localDB = getDatabaseInfoFromConfig(config, name, {
+		requireDatabaseId: false,
+	});
 	if (!localDB) {
 		throw new UserError(
-			`Couldn't find a D1 DB with the name or binding '${name}' in your ${configFileName(config.configPath)} file.`
+			`Couldn't find a D1 DB with the name or binding '${name}' in your ${configFileName(config.configPath)} file.`,
+			{ telemetryMessage: "d1 execute local database not found in config" }
 		);
 	}
 
@@ -299,7 +334,10 @@ async function executeLocally({
 	try {
 		results = await db.batch(queries.map((query) => db.prepare(query)));
 	} catch (e: unknown) {
-		throw (e as { cause?: unknown })?.cause ?? e;
+		const cause = ((e as { cause?: unknown })?.cause ?? e) as Error;
+		throw new UserError(cause.message, {
+			telemetryMessage: "d1 execute local query failed",
+		});
 	} finally {
 		await mf.dispose();
 	}
@@ -310,9 +348,6 @@ async function executeLocally({
 				Object.entries(row).map(([key, value]) => {
 					if (Array.isArray(value)) {
 						value = `[${value.join(", ")}]`;
-					}
-					if (value === null) {
-						value = "null";
 					}
 					return [key, value];
 				})
@@ -364,7 +399,8 @@ async function executeRemotely({
 	if (preview) {
 		if (!db.previewDatabaseUuid) {
 			throw new UserError(
-				`Please define a \`preview_database_id\` in your ${configFileName(config.configPath)} file to execute your queries against a preview database`
+				`Please define a \`preview_database_id\` in your ${configFileName(config.configPath)} file to execute your queries against a preview database`,
+				{ telemetryMessage: "d1 execute missing preview database id" }
 			);
 		}
 		db.uuid = db.previewDatabaseUuid;
@@ -391,7 +427,7 @@ async function executeRemotely({
 		const initResponse = await spinnerWhile({
 			promise: d1ApiPost<
 				ImportInitResponse | ImportPollingResponse | PollingFailure
-			>(accountId, db, "import", { action: "init", etag }),
+			>(config, accountId, db, "import", { action: "init", etag }),
 			startMessage: "Checking if file needs uploading",
 		});
 
@@ -406,6 +442,7 @@ async function executeRemotely({
 			? // Upload the file to R2, then inform D1 to start processing it. The server delays before responding
 				// in case the file is quite small and can be processed without a second round-trip.
 				await uploadAndBeginIngestion(
+					config,
 					accountId,
 					db,
 					input.file,
@@ -418,23 +455,25 @@ async function executeRemotely({
 		// until it's complete. If it's already finished, this call will early-exit.
 		const finalResponse = await pollUntilComplete(
 			firstPollResponse,
+			config,
 			accountId,
 			db
 		);
 
 		if (finalResponse.status !== "complete") {
-			throw new APIError({ text: `D1 reset before execute completed!` });
+			throw new APIError({
+				text: `D1 reset before execute completed!`,
+				telemetryMessage: false,
+			});
 		}
 
 		const {
 			result: { num_queries, final_bookmark, meta },
 		} = finalResponse;
 		logger.log(
-			`🚣 Executed ${num_queries} queries in ${(meta.duration / 1000).toFixed(
+			`🚣 Executed ${num_queries} queries in ${meta.duration.toFixed(
 				2
-			)} seconds (${meta.rows_read} rows read, ${
-				meta.rows_written
-			} rows written)\n` +
+			)}ms (${meta.rows_read} rows read, ${meta.rows_written} rows written)\n` +
 				chalk.gray(`   Database is currently at bookmark ${final_bookmark}.`)
 		);
 
@@ -454,15 +493,22 @@ async function executeRemotely({
 			},
 		];
 	} else {
-		const result = await d1ApiPost<QueryResult[]>(accountId, db, "query", {
-			sql: input.command,
-		});
+		const result = await d1ApiPost<QueryResult[]>(
+			config,
+			accountId,
+			db,
+			"query",
+			{
+				sql: input.command,
+			}
+		);
 		logResult(result);
 		return result;
 	}
 }
 
 async function uploadAndBeginIngestion(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	db: Database,
 	file: string,
@@ -488,21 +534,26 @@ async function uploadAndBeginIngestion(
 
 	if (uploadResponse.status !== 200) {
 		throw new UserError(
-			`File could not be uploaded. Please retry.\nGot response: ${await uploadResponse.text()}`
+			`File could not be uploaded. Please retry.\nGot response: ${await uploadResponse.text()}`,
+			{ telemetryMessage: "d1 execute import file upload failed" }
 		);
 	}
 
 	const etagResponse = uploadResponse.headers.get("etag");
 	if (!etagResponse) {
-		throw new UserError(`File did not upload successfully. Please retry.`);
+		throw new UserError(`File did not upload successfully. Please retry.`, {
+			telemetryMessage: "d1 execute import upload missing etag",
+		});
 	}
 	if (etag !== etagResponse.replace(/^"|"$/g, "")) {
 		throw new UserError(
-			`File contents did not upload successfully. Please retry.`
+			`File contents did not upload successfully. Please retry.`,
+			{ telemetryMessage: "d1 execute import upload etag mismatch" }
 		);
 	}
 
 	return await d1ApiPost<ImportPollingResponse | PollingFailure>(
+		complianceConfig,
 		accountId,
 		db,
 		"import",
@@ -512,11 +563,14 @@ async function uploadAndBeginIngestion(
 
 async function pollUntilComplete(
 	response: ImportPollingResponse | PollingFailure,
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	db: Database
 ): Promise<ImportPollingResponse> {
 	if (!response.success) {
-		throw new Error(response.error);
+		throw new UserError(response.error, {
+			telemetryMessage: "d1 execute import polling failed",
+		});
 	}
 
 	response.messages.forEach((line) => {
@@ -529,9 +583,11 @@ async function pollUntilComplete(
 		throw new APIError({
 			text: response.errors?.join("\n"),
 			notes: response.messages.map((text) => ({ text })),
+			telemetryMessage: false,
 		});
 	} else {
 		const newResponse = await d1ApiPost<ImportPollingResponse | PollingFailure>(
+			complianceConfig,
 			accountId,
 			db,
 			"import",
@@ -540,11 +596,17 @@ async function pollUntilComplete(
 				current_bookmark: response.at_bookmark,
 			}
 		);
-		return await pollUntilComplete(newResponse, accountId, db);
+		return await pollUntilComplete(
+			newResponse,
+			complianceConfig,
+			accountId,
+			db
+		);
 	}
 }
 
 async function d1ApiPost<T>(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	db: Database,
 	action: string,
@@ -552,6 +614,7 @@ async function d1ApiPost<T>(
 ) {
 	try {
 		return await fetchResult<T>(
+			complianceConfig,
 			`/accounts/${accountId}/d1/database/${db.uuid}/${action}`,
 			{
 				method: "POST",
@@ -573,17 +636,15 @@ async function d1ApiPost<T>(
 }
 
 function logResult(r: QueryResult | QueryResult[]) {
-	logger.log(
-		`🚣 Executed ${
-			Array.isArray(r) && r.length !== 1 ? `${r.length} commands` : "1 command"
-		} in ${
-			Array.isArray(r)
-				? r
-						.map((d: QueryResult) => d.meta?.duration || 0)
-						.reduce((a: number, b: number) => a + b, 0)
-				: r.meta?.duration
-		}ms`
-	);
+	const commandsCount =
+		Array.isArray(r) && r.length !== 1 ? `${r.length} commands` : "1 command";
+	const durationMs = Array.isArray(r)
+		? r
+				.map((d: QueryResult) => d.meta?.duration || 0)
+				.reduce((a, b) => a + b, 0)
+		: (r.meta?.duration ?? 0);
+
+	logger.log(`🚣 Executed ${commandsCount} in ${durationMs.toFixed(2)}ms`);
 }
 
 function shorten(query: string | undefined, length: number) {
@@ -593,12 +654,25 @@ function shorten(query: string | undefined, length: number) {
 }
 
 async function checkForSQLiteBinary(filename: string) {
-	const fd = await fs.open(filename, "r");
 	const buffer = Buffer.alloc(15);
-	await fd.read(buffer, 0, 15);
+	let fd: fs.FileHandle | undefined;
+
+	try {
+		fd = await fs.open(filename, "r");
+		await fd.read(buffer, 0, 15);
+	} catch {
+		throw new UserError(
+			`Unable to read SQL text file "${filename}". Please check the file path and try again.`,
+			{ telemetryMessage: "d1 execute unable to read sql file" }
+		);
+	} finally {
+		await fd?.close();
+	}
+
 	if (buffer.toString("utf8") === "SQLite format 3") {
 		throw new UserError(
-			"Provided file is a binary SQLite database file instead of an SQL text file. The execute command can only process SQL text files. Please export an SQL file from your SQLite database and try again."
+			"Provided file is a binary SQLite database file instead of an SQL text file. The execute command can only process SQL text files. Please export an SQL file from your SQLite database and try again.",
+			{ telemetryMessage: "d1 execute provided sqlite binary file" }
 		);
 	}
 }

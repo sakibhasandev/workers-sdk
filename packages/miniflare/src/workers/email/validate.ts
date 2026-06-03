@@ -1,7 +1,8 @@
 import { red } from "kleur/colors";
-import PostalMime, { Email } from "postal-mime";
+import PostalMime from "postal-mime";
 import { RAW_EMAIL } from "./constants";
 import { type MiniflareEmailMessage as EmailMessage } from "./email.worker";
+import type { Email } from "postal-mime";
 
 // Email Routing has some limits on what emails can be responded to, documented at https://developers.cloudflare.com/email-routing/email-workers/reply-email-workers/
 export async function isEmailReplyable(
@@ -40,7 +41,7 @@ export async function isEmailReplyable(
 		if ((email.references.match(/@/g)?.length ?? 0) >= 100) {
 			await log(
 				red(
-					'The incoming email\'s "References" header has more than 100 entries. As such, your Worker cannot respond to this email. Refer to https://developers.cloudflare.com/email-routing/email-workers/reply-email-workers/.'
+					'The incoming email\'s "References" header has more than 100 entries. As such, your Worker cannot respond to this email. Refer to https://developers.cloudflare.com/email-routing/email-workers/reply-email-workers/'
 				)
 			);
 			return false;

@@ -1,13 +1,16 @@
 import { writeFile } from "node:fs/promises";
+import {
+	runInTempDir,
+	writeWranglerConfig,
+} from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
-import { describe, expect, test } from "vitest";
+import { describe, test } from "vitest";
 import { mockAccountId, mockApiToken } from "../../helpers/mock-account-id";
 import { mockConsoleMethods } from "../../helpers/mock-console";
 import { createFetchResult, msw } from "../../helpers/msw";
-import { runInTempDir } from "../../helpers/run-in-tmp";
 import { runWrangler } from "../../helpers/run-wrangler";
-import { writeWranglerConfig } from "../../helpers/write-wrangler-config";
 import type { ApiDeployment, ApiVersion } from "../../../versions/types";
+import type { ExpectStatic } from "vitest";
 
 describe("versions secret list", () => {
 	runInTempDir();
@@ -15,7 +18,7 @@ describe("versions secret list", () => {
 	mockAccountId();
 	mockApiToken();
 
-	function mockGetDeployments(multiVersion = false) {
+	function mockGetDeployments(expect: ExpectStatic, multiVersion = false) {
 		const versions = multiVersion
 			? [
 					{ version_id: "version-id-1", percentage: 50 },
@@ -48,7 +51,7 @@ describe("versions secret list", () => {
 		);
 	}
 
-	function mockGetVersion(versionId: string) {
+	function mockGetVersion(expect: ExpectStatic, versionId: string) {
 		msw.use(
 			http.get(
 				`*/accounts/:accountId/workers/scripts/:scriptName/versions/${versionId}`,
@@ -97,14 +100,17 @@ describe("versions secret list", () => {
 		);
 	}
 
-	test("Can list secrets in single version deployment", async () => {
-		mockGetDeployments();
-		mockGetVersion("version-id-1");
+	test("Can list secrets in single version deployment", async ({ expect }) => {
+		mockGetDeployments(expect);
+		mockGetVersion(expect, "version-id-1");
 
 		await runWrangler("versions secret list --name script-name");
 
 		expect(std.out).toMatchInlineSnapshot(`
-			"-- Version version-id-1 (100%) secrets --
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			-- Version version-id-1 (100%) secrets --
 			Secret Name: SECRET_1
 			Secret Name: SECRET_2
 			Secret Name: SECRET_3
@@ -113,15 +119,18 @@ describe("versions secret list", () => {
 		expect(std.err).toMatchInlineSnapshot(`""`);
 	});
 
-	test("Can list secrets in multi-version deployment", async () => {
-		mockGetDeployments(true);
-		mockGetVersion("version-id-1");
-		mockGetVersion("version-id-2");
+	test("Can list secrets in multi-version deployment", async ({ expect }) => {
+		mockGetDeployments(expect, true);
+		mockGetVersion(expect, "version-id-1");
+		mockGetVersion(expect, "version-id-2");
 
 		await runWrangler("versions secret list --name script-name");
 
 		expect(std.out).toMatchInlineSnapshot(`
-			"-- Version version-id-1 (50%) secrets --
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			-- Version version-id-1 (50%) secrets --
 			Secret Name: SECRET_1
 			Secret Name: SECRET_2
 			Secret Name: SECRET_3
@@ -135,16 +144,21 @@ describe("versions secret list", () => {
 		expect(std.err).toMatchInlineSnapshot(`""`);
 	});
 
-	test("Can list secrets in single version deployment reading from wrangler.toml", async () => {
+	test("Can list secrets in single version deployment reading from wrangler.toml", async ({
+		expect,
+	}) => {
 		writeWranglerConfig({ name: "script-name" });
 
-		mockGetDeployments();
-		mockGetVersion("version-id-1");
+		mockGetDeployments(expect);
+		mockGetVersion(expect, "version-id-1");
 
 		await runWrangler("versions secret list");
 
 		expect(std.out).toMatchInlineSnapshot(`
-			"-- Version version-id-1 (100%) secrets --
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			-- Version version-id-1 (100%) secrets --
 			Secret Name: SECRET_1
 			Secret Name: SECRET_2
 			Secret Name: SECRET_3
@@ -153,7 +167,7 @@ describe("versions secret list", () => {
 		expect(std.err).toMatchInlineSnapshot(`""`);
 	});
 
-	test("Can list secrets for latest version", async () => {
+	test("Can list secrets for latest version", async ({ expect }) => {
 		writeWranglerConfig({ name: "script-name" });
 
 		msw.use(
@@ -242,13 +256,16 @@ describe("versions secret list", () => {
 			)
 		);
 
-		mockGetDeployments();
-		mockGetVersion("version-id-1");
+		mockGetDeployments(expect);
+		mockGetVersion(expect, "version-id-1");
 
 		await runWrangler("versions secret list --latest-version");
 
 		expect(std.out).toMatchInlineSnapshot(`
-			"-- Version version-id-3 (0%) secrets --
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			-- Version version-id-3 (0%) secrets --
 			Secret Name: SECRET_1
 			Secret Name: SECRET_1
 			Secret Name: SECRET_1
@@ -257,10 +274,10 @@ describe("versions secret list", () => {
 		expect(std.err).toMatchInlineSnapshot(`""`);
 	});
 
-	test("no wrangler configuration warnings shown", async () => {
+	test("no wrangler configuration warnings shown", async ({ expect }) => {
 		await writeFile("wrangler.json", JSON.stringify({ invalid_field: true }));
-		mockGetDeployments();
-		mockGetVersion("version-id-1");
+		mockGetDeployments(expect);
+		mockGetVersion(expect, "version-id-1");
 
 		await runWrangler("versions secret list --name script-name");
 

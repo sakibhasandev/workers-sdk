@@ -12,8 +12,8 @@ import {
 	listEventNotificationConfig,
 	putEventNotificationConfig,
 	tableFromNotificationGetResponse,
-} from "./helpers";
-import type { R2EventType } from "./helpers";
+} from "./helpers/notification";
+import type { R2EventType } from "./helpers/notification";
 
 export const r2BucketNotificationNamespace = createNamespace({
 	metadata: {
@@ -58,6 +58,7 @@ export const r2BucketNotificationListCommand = createCommand({
 		const apiCreds = requireApiToken();
 		const { bucket, jurisdiction = "" } = args;
 		const resp = await listEventNotificationConfig(
+			config,
 			apiCreds,
 			accountId,
 			bucket,

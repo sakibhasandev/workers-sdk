@@ -1,13 +1,12 @@
+import { runCommand } from "@cloudflare/cli-shared-helpers/command";
 import { mockPackageManager } from "helpers/__tests__/mocks";
-import { runCommand } from "helpers/command";
-import { describe, expect, test, vi } from "vitest";
+import { describe, test, vi } from "vitest";
 import { getFrameworkCli, runFrameworkGenerator } from "..";
 import { createTestContext } from "../../__tests__/helpers";
-import type { PmName } from "helpers/packageManagers";
 
 vi.mock("which-pm-runs");
-vi.mock("helpers/command");
-vi.mock("@cloudflare/cli");
+vi.mock("@cloudflare/cli-shared-helpers/command");
+vi.mock("@cloudflare/cli-shared-helpers");
 
 describe("frameworks", () => {
 	const ctx = createTestContext();
@@ -41,14 +40,14 @@ describe("frameworks", () => {
 			},
 		];
 
-		test.each(cases)("$pm", async ({ pm, pmCmd, env }) => {
-			mockPackageManager(pm as PmName);
+		test.for(cases)("$pm", async ({ pm, pmCmd, env }, { expect }) => {
+			mockPackageManager(pm);
 
 			await runFrameworkGenerator(ctx, ["-p", "my-project"]);
 
 			expect(vi.mocked(runCommand)).toHaveBeenCalledWith(
 				[pmCmd, cli, "-p", "my-project", "--template", "potato"],
-				{ env },
+				{ env }
 			);
 		});
 	});

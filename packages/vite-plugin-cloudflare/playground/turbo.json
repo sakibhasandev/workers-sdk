@@ -1,0 +1,36 @@
+{
+	"$schema": "http://turbo.build/schema.json",
+	"extends": ["//"],
+	"tasks": {
+		"test:ci": {
+			"env": ["NODE_DEBUG"],
+			"passThroughEnv": [
+				"CLOUDFLARE_VITE_BUILD",
+				"VITE_DEBUG_SERVE",
+				"VITE_INLINE",
+				"VITE_TEST_BUILD"
+			]
+		},
+		"test:ci:serve": {
+			"dependsOn": ["build"],
+			"env": ["NODE_DEBUG", "NODE_ENV", "VITE_VERSION"],
+			"passThroughEnv": [
+				"CLOUDFLARE_VITE_BUILD",
+				"VITE_DEBUG_SERVE",
+				"VITE_INLINE",
+				"VITE_TEST_BUILD"
+			],
+			"outputLogs": "new-only"
+		},
+		"test:ci:build": {
+			"dependsOn": ["build"],
+			"env": ["NODE_DEBUG", "NODE_ENV", "VITE_TEST_BUILD", "VITE_VERSION"],
+			"passThroughEnv": [
+				"CLOUDFLARE_VITE_BUILD",
+				"VITE_DEBUG_SERVE",
+				"VITE_INLINE"
+			],
+			"outputLogs": "new-only"
+		}
+	}
+}

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, test, vi } from "vitest";
 import {
 	CACHE_PRESERVATION_WRITE_FREQUENCY,
 	generateHandler,
@@ -10,7 +10,7 @@ import type { Metadata } from "../../asset-server/metadata";
 import type { RedirectRule } from "@cloudflare/workers-shared/utils/configuration/types";
 
 describe("asset-server handler", () => {
-	test("Returns appropriate status codes", async () => {
+	test("Returns appropriate status codes", async ({ expect }) => {
 		const statuses = [301, 302, 303, 307, 308];
 		const metadata = createMetadataObjectWithRedirects(
 			statuses
@@ -68,7 +68,9 @@ describe("asset-server handler", () => {
 		expect(proxyResponse.headers.get("Location")).toBeNull();
 	});
 
-	test("Won't redirect to protocol-less double-slashed URLs", async () => {
+	test("Won't redirect to protocol-less double-slashed URLs", async ({
+		expect,
+	}) => {
 		const metadata = createMetadataObjectWithRedirects([
 			{ from: "/", to: "/home", status: 301 },
 			{ from: "/page.html", to: "/elsewhere", status: 301 },
@@ -159,7 +161,9 @@ describe("asset-server handler", () => {
 		}
 	});
 
-	test("Match exact pathnames, before any HTML redirection", async () => {
+	test("Match exact pathnames, before any HTML redirection", async ({
+		expect,
+	}) => {
 		const metadata = createMetadataObjectWithRedirects([
 			{ from: "/", to: "/home", status: 301 },
 			{ from: "/page.html", to: "/elsewhere", status: 301 },
@@ -236,7 +240,9 @@ describe("asset-server handler", () => {
 		}
 	});
 
-	test("cross-host static redirects still are executed with line number precedence", async () => {
+	test("cross-host static redirects still are executed with line number precedence", async ({
+		expect,
+	}) => {
 		const metadata = createMetadataObjectWithRedirects([
 			{ from: "https://fakehost/home", to: "https://firsthost/", status: 302 },
 			{ from: "/home", to: "https://secondhost/", status: 302 },
@@ -269,7 +275,9 @@ describe("asset-server handler", () => {
 		}
 	});
 
-	test("it should preserve querystrings unless to rule includes them", async () => {
+	test("it should preserve querystrings unless to rule includes them", async ({
+		expect,
+	}) => {
 		const metadata = createMetadataObjectWithRedirects([
 			{ from: "/", status: 301, to: "/home" },
 			{ from: "/recent", status: 301, to: "/home?sort=updated_at" },
@@ -330,7 +338,7 @@ describe("asset-server handler", () => {
 			return null;
 		};
 
-		test("it should perform splat replacements", async () => {
+		test("it should perform splat replacements", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://example.com/blog/a-blog-posting",
 				metadata,
@@ -342,7 +350,7 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("it should perform placeholder replacements", async () => {
+		test("it should perform placeholder replacements", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://example.com/products/abba_562/tricycle/123abc@~!",
 				metadata,
@@ -354,7 +362,9 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("it should redirect both dynamic and static redirects", async () => {
+		test("it should redirect both dynamic and static redirects", async ({
+			expect,
+		}) => {
 			{
 				const { response } = await getTestResponse({
 					request: "https://example.com/home",
@@ -426,7 +436,7 @@ describe("asset-server handler", () => {
 	// 	expect(res.status).toBe(302);
 	// 	expect(res.headers.get("Location")).toBe("https://bar.com/bar");
 
-	test("early hints should cache link headers", async () => {
+	test("early hints should cache link headers", async ({ expect }) => {
 		const deploymentId = "deployment-" + Math.random();
 		const metadata = createMetadataObject({ deploymentId }) as Metadata;
 
@@ -545,7 +555,7 @@ describe("asset-server handler", () => {
 		);
 	});
 
-	test("early hints should cache empty link headers", async () => {
+	test("early hints should cache empty link headers", async ({ expect }) => {
 		const deploymentId = "deployment-" + Math.random();
 		const metadata = createMetadataObject({ deploymentId }) as Metadata;
 
@@ -622,14 +632,176 @@ describe("asset-server handler", () => {
 		expect(response2.headers.get("link")).toBeNull();
 	});
 
-	test.todo(
-		"early hints should temporarily cache failures to parse links",
-		async () => {
-			// I couldn't figure out a way to make HTMLRewriter error out
-		}
-	);
+	test("early hints should resolve relative link hrefs against base href", async ({
+		expect,
+	}) => {
+		const deploymentId = "deployment-" + Math.random();
+		const metadata = createMetadataObject({ deploymentId }) as Metadata;
 
-	describe("should serve deleted assets from preservation cache", async () => {
+		const findAssetEntryForPath = async (path: string) => {
+			if (path === "/index.html") {
+				return "asset-key-index-with-base.html";
+			}
+			return null;
+		};
+		const fetchAsset = () =>
+			Promise.resolve(
+				Object.assign(
+					new Response(`
+					<!DOCTYPE html>
+					<html>
+						<head>
+							<base href="/" />
+							<link rel="modulepreload" href="module.js" />
+						</head>
+					</html>`),
+					{ contentType: "text/html" }
+				)
+			);
+
+		const getResponse = async () =>
+			getTestResponse({
+				request: new Request("https://example.com/"),
+				metadata,
+				findAssetEntryForPath,
+				caches,
+				fetchAsset,
+			});
+
+		const { response, spies } = await getResponse();
+		expect(response.status).toBe(200);
+		await Promise.all(spies.waitUntil);
+
+		const earlyHintsCache = await caches.open(`eh:${deploymentId}`);
+		const earlyHintsRes = await earlyHintsCache.match(
+			"https://example.com/asset-key-index-with-base.html"
+		);
+		if (!earlyHintsRes) {
+			throw new Error(
+				"Did not match early hints cache on https://example.com/asset-key-index-with-base.html"
+			);
+		}
+
+		const linkHeader = earlyHintsRes.headers.get("Link");
+		// Relative href "module.js" resolved against base "/" → absolute URL
+		expect(linkHeader).toContain("<https://example.com/module.js>");
+		expect(linkHeader).not.toContain("<module.js");
+	});
+
+	test("early hints should resolve relative hrefs using URL semantics, not string concat", async ({
+		expect,
+	}) => {
+		const deploymentId = "deployment-" + Math.random();
+		const metadata = createMetadataObject({ deploymentId }) as Metadata;
+
+		const findAssetEntryForPath = async (path: string) => {
+			if (path === "/index.html") {
+				return "asset-key-url-semantics.html";
+			}
+			return null;
+		};
+		const fetchAsset = () =>
+			Promise.resolve(
+				Object.assign(
+					new Response(`
+					<!DOCTYPE html>
+					<html>
+						<head>
+							<base href="/subdir/" />
+							<link rel="preload" href="module.js" as="script" />
+							<link rel="preload" href="../other.js" as="script" />
+						</head>
+					</html>`),
+					{ contentType: "text/html" }
+				)
+			);
+
+		const { response, spies } = await getTestResponse({
+			request: new Request("https://example.com/"),
+			metadata,
+			findAssetEntryForPath,
+			caches,
+			fetchAsset,
+		});
+		expect(response.status).toBe(200);
+		await Promise.all(spies.waitUntil);
+
+		const earlyHintsCache = await caches.open(`eh:${deploymentId}`);
+		const earlyHintsRes = await earlyHintsCache.match(
+			"https://example.com/asset-key-url-semantics.html"
+		);
+		if (!earlyHintsRes) {
+			throw new Error(
+				"Did not match early hints cache on https://example.com/asset-key-url-semantics.html"
+			);
+		}
+
+		const linkHeader = earlyHintsRes.headers.get("Link");
+		// "module.js" relative to "/subdir/" → "/subdir/module.js"
+		expect(linkHeader).toContain("<https://example.com/subdir/module.js>");
+		// "../other.js" relative to "/subdir/" → "/other.js"
+		expect(linkHeader).toContain("<https://example.com/other.js>");
+	});
+
+	test("early hints should only use the first <base href> element", async ({
+		expect,
+	}) => {
+		const deploymentId = "deployment-" + Math.random();
+		const metadata = createMetadataObject({ deploymentId }) as Metadata;
+
+		const findAssetEntryForPath = async (path: string) => {
+			if (path === "/index.html") {
+				return "asset-key-multi-base.html";
+			}
+			return null;
+		};
+		const fetchAsset = () =>
+			Promise.resolve(
+				Object.assign(
+					new Response(`
+					<!DOCTYPE html>
+					<html>
+						<head>
+							<base href="/first/" />
+							<base href="/second/" />
+							<link rel="preload" href="module.js" as="script" />
+						</head>
+					</html>`),
+					{ contentType: "text/html" }
+				)
+			);
+
+		const { response, spies } = await getTestResponse({
+			request: new Request("https://example.com/"),
+			metadata,
+			findAssetEntryForPath,
+			caches,
+			fetchAsset,
+		});
+		expect(response.status).toBe(200);
+		await Promise.all(spies.waitUntil);
+
+		const earlyHintsCache = await caches.open(`eh:${deploymentId}`);
+		const earlyHintsRes = await earlyHintsCache.match(
+			"https://example.com/asset-key-multi-base.html"
+		);
+		if (!earlyHintsRes) {
+			throw new Error(
+				"Did not match early hints cache on https://example.com/asset-key-multi-base.html"
+			);
+		}
+
+		const linkHeader = earlyHintsRes.headers.get("Link");
+		// Should use /first/, not /second/
+		expect(linkHeader).toContain("<https://example.com/first/module.js>");
+		expect(linkHeader).not.toContain("/second/");
+	});
+
+	test.todo("early hints should temporarily cache failures to parse links", async () => {
+		// I couldn't figure out a way to make HTMLRewriter error out
+	});
+
+	describe("should serve deleted assets from preservation cache", () => {
 		beforeEach(() => {
 			vi.useFakeTimers();
 		});
@@ -638,7 +810,7 @@ describe("asset-server handler", () => {
 			vi.useRealTimers();
 		});
 
-		test("preservationCacheV2", async () => {
+		test("preservationCacheV2", async ({ expect }) => {
 			const deploymentId = "deployment-" + Math.random();
 			const metadata = createMetadataObject({ deploymentId }) as Metadata;
 
@@ -752,27 +924,27 @@ describe("asset-server handler", () => {
 		});
 	});
 
-	describe("isPreservationCacheResponseExpiring()", async () => {
-		test("no age header", async () => {
+	describe("isPreservationCacheResponseExpiring()", () => {
+		test("no age header", async ({ expect }) => {
 			const res = new Response(null);
 			expect(isPreservationCacheResponseExpiring(res)).toBe(false);
 		});
 
-		test("empty age header", async () => {
+		test("empty age header", async ({ expect }) => {
 			const res = new Response(null, {
 				headers: { age: "" },
 			});
 			expect(isPreservationCacheResponseExpiring(res)).toBe(false);
 		});
 
-		test("unparsable age header", async () => {
+		test("unparsable age header", async ({ expect }) => {
 			const res = new Response(null, {
 				headers: { age: "not-a-number" },
 			});
 			expect(isPreservationCacheResponseExpiring(res)).toBe(false);
 		});
 
-		test("below write frequency", async () => {
+		test("below write frequency", async ({ expect }) => {
 			const res = new Response(null, {
 				headers: { age: "0" },
 			});
@@ -790,7 +962,7 @@ describe("asset-server handler", () => {
 			expect(isPreservationCacheResponseExpiring(res3)).toBe(false);
 		});
 
-		test("above write frequency + jitter", async () => {
+		test("above write frequency + jitter", async ({ expect }) => {
 			const res = new Response(null, {
 				headers: {
 					age: (CACHE_PRESERVATION_WRITE_FREQUENCY + 43_200 + 1).toString(),
@@ -800,7 +972,7 @@ describe("asset-server handler", () => {
 		});
 	});
 
-	describe("internal asset error doesn't set headers", async () => {
+	describe("internal asset error doesn't set headers", () => {
 		const metadata = createMetadataObject({
 			deploymentId: "mock-deployment-id",
 			headers: {
@@ -829,12 +1001,12 @@ describe("asset-server handler", () => {
 		const findAssetEntryForPath = async (path: string) =>
 			path.startsWith("/asset") ? "some-asset" : null;
 
-		test("500 skips headers", async () => {
+		test("500 skips headers", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/asset",
 				metadata,
 				fetchAsset: async () => {
-					throw "uh oh";
+					throw new Error("uh oh");
 				},
 				findAssetEntryForPath: findAssetEntryForPath,
 			});
@@ -845,7 +1017,7 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("404 doesn't skip headers", async () => {
+		test("404 doesn't skip headers", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/404",
 				metadata,
@@ -858,7 +1030,7 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("301 doesn't skip headers", async () => {
+		test("301 doesn't skip headers", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/here",
 				metadata,
@@ -894,7 +1066,7 @@ describe("asset-server handler", () => {
 			return null;
 		};
 
-		test("404 adds cache-control: no-store", async () => {
+		test("404 adds cache-control: no-store", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/404",
 				metadata: createMetadataObject({
@@ -911,7 +1083,7 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("404 removes user-controlled cache-control", async () => {
+		test("404 removes user-controlled cache-control", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/404",
 				metadata,
@@ -926,7 +1098,9 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("200 continues having the user's cache-control header", async () => {
+		test("200 continues having the user's cache-control header", async ({
+			expect,
+		}) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/asset",
 				metadata,
@@ -943,7 +1117,7 @@ describe("asset-server handler", () => {
 	});
 
 	describe("redirects", () => {
-		test("it should redirect uri-encoded paths", async () => {
+		test("it should redirect uri-encoded paths", async ({ expect }) => {
 			const { response, spies } = await getTestResponse({
 				request: "https://foo.com/some%20page",
 				metadata: createMetadataObjectWithRedirects([
@@ -959,7 +1133,7 @@ describe("asset-server handler", () => {
 			expect(response.headers.get("Location")).toBe("/home");
 		});
 
-		test("redirects to a query string same-origin", async () => {
+		test("redirects to a query string same-origin", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar",
 				metadata: createMetadataObjectWithRedirects([
@@ -971,7 +1145,7 @@ describe("asset-server handler", () => {
 			expect(response.headers.get("Location")).toBe("/?test=abc");
 		});
 
-		test("redirects to a query string cross-origin", async () => {
+		test("redirects to a query string cross-origin", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar",
 				metadata: createMetadataObjectWithRedirects([
@@ -985,7 +1159,7 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("redirects to hash component same-origin", async () => {
+		test("redirects to hash component same-origin", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar",
 				metadata: createMetadataObjectWithRedirects([
@@ -997,7 +1171,7 @@ describe("asset-server handler", () => {
 			expect(response.headers.get("Location")).toBe("/##heading-7");
 		});
 
-		test("redirects to hash component cross-origin", async () => {
+		test("redirects to hash component cross-origin", async ({ expect }) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar",
 				metadata: createMetadataObjectWithRedirects([
@@ -1011,7 +1185,9 @@ describe("asset-server handler", () => {
 			);
 		});
 
-		test("redirects to a query string and hash same-origin", async () => {
+		test("redirects to a query string and hash same-origin", async ({
+			expect,
+		}) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar",
 				metadata: createMetadataObjectWithRedirects([
@@ -1023,7 +1199,9 @@ describe("asset-server handler", () => {
 			expect(response.headers.get("Location")).toBe("/?test=abc#def");
 		});
 
-		test("redirects to a query string and hash cross-origin", async () => {
+		test("redirects to a query string and hash cross-origin", async ({
+			expect,
+		}) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar",
 				metadata: createMetadataObjectWithRedirects([
@@ -1040,7 +1218,9 @@ describe("asset-server handler", () => {
 		// Query strings must be before the hash to be considered query strings
 		// https://www.rfc-editor.org/rfc/rfc3986#section-4.1
 		// Behaviour in Chrome is that the .hash is "#def?test=abc" and .search is ""
-		test("redirects to a query string and hash against rfc", async () => {
+		test("redirects to a query string and hash against rfc", async ({
+			expect,
+		}) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar",
 				metadata: createMetadataObjectWithRedirects([
@@ -1055,7 +1235,9 @@ describe("asset-server handler", () => {
 		});
 
 		// Query string needs to be _before_ the hash
-		test("redirects to a hash with an incoming query cross-origin", async () => {
+		test("redirects to a hash with an incoming query cross-origin", async ({
+			expect,
+		}) => {
 			const { response } = await getTestResponse({
 				request: "https://foo.com/bar?test=abc",
 				metadata: createMetadataObjectWithRedirects([
@@ -1068,6 +1250,189 @@ describe("asset-server handler", () => {
 				"https://foobar.com/?test=abc#heading"
 			);
 		});
+	});
+
+	const findIndexHtmlAssetEntryForPath = async (path: string) => {
+		if (path === "/index.html") {
+			return "asset-key-index.html";
+		}
+		return null;
+	};
+
+	const fetchHtmlAsset = () =>
+		Promise.resolve(
+			Object.assign(
+				new Response(`
+				<!DOCTYPE html>
+				<html>
+					<body>
+						<h1>Hello World</h1>
+					</body>
+				</html>
+			`),
+				{ contentType: "text/html" }
+			)
+		);
+
+	const fetchHtmlAssetWithoutBody = () =>
+		Promise.resolve(
+			Object.assign(
+				new Response(`
+				<!DOCTYPE html>
+				<html>
+					<head>
+						<title>No Body</title>
+					</head>
+				</html>
+			`),
+				{ contentType: "text/html" }
+			)
+		);
+
+	const findStyleCssAssetEntryForPath = async (path: string) =>
+		path === "/style.css" ? "asset-key-style.css" : null;
+
+	const fetchCssAsset = () =>
+		Promise.resolve(
+			Object.assign(
+				new Response(`
+				body {
+					font-family: Arial, sans-serif;
+					color: #333;
+				}
+			`),
+				{ contentType: "text/css" }
+			)
+		);
+
+	test("should emit header when Web Analytics Token is injected", async ({
+		expect,
+	}) => {
+		const { response } = await getTestResponse({
+			request: "https://example.com/",
+			metadata: createMetadataObject({
+				deploymentId: "mock-deployment-id",
+				webAnalyticsToken: "test-analytics-token",
+			}) as Metadata,
+			findAssetEntryForPath: findIndexHtmlAssetEntryForPath,
+			fetchAsset: fetchHtmlAsset,
+			xWebAnalyticsHeader: true,
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cf-pages-analytics")).toBe("1");
+
+		const responseText = await response.text();
+		expect(responseText).toContain(
+			'data-cf-beacon=\'{"token": "test-analytics-token"}\''
+		);
+	});
+
+	test("should not emit header when Web Analytics Token is not configured", async ({
+		expect,
+	}) => {
+		const { response } = await getTestResponse({
+			request: "https://example.com/",
+			metadata: createMetadataObject({
+				deploymentId: "mock-deployment-id",
+			}) as Metadata,
+			findAssetEntryForPath: findIndexHtmlAssetEntryForPath,
+			fetchAsset: fetchHtmlAsset,
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cf-pages-analytics")).toBeNull();
+
+		const responseText = await response.text();
+		expect(responseText).not.toContain("data-cf-beacon");
+	});
+
+	test("should emit header for HTML without <body> element but not inject script", async ({
+		expect,
+	}) => {
+		const { response } = await getTestResponse({
+			request: "https://example.com/",
+			metadata: createMetadataObject({
+				deploymentId: "mock-deployment-id",
+				webAnalyticsToken: "test-analytics-token",
+			}) as Metadata,
+			findAssetEntryForPath: findIndexHtmlAssetEntryForPath,
+			fetchAsset: fetchHtmlAssetWithoutBody,
+			xWebAnalyticsHeader: true,
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cf-pages-analytics")).toBe("1");
+
+		const responseText = await response.text();
+		expect(responseText).not.toContain("data-cf-beacon");
+		expect(responseText).toContain("<title>No Body</title>");
+	});
+
+	test("should not emit header for non-HTML responses", async ({ expect }) => {
+		const { response } = await getTestResponse({
+			request: "https://example.com/style.css",
+			metadata: createMetadataObject({
+				deploymentId: "mock-deployment-id",
+				webAnalyticsToken: "test-analytics-token",
+			}) as Metadata,
+			findAssetEntryForPath: findStyleCssAssetEntryForPath,
+			fetchAsset: fetchCssAsset,
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cf-pages-analytics")).toBeNull();
+		expect(response.headers.get("content-type")).toBe("text/css");
+
+		const responseText = await response.text();
+		expect(responseText).not.toContain("data-cf-beacon");
+		expect(responseText).toContain("font-family: Arial");
+	});
+
+	test("should not emit header when xWebAnalyticsHeader is false", async ({
+		expect,
+	}) => {
+		const { response } = await getTestResponse({
+			request: "https://example.com/",
+			metadata: createMetadataObject({
+				deploymentId: "mock-deployment-id",
+				webAnalyticsToken: "test-analytics-token",
+			}) as Metadata,
+			findAssetEntryForPath: findIndexHtmlAssetEntryForPath,
+			fetchAsset: fetchHtmlAsset,
+			xWebAnalyticsHeader: false,
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cf-pages-analytics")).toBeNull();
+
+		const responseText = await response.text();
+		expect(responseText).toContain(
+			'data-cf-beacon=\'{"token": "test-analytics-token"}\''
+		);
+	});
+
+	test("should not emit header when xWebAnalyticsHeader is undefined", async ({
+		expect,
+	}) => {
+		const { response } = await getTestResponse({
+			request: "https://example.com/",
+			metadata: createMetadataObject({
+				deploymentId: "mock-deployment-id",
+				webAnalyticsToken: "test-analytics-token",
+			}) as Metadata,
+			findAssetEntryForPath: findIndexHtmlAssetEntryForPath,
+			fetchAsset: fetchHtmlAsset,
+			xWebAnalyticsHeader: undefined,
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cf-pages-analytics")).toBeNull();
+
+		const responseText = await response.text();
+		expect(responseText).toContain(
+			'data-cf-beacon=\'{"token": "test-analytics-token"}\''
+		);
 	});
 });
 
@@ -1121,6 +1486,7 @@ async function getTestResponse({
 		request: request instanceof Request ? request : new Request(request),
 		metadata,
 		xServerEnvHeader: "dev",
+		xWebAnalyticsHeader: options.xWebAnalyticsHeader,
 		logError: console.error,
 		findAssetEntryForPath: async (...args) => {
 			spies.findAssetEntryForPath++;
@@ -1136,12 +1502,10 @@ async function getTestResponse({
 		},
 		fetchAsset: async (...args) => {
 			spies.fetchAsset++;
-			return (
-				options.fetchAsset?.(...args) ?? {
-					body: null,
-					contentType: "text/plain",
-				}
-			);
+			return await (options.fetchAsset?.(...args) ?? {
+				body: null,
+				contentType: "text/plain",
+			});
 		},
 		waitUntil: async (promise: Promise<unknown>) => {
 			spies.waitUntil.push(promise);

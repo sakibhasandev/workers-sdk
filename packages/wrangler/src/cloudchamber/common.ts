@@ -1,44 +1,52 @@
-import { mkdir } from "fs/promises";
-import { exit } from "process";
-import { crash, logRaw, space, status, updateStatus } from "@cloudflare/cli";
-import { brandColor, dim } from "@cloudflare/cli/colors";
-import { inputPrompt, spinner } from "@cloudflare/cli/interactive";
-import { version as wranglerVersion } from "../../package.json";
+import { space, updateStatus } from "@cloudflare/cli-shared-helpers";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import {
+	inputPrompt,
+	spinner,
+} from "@cloudflare/cli-shared-helpers/interactive";
+import {
+	ApiError,
+	DeploymentMutationError,
+	OpenAPI,
+} from "@cloudflare/containers-shared";
+import {
+	addAuthorizationHeader,
+	getCloudflareApiBaseUrl,
+	parseByteSize,
+	UserError,
+} from "@cloudflare/workers-utils";
+import { addUserAgent } from "../cfetch/internal";
 import { readConfig } from "../config";
-import { getConfigCache, purgeConfigCaches } from "../config-cache";
-import { getCloudflareApiBaseUrl } from "../environment-variables/misc-variables";
+import { constructStatusMessage } from "../core/CommandRegistry";
 import { isNonInteractiveOrCI } from "../is-interactive";
 import { logger } from "../logger";
-import {
-	DefaultScopeKeys,
-	getAccountFromCache,
-	getAccountId,
-	getAPIToken,
-	getAuthFromEnv,
-	getScopes,
-	logout,
-	reinitialiseAuthTokens,
-	requireAuth,
-	setLoginScopeKeys,
-} from "../user";
-import { ApiError, DeploymentMutationError, OpenAPI } from "./client";
+import { getScopes, printScopes, requireApiToken, requireAuth } from "../user";
+import { printWranglerBanner } from "../wrangler-banner";
 import { wrap } from "./helpers/wrap";
-import { idToLocationName, loadAccount } from "./locations";
-import type { Config } from "../config";
-import type { Scope } from "../user";
+import { idToLocationName } from "./locations";
+import type { containersScope } from "../containers";
 import type {
 	CommonYargsOptions,
-	StrictYargsOptionsToInterfaceJSON,
+	StrictYargsOptionsToInterface,
 } from "../yargs-types";
+import type { Arg } from "@cloudflare/cli-shared-helpers/interactive";
 import type {
 	CompleteAccountCustomer,
 	EnvironmentVariable,
+	InstanceType,
 	Label,
 	NetworkParameters,
-} from "./client";
-import type { Arg } from "@cloudflare/cli/interactive";
+} from "@cloudflare/containers-shared";
+import type { CloudchamberConfig, Config } from "@cloudflare/workers-utils";
 
-export type CommonCloudchamberConfiguration = { json: boolean };
+export const cloudchamberScope = "cloudchamber:write" as const;
+
+const containerIdRegexp = /[^/]{36}/;
+
+export function isValidContainerID(value: string): boolean {
+	const matches = value.match(containerIdRegexp);
+	return matches !== null;
+}
 
 /**
  * Regular expression for matching an image name.
@@ -91,69 +99,57 @@ export function parseImageName(value: string): {
  */
 export function handleFailure<
 	YargsObject,
-	CommandArgumentsObject = YargsObject extends StrictYargsOptionsToInterfaceJSON<
+	CommandArgumentsObject = YargsObject extends StrictYargsOptionsToInterface<
 		infer K
 	>
 		? K
 		: never,
 >(
-	cb: (args: CommandArgumentsObject, config: Config) => Promise<void>
-): (
-	args: CommonYargsOptions &
-		CommandArgumentsObject &
-		CommonCloudchamberConfiguration
-) => Promise<void> {
+	command: string,
+	cb: (args: CommandArgumentsObject, config: Config) => Promise<void>,
+	scope: typeof cloudchamberScope | typeof containersScope
+): (args: CommonYargsOptions & CommandArgumentsObject) => Promise<void> {
 	return async (args) => {
-		try {
-			const config = readConfig(args);
-			await fillOpenAPIConfiguration(config, args.json);
-			await cb(args, config);
-		} catch (err) {
-			if (!args.json) {
-				throw err;
+		const isJson = "json" in args ? args.json === true : false;
+		if (!isNonInteractiveOrCI() && !isJson) {
+			await printWranglerBanner();
+			if (scope === cloudchamberScope) {
+				logger.warn(constructStatusMessage(command, "alpha"));
 			}
-
-			if (err instanceof ApiError) {
-				logger.log(JSON.stringify(err.body));
-				return;
-			}
-
-			if (err instanceof Error) {
-				logger.log(`${JSON.stringify({ error: err.message })}`);
-				return;
-			}
-
-			logger.log(JSON.stringify(err));
 		}
+		const config = readConfig(args);
+		await fillOpenAPIConfiguration(config, scope);
+		await cb(args, config);
 	};
-}
-
-export async function loadAccountSpinner({ json }: { json?: boolean }) {
-	await promiseSpinner(loadAccount(), { message: "Loading account", json });
 }
 
 /**
  * Gets the API URL depending if the user is using old/admin based authentication.
  *
  */
-async function getAPIUrl(config: Config) {
-	const api = getCloudflareApiBaseUrl();
-	// This one will probably be cache'd already so it won't ask for the accountId again
-	const accountId = config.account_id || (await getAccountId());
-	return `${api}/accounts/${accountId}/cloudchamber`;
+async function getAPIUrl(
+	config: Config,
+	accountId: string,
+	scope: typeof cloudchamberScope | typeof containersScope
+) {
+	const api = getCloudflareApiBaseUrl(config);
+
+	const endpoint = scope === cloudchamberScope ? "cloudchamber" : "containers";
+
+	return `${api}/accounts/${accountId}/${endpoint}`;
 }
 
 export async function promiseSpinner<T>(
 	promise: Promise<T>,
 	{
-		json = false,
-		message = "Loading",
-	}: { json?: boolean; message?: string } = {
-		json: false,
+		message,
+	}: {
+		message: string;
+	} = {
 		message: "Loading",
 	}
 ): Promise<T> {
-	if (json) {
+	if (isNonInteractiveOrCI()) {
 		return promise;
 	}
 	const { start, stop } = spinner();
@@ -166,106 +162,44 @@ export async function promiseSpinner<T>(
 	return t;
 }
 
-async function fillOpenAPIConfiguration(config: Config, json: boolean) {
-	const headers: Record<string, string> =
-		OpenAPI.HEADERS !== undefined ? { ...OpenAPI.HEADERS } : {};
+export async function fillOpenAPIConfiguration(
+	config: Config,
+	scope: typeof containersScope | typeof cloudchamberScope
+) {
+	const headers = new Headers();
 
-	// if the config cache folder doesn't exist, it means that there is not a node_modules folder in the tree
-	if (Object.keys(getConfigCache("wrangler-account.json")).length === 0) {
-		await wrap(mkdir("node_modules", {}));
-		purgeConfigCaches();
-	}
-
+	const accountId = await requireAuth(config);
+	const auth = requireApiToken();
 	const scopes = getScopes();
-	const needsCloudchamberToken = !scopes?.find(
-		(scope) => scope === "cloudchamber:write"
-	);
-	const cloudchamberScope: Scope[] = ["cloudchamber:write"];
-	const scopesToSet: Scope[] =
-		scopes == undefined
-			? cloudchamberScope.concat(DefaultScopeKeys)
-			: cloudchamberScope.concat(scopes);
-
-	if (getAuthFromEnv() && needsCloudchamberToken) {
-		setLoginScopeKeys(scopesToSet);
-		// Wrangler will try to retrieve the oauth token and refresh it
-		// for its internal fetch call even if we have AuthFromEnv.
-		// Let's mock it
-		reinitialiseAuthTokens({
-			expiration_time: "2300-01-01:00:00:00+00:00",
-			oauth_token: "_",
-		});
-	} else {
-		if (needsCloudchamberToken && scopes) {
-			logRaw(
-				status.warning +
-					" We need to re-authenticate to add a cloudchamber token..."
-			);
-			// cache account id
-			await getAccountId();
-			const account = getAccountFromCache();
-			config.account_id = account?.id ?? config.account_id;
-			await promiseSpinner(logout(), { json, message: "Revoking token" });
-			purgeConfigCaches();
-			reinitialiseAuthTokens({});
-		}
-
-		setLoginScopeKeys(scopesToSet);
-
-		// Require either login, or environment variables being set to authenticate
-		//
-		// This will prompt the user for an accountId being chosen if they haven't configured the account id yet
-		const [, err] = await wrap(requireAuth(config));
-		if (err) {
-			crash("authenticating with the Cloudflare API:", err.message);
-			return;
-		}
-	}
-
-	// Get the loaded API token
-	const token = getAPIToken();
-	if (!token) {
-		crash("unexpected apiToken not existing in credentials");
-		exit(1);
-	}
-
-	const val = "apiToken" in token ? token.apiToken : null;
-	// Don't try to support this method of authentication
-	if (!val) {
-		crash(
-			"we don't allow for authKey/email credentials, use `wrangler login` or CLOUDFLARE_API_TOKEN env variable to authenticate"
+	if (scopes !== undefined && !scopes.includes(scope)) {
+		logger.error(`You don't have '${scope}' in your list of scopes`);
+		printScopes(scopes ?? []);
+		throw new UserError(
+			`You need '${scope}', try logging in again or creating an appropiate API token`,
+			{ telemetryMessage: "cloudchamber auth missing scope" }
 		);
 	}
 
-	headers["Authorization"] = `Bearer ${val}`;
-	// These are being set by the internal fetch of wrangler, but we are not using it
-	// due to our OpenAPI codegenerated client.
-	headers["User-Agent"] = `wrangler/${wranglerVersion}`;
+	addAuthorizationHeader(headers, auth);
+	addUserAgent(headers);
+
 	OpenAPI.CREDENTIALS = "omit";
 	if (OpenAPI.BASE.length === 0) {
-		const [base, errApiURL] = await wrap(getAPIUrl(config));
+		const [base, errApiURL] = await wrap(getAPIUrl(config, accountId, scope));
 		if (errApiURL) {
-			crash("getting the API url:" + errApiURL.message);
+			throw new UserError("getting the API url: " + errApiURL.message, {
+				telemetryMessage: "cloudchamber auth api url failed",
+			});
 		}
 
 		OpenAPI.BASE = base;
 	}
 
-	OpenAPI.HEADERS = headers;
-	const [, err] = await wrap(loadAccountSpinner({ json }));
-
-	if (err) {
-		let message = err.message;
-		if (json && err instanceof ApiError) {
-			message = JSON.stringify(err);
-		}
-
-		crash("loading Cloudchamber account failed:" + message);
-	}
-}
-
-export function interactWithUser(config: { json?: boolean }): boolean {
-	return !config.json && !isNonInteractiveOrCI();
+	OpenAPI.HEADERS = {
+		...(OpenAPI.HEADERS ?? {}),
+		...Object.fromEntries(headers.entries()),
+	};
+	OpenAPI.LOGGER = logger;
 }
 
 type NonObject = undefined | null | boolean | string | number;
@@ -300,8 +234,9 @@ export function renderDeploymentConfiguration(
 	{
 		image,
 		location,
+		instanceType,
 		vcpu,
-		memory,
+		memoryMib,
 		environmentVariables,
 		labels,
 		env,
@@ -309,8 +244,9 @@ export function renderDeploymentConfiguration(
 	}: {
 		image: string;
 		location: string;
+		instanceType?: InstanceType;
 		vcpu: number;
-		memory: string;
+		memoryMib: number;
 		environmentVariables: EnvironmentVariable[] | undefined;
 		labels: Label[] | undefined;
 		env?: string;
@@ -346,13 +282,17 @@ export function renderDeploymentConfiguration(
 	const containerInformation = [
 		["image", image],
 		["location", idToLocationName(location)],
-		["vCPU", `${vcpu}`],
-		["memory", memory],
 		["environment variables", environmentVariablesText],
 		["labels", labelsText],
 		...(network === undefined
 			? []
 			: [["IPv4", network.assign_ipv4 === "predefined" ? "yes" : "no"]]),
+		...(instanceType === undefined
+			? [
+					["vCPU", `${vcpu}`],
+					["memory", `${memoryMib} MiB`],
+				]
+			: [["instance type", `${instanceType}`]]),
 	] as const;
 
 	updateStatus(
@@ -368,37 +308,38 @@ export function renderDeploymentMutationError(
 	err: Error
 ) {
 	if (!(err instanceof ApiError)) {
-		crash(err.message);
-		return;
+		throw new UserError(err.message, {
+			telemetryMessage: "cloudchamber deployment mutation unexpected error",
+		});
 	}
 
 	if (typeof err.body === "string") {
-		crash("There has been an internal error, please try again!");
-		return;
+		throw new UserError("There has been an internal error, please try again!", {
+			telemetryMessage: "cloudchamber deployment mutation internal error",
+		});
 	}
 
 	if (!("error" in err.body)) {
-		crash(err.message);
-		return;
+		throw new UserError(err.message, {
+			telemetryMessage: "cloudchamber deployment mutation malformed response",
+		});
 	}
 
 	const errorMessage = err.body.error;
 	if (!(errorMessage in DeploymentMutationError)) {
-		crash(err.message);
-		return;
+		throw new UserError(err.message, {
+			telemetryMessage: "cloudchamber deployment mutation unknown error",
+		});
 	}
 
 	const details: Record<string, string> = err.body.details ?? {};
 	function renderAccountLimits() {
-		return `${space(2)}${brandColor("Maximum VCPU per deployment")} ${
-			account.limits.vcpu_per_deployment
-		}\n${space(2)}${brandColor("Maximum total VCPU in your account")} ${
-			account.limits.total_vcpu
-		}\n${space(2)}${brandColor("Maximum memory per deployment")} ${
-			account.limits.memory_per_deployment
-		}\n${space(2)}${brandColor("Maximum total memory in your account")} ${
-			account.limits.total_memory
-		}`;
+		return [
+			`${space(2)}${brandColor("Maximum VCPU per deployment")} ${account.limits.vcpu_per_deployment}`,
+			`${space(2)}${brandColor("Maximum total VCPU in your account")} ${account.limits.total_vcpu}`,
+			`${space(2)}${brandColor("Maximum memory per deployment")} ${account.limits.memory_mib_per_deployment} MiB`,
+			`${space(2)}${brandColor("Maximum total memory in your account")} ${account.limits.total_memory_mib} MiB`,
+		].join("\n");
 	}
 
 	function renderInvalidInputDetails(inputDetails: Record<string, string>) {
@@ -427,7 +368,10 @@ export function renderDeploymentMutationError(
 				"The image registry you are trying to use is not configured. Use the 'wrangler cloudchamber registries configure' command to configure the registry.\n",
 		};
 
-	crash(details["reason"] ?? errorEnumToErrorMessage[errorEnum]());
+	throw new UserError(
+		details["reason"] ?? errorEnumToErrorMessage[errorEnum](),
+		{ telemetryMessage: "cloudchamber deployment mutation failed" }
+	);
 }
 
 function sortEnvironmentVariables(environmentVariables: EnvironmentVariable[]) {
@@ -635,4 +579,20 @@ export async function promptForLabels(
 	}
 
 	return [];
+}
+
+// Return the amount of memory to use (in MiB) for a deployment given the
+// provided arguments and configuration.
+export function resolveMemory(
+	args: { memory: string | undefined },
+	config: CloudchamberConfig
+): number | undefined {
+	const MiB = 1024 * 1024;
+
+	const memory = args.memory ?? config.memory;
+	if (memory !== undefined) {
+		return Math.round(parseByteSize(memory, 1024) / MiB);
+	}
+
+	return undefined;
 }

@@ -1,12 +1,11 @@
 import { z } from "zod";
-import { Request, Response } from "../../http";
-import { HOST_CAPNP_CONNECT, Miniflare } from "../../index";
-import {
-	ExternalServer,
-	HttpOptions_Style,
-	TlsOptions_Version,
-} from "../../runtime";
+import { HOST_CAPNP_CONNECT } from "../../index";
+import { HttpOptions_Style, TlsOptions_Version } from "../../runtime";
+import type { Request, Response } from "../../http";
+import type { Miniflare, RemoteProxyConnectionString } from "../../index";
+import type { ExternalServer } from "../../runtime";
 import type { Awaitable } from "../../workers";
+import type * as http from "node:http";
 
 // Zod validators for types in runtime/config/workerd.ts.
 // All options should be optional except where specifically stated.
@@ -80,8 +79,16 @@ const DiskDirectorySchema = z.object({
 	writable: z.oboolean(),
 });
 
-export const ServiceFetchSchema = z.custom<
-	(request: Request, mf: Miniflare) => Awaitable<Response>
+const CustomNodeServiceSchema = z.custom<
+	(
+		req: http.IncomingMessage,
+		res: http.ServerResponse,
+		miniflare: Miniflare
+	) => Awaitable<void>
+>((v) => typeof v === "function");
+
+export const CustomFetchServiceSchema = z.custom<
+	(request: Request, miniflare: Miniflare) => Awaitable<Response>
 >((v) => typeof v === "function");
 
 export const ServiceDesignatorSchema = z.union([
@@ -90,9 +97,14 @@ export const ServiceDesignatorSchema = z.union([
 	z.object({
 		name: z.union([z.string(), z.literal(kCurrentWorker)]),
 		entrypoint: z.ostring(),
+		props: z.record(z.unknown()).optional(),
+		remoteProxyConnectionString: z
+			.custom<RemoteProxyConnectionString>()
+			.optional(),
 	}),
 	z.object({ network: NetworkSchema }),
 	z.object({ external: ExternalServerSchema }),
 	z.object({ disk: DiskDirectorySchema }),
-	ServiceFetchSchema,
+	z.object({ node: CustomNodeServiceSchema }),
+	CustomFetchServiceSchema,
 ]);

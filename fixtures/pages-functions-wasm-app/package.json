@@ -1,5 +1,5 @@
 {
-	"name": "pages-functions-wasm-app",
+	"name": "@fixture/pages-functions-wasm",
 	"private": true,
 	"sideEffects": false,
 	"scripts": {
@@ -16,11 +16,5 @@
 		"undici": "catalog:default",
 		"vitest": "catalog:default",
 		"wrangler": "workspace:*"
-	},
-	"engines": {
-		"node": ">=18.0.0"
-	},
-	"volta": {
-		"extends": "../../package.json"
 	}
 }

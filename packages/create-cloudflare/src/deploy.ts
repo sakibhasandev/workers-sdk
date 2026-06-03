@@ -1,22 +1,24 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startSection, updateStatus } from "@cloudflare/cli";
-import { blue, brandColor, dim } from "@cloudflare/cli/colors";
-import TOML from "@iarna/toml";
+import { startSection, updateStatus } from "@cloudflare/cli-shared-helpers";
+import { blue, brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import {
+	quoteShellArgs,
+	runCommand,
+} from "@cloudflare/cli-shared-helpers/command";
 import { processArgument } from "helpers/args";
 import { C3_DEFAULTS, openInBrowser } from "helpers/cli";
-import { quoteShellArgs, runCommand } from "helpers/command";
 import { readFile } from "helpers/files";
 import { detectPackageManager } from "helpers/packageManagers";
 import { poll } from "helpers/poll";
-import { parse as jsoncParse } from "jsonc-parser";
+import TOML from "smol-toml";
 import { isInsideGitRepo } from "./git";
 import { chooseAccount, wranglerLogin } from "./wrangler/accounts";
 import {
-	readWranglerJson,
+	readWranglerJsonOrJsonc,
 	readWranglerToml,
-	wranglerJsonExists,
+	wranglerJsonOrJsoncExists,
 } from "./wrangler/config";
 import type { C3Context } from "types";
 
@@ -30,8 +32,8 @@ export const offerToDeploy = async (ctx: C3Context) => {
 		ctx.args.deploy = false;
 		updateStatus(
 			`Bindings must be configured in ${blue(
-				"`wrangler.toml`",
-			)} before your application can be deployed`,
+				"`wrangler.toml`"
+			)} before your application can be deployed`
 		);
 	}
 
@@ -82,9 +84,8 @@ const isDeployable = async (ctx: C3Context) => {
 };
 
 const readWranglerConfig = (ctx: C3Context) => {
-	if (wranglerJsonExists(ctx)) {
-		const wranglerJsonStr = readWranglerJson(ctx);
-		return jsoncParse(wranglerJsonStr, undefined, { allowTrailingComma: true });
+	if (wranglerJsonOrJsoncExists(ctx)) {
+		return readWranglerJsonOrJsonc(ctx);
 	}
 	const wranglerTomlStr = readWranglerToml(ctx);
 	return TOML.parse(wranglerTomlStr.replace(/\r\n/g, "\n"));
@@ -115,7 +116,7 @@ export const runDeploy = async (ctx: C3Context) => {
 
 	const outputFile = join(
 		await mkdtemp(join(tmpdir(), "c3-wrangler-deploy-")),
-		"output.json",
+		"output.json"
 	);
 
 	await runCommand(deployCmd, {
@@ -127,7 +128,7 @@ export const runDeploy = async (ctx: C3Context) => {
 		},
 		startText: "Deploying your application",
 		doneText: `${brandColor("deployed")} ${dim(
-			`via \`${quoteShellArgs(baseDeployCmd)}\``,
+			`via \`${quoteShellArgs(baseDeployCmd)}\``
 		)}`,
 	});
 

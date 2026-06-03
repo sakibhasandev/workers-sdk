@@ -5,14 +5,17 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import { runWranglerDev } from "../../shared/src/run-wrangler-long-lived";
 
 describe("Workers + Assets + SPA", () => {
-	let ip: string, port: number, stop: (() => Promise<unknown>) | undefined;
+	let ip: string,
+		port: number,
+		stop: (() => Promise<unknown>) | undefined,
+		getOutput: () => string;
 	let browser: Browser | undefined;
 
 	beforeAll(async () => {
-		({ ip, port, stop } = await runWranglerDev(resolve(__dirname, ".."), [
-			"--port=0",
-			"--inspector-port=0",
-		]));
+		({ ip, port, stop, getOutput } = await runWranglerDev(
+			resolve(__dirname, ".."),
+			["--port=0", "--inspector-port=0"]
+		));
 
 		browser = await chromium.launch({
 			headless: !process.env.VITE_DEBUG_SERVE,
@@ -40,7 +43,10 @@ describe("Workers + Assets + SPA", () => {
 		await page.goto("/");
 		if (process.platform === "darwin") {
 			// different platforms render the page differently (fonts?)
-			expect(await page.screenshot()).toMatchImageSnapshot();
+			expect(await page.screenshot()).toMatchImageSnapshot({
+				failureThreshold: 0.02,
+				failureThresholdType: "percent",
+			});
 		}
 
 		const mathResultLocator = page.getByText("1 + 1 = 2");
@@ -175,6 +181,12 @@ describe("Workers + Assets + SPA", () => {
 		expect(page.url()).toBe(`http://${ip}:${port}/blog`);
 		const blogTitleLocator = page.getByRole("heading", { name: "Blog" });
 		await blogTitleLocator.waitFor({ state: "attached" });
+
+		expect(
+			getOutput().match(
+				/GET \/blog 200 OK \(.*\) `Sec-Fetch-Mode: navigate` header present - using `not_found_handling` behavior/
+			)
+		).toBeTruthy();
 
 		const blogSlugInput = page.getByRole("textbox");
 		blogSlugInput.fill("/blog/some-slug-here");

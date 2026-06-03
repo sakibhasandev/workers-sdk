@@ -1,64 +1,187 @@
+import { generateContainerBuildId } from "@cloudflare/containers-shared";
+import { CorePaths } from "miniflare";
+import { LocalRuntimeController } from "../api/startDevWorker/LocalRuntimeController";
 import registerHotKeys from "../cli-hotkeys";
 import { logger } from "../logger";
 import openInBrowser from "../open-in-browser";
+import { debounce } from "../utils/debounce";
 import { openInspector } from "./inspect";
 import type { DevEnv } from "../api";
+import type { TunnelManager } from "../tunnel/dev";
 
 export default function registerDevHotKeys(
-	devEnv: DevEnv,
-	args: { forceLocal?: boolean }
+	devEnvs: DevEnv[],
+	args: {
+		forceLocal?: boolean;
+		remote: boolean;
+		tunnel?: boolean;
+		tunnelName?: string;
+	},
+	options: {
+		render?: boolean;
+		tunnelManager?: TunnelManager;
+	} = {}
 ) {
-	const unregisterHotKeys = registerHotKeys([
-		{
-			keys: ["b"],
-			label: "open a browser",
-			handler: async () => {
-				const { url } = await devEnv.proxy.ready.promise;
-				await openInBrowser(url.href);
+	const { render = true, tunnelManager } = options;
+	const primaryDevEnv = devEnvs[0];
+	const unregisterHotKeys = registerHotKeys(
+		[
+			{
+				keys: ["b"],
+				label: "open a browser",
+				handler: async () => {
+					const { url } = await primaryDevEnv.proxy.ready.promise;
+					await openInBrowser(url.href);
+				},
 			},
-		},
-		{
-			keys: ["d"],
-			label: "open devtools",
-			handler: async () => {
-				const { inspectorUrl } = await devEnv.proxy.ready.promise;
+			{
+				keys: ["d"],
+				label: "open devtools",
+				// Don't display this hotkey if we're in a VSCode debug session
+				disabled: !!process.env.VSCODE_INSPECTOR_OPTIONS || args.remote,
+				handler: async () => {
+					const { inspectorUrl } = await primaryDevEnv.proxy.ready.promise;
 
-				// TODO: refactor this function to accept a whole URL (not just .port and assuming .hostname)
-				await openInspector(
-					parseInt(inspectorUrl.port),
-					devEnv.config.latestConfig?.name
-				);
+					if (!inspectorUrl) {
+						logger.warn("DevTools is not available while in a debug terminal");
+					} else {
+						// TODO: refactor this function to accept a whole URL (not just .port and assuming .hostname)
+						await openInspector(
+							parseInt(inspectorUrl.port),
+							primaryDevEnv.config.latestConfig?.name
+						);
+					}
+				},
 			},
-		},
-		{
-			keys: ["l"],
-			disabled: () => args.forceLocal ?? false,
-			label: () =>
-				`turn ${devEnv.config.latestConfig?.dev?.remote ? "on" : "off"} local mode`,
-			handler: async () => {
-				await devEnv.config.patch({
-					dev: {
-						...devEnv.config.latestConfig?.dev,
-						remote: !devEnv.config.latestConfig?.dev?.remote,
-					},
-				});
+			{
+				keys: ["e"],
+				label: "open local explorer",
+				handler: async () => {
+					const { url } = await primaryDevEnv.proxy.ready.promise;
+					const explorerUrl = new URL(CorePaths.EXPLORER, url);
+					await openInBrowser(explorerUrl.href);
+				},
 			},
-		},
-		{
-			keys: ["c"],
-			label: "clear console",
-			handler: async () => {
-				logger.console("clear");
+			{
+				keys: ["r"],
+				label: "rebuild container(s)",
+				disabled: () => {
+					return devEnvs.every(
+						(devEnv) =>
+							!devEnv.config.latestConfig?.dev?.enableContainers ||
+							!devEnv.config.latestConfig?.containers?.length
+					);
+				},
+				handler: debounce(async () => {
+					for (const devEnv of devEnvs) {
+						devEnv.runtimes.forEach((runtime) => {
+							if (runtime instanceof LocalRuntimeController) {
+								if (runtime.containerBeingBuilt) {
+									// Let's abort the image built so that we
+									// can restart the build process
+									runtime.containerBeingBuilt.abort();
+									runtime.containerBeingBuilt.abortRequested = true;
+								}
+							}
+						});
+						// cleanup any existing containers
+
+						devEnv.runtimes.map((runtime) => {
+							if (runtime instanceof LocalRuntimeController) {
+								runtime.cleanupContainers();
+							}
+						});
+
+						const newContainerBuildId = generateContainerBuildId();
+
+						// updating the build ID will trigger a rebuild of the containers
+						await devEnv.config.patch({
+							dev: {
+								...devEnv.config.latestConfig?.dev,
+								containerBuildId: newContainerBuildId,
+							},
+						});
+					}
+				}, 250),
 			},
-		},
-		{
-			keys: ["x", "q", "ctrl+c"],
-			label: "to exit",
-			handler: async () => {
-				await devEnv.teardown();
+			{
+				keys: ["l"],
+				// Remote mode is not supported when using tunnels
+				disabled: () => args.forceLocal || !!tunnelManager?.isOpen(),
+				handler: async () => {
+					await primaryDevEnv.config.patch({
+						dev: {
+							...primaryDevEnv.config.latestConfig?.dev,
+							remote: !primaryDevEnv.config.latestConfig?.dev?.remote,
+						},
+					});
+				},
 			},
-		},
-	]);
+			{
+				keys: ["t"],
+				label: () =>
+					tunnelManager?.isOpen() ? "close tunnel" : "start tunnel",
+				disabled: () => primaryDevEnv.config.latestConfig?.dev?.remote === true,
+				handler: async () => {
+					try {
+						if (!tunnelManager?.isOpen()) {
+							await tunnelManager?.start(true);
+							return;
+						}
+
+						await tunnelManager.stop();
+					} catch (error) {
+						logger.error(
+							error instanceof Error ? error.message : String(error)
+						);
+					}
+				},
+			},
+			{
+				keys: ["a"],
+				label: "extend tunnel by 1 hour",
+				disabled: () => !tunnelManager?.isOpen(),
+				handler: async () => {
+					tunnelManager?.getTunnel()?.extendExpiry();
+				},
+			},
+			{
+				keys: ["c"],
+				label: "clear console",
+				handler: async () => {
+					const someContainerIsBeingBuilt = primaryDevEnv.runtimes.some(
+						(runtime) =>
+							runtime instanceof LocalRuntimeController &&
+							runtime.containerBeingBuilt
+					);
+					if (!someContainerIsBeingBuilt) {
+						// Containers builds have their own complex logs (with progress updates)
+						// that get in the way of the logger clearing, so not to break things
+						// we don't clear the console when a container is being built
+						logger.console("clear");
+					}
+				},
+			},
+			{
+				keys: ["x", "q", "ctrl+c"],
+				label: "to exit",
+				handler: async () => {
+					primaryDevEnv.runtimes.forEach((runtime) => {
+						if (runtime instanceof LocalRuntimeController) {
+							if (runtime.containerBeingBuilt) {
+								// Let's abort the image built so that we
+								// can then exit the dev process
+								runtime.containerBeingBuilt.abort();
+								runtime.containerBeingBuilt.abortRequested = true;
+							}
+						}
+					});
+					await primaryDevEnv.teardown();
+				},
+			},
+		],
+		render
+	);
 
 	return unregisterHotKeys;
 }

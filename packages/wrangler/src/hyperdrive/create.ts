@@ -1,57 +1,68 @@
-import { configFileName, formatConfigSnippet, readConfig } from "../config";
+import { createCommand } from "../core/create-command";
 import { logger } from "../logger";
+import { createdResourceConfig } from "../utils/add-created-resource-config";
+import { getValidBindingName } from "../utils/getValidBindingName";
 import { createConfig } from "./client";
 import { capitalizeScheme } from "./shared";
 import {
 	getCacheOptionsFromArgs,
 	getMtlsFromArgs,
+	getOriginConnectionLimitFromArgs,
 	getOriginFromArgs,
 	upsertOptions,
 } from ".";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../yargs-types";
 
-export function options(commonYargs: CommonYargsArgv) {
-	const yargs = commonYargs
-		.positional("name", {
+export const hyperdriveCreateCommand = createCommand({
+	metadata: {
+		description: "Create a Hyperdrive config",
+		status: "stable",
+		owner: "Product: Hyperdrive",
+	},
+	args: {
+		name: {
 			type: "string",
 			demandOption: true,
 			description: "The name of the Hyperdrive config",
-		})
-		.default({
-			"origin-scheme": "postgresql",
+		},
+		...upsertOptions("postgresql"),
+		binding: {
+			type: "string",
+			description: "The binding name of this resource in your Worker",
+		},
+		"update-config": {
+			type: "boolean",
+			description:
+				"Automatically update your config file with the newly added resource",
+		},
+	},
+	positionalArgs: ["name"],
+	async handler(args, { config }) {
+		const origin = getOriginFromArgs(false, args);
+
+		logger.log(`🚧 Creating '${args.name}'`);
+		const database = await createConfig(config, {
+			name: args.name,
+			origin,
+			caching: getCacheOptionsFromArgs(args),
+			mtls: getMtlsFromArgs(args),
+			origin_connection_limit: getOriginConnectionLimitFromArgs(args),
 		});
+		logger.log(
+			`✅ Created new Hyperdrive ${capitalizeScheme(database.origin.scheme)} config: ${database.id}`
+		);
 
-	return upsertOptions(yargs);
-}
-
-export async function handler(
-	args: StrictYargsOptionsToInterface<typeof options>
-) {
-	const config = readConfig(args);
-	const origin = getOriginFromArgs(false, args);
-
-	logger.log(`🚧 Creating '${args.name}'`);
-	const database = await createConfig(config, {
-		name: args.name,
-		origin,
-		caching: getCacheOptionsFromArgs(args),
-		mtls: getMtlsFromArgs(args),
-	});
-	logger.log(
-		`✅ Created new Hyperdrive ${capitalizeScheme(database.origin.scheme)} config: ${database.id}`
-	);
-	logger.log(
-		`📋 To start using your config from a Worker, add the following binding configuration to your ${configFileName(config.configPath)} file:\n`
-	);
-	logger.log(
-		formatConfigSnippet(
+		await createdResourceConfig(
+			"hyperdrive",
+			(name) => ({
+				binding: getValidBindingName(name ?? "HYPERDRIVE", "HYPERDRIVE"),
+				id: database.id,
+			}),
+			config.configPath,
+			args.env,
 			{
-				hyperdrive: [{ binding: "HYPERDRIVE", id: database.id }],
-			},
-			config.configPath
-		)
-	);
-}
+				...args,
+				useRemote: false, // Hyperdrive does not support remote bindings in local dev
+			}
+		);
+	},
+});

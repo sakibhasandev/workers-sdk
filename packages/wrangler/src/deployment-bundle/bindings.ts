@@ -1,79 +1,60 @@
 import assert from "node:assert";
+import {
+	APIError,
+	experimental_patchConfig,
+	experimental_readRawConfig,
+	INHERIT_SYMBOL,
+	PatchConfigError,
+	UserError,
+} from "@cloudflare/workers-utils";
+import {
+	createAgentMemoryNamespace,
+	getAgentMemoryNamespace,
+} from "../agent-memory/provisioning";
+import { createAISearchNamespace, getAISearchNamespace } from "../ai-search";
+import { convertConfigToBindings } from "../api/startDevWorker/utils";
 import { fetchResult } from "../cfetch";
 import { createD1Database } from "../d1/create";
 import { listDatabases } from "../d1/list";
 import { getDatabaseInfoFromIdOrName } from "../d1/utils";
 import { prompt, select } from "../dialogs";
-import { UserError } from "../errors";
+import { isNonInteractiveOrCI } from "../is-interactive";
 import { createKVNamespace, listKVNamespaces } from "../kv/helpers";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
-import { APIError } from "../parse";
-import { createR2Bucket, getR2Bucket, listR2Buckets } from "../r2/helpers";
-import { isLegacyEnv } from "../utils/isLegacyEnv";
+import {
+	createR2Bucket,
+	getR2Bucket,
+	listR2Buckets,
+} from "../r2/helpers/bucket";
 import { printBindings } from "../utils/print-bindings";
-import type { Config } from "../config";
-import type { WorkerMetadataBinding } from "./create-worker-upload-form";
+import { useServiceEnvironments } from "../utils/useServiceEnvironments";
+import type { Binding, StartDevWorkerInput } from "../api/startDevWorker/types";
 import type {
+	CfAgentMemory,
+	CfAISearchNamespace,
 	CfD1Database,
 	CfKvNamespace,
 	CfR2Bucket,
-	CfWorkerInit,
-} from "./worker";
-
-/**
- * A symbol to inherit a binding from the deployed worker.
- */
-export const INHERIT_SYMBOL = Symbol.for("inherit_binding");
+	ComplianceConfig,
+	Config,
+	RawConfig,
+	WorkerMetadataBinding,
+} from "@cloudflare/workers-utils";
 
 export function getBindings(
 	config: Config | undefined,
 	options?: {
 		pages?: boolean;
 	}
-): CfWorkerInit["bindings"] {
-	return {
-		kv_namespaces: config?.kv_namespaces,
-		send_email: options?.pages ? undefined : config?.send_email,
-		vars: config?.vars,
-		wasm_modules: options?.pages ? undefined : config?.wasm_modules,
-		browser: config?.browser,
-		ai: config?.ai,
-		images: config?.images,
-		version_metadata: config?.version_metadata,
-		text_blobs: options?.pages ? undefined : config?.text_blobs,
-		data_blobs: options?.pages ? undefined : config?.data_blobs,
-		durable_objects: config?.durable_objects,
-		workflows: config?.workflows,
-		queues: config?.queues.producers?.map((producer) => {
-			return { binding: producer.binding, queue_name: producer.queue };
-		}),
-		r2_buckets: config?.r2_buckets,
-		d1_databases: config?.d1_databases,
-		vectorize: config?.vectorize,
-		hyperdrive: config?.hyperdrive,
-		secrets_store_secrets: config?.secrets_store_secrets,
-		services: config?.services,
-		analytics_engine_datasets: config?.analytics_engine_datasets,
-		dispatch_namespaces: options?.pages
-			? undefined
-			: config?.dispatch_namespaces,
-		mtls_certificates: config?.mtls_certificates,
-		pipelines: options?.pages ? undefined : config?.pipelines,
-		logfwdr: options?.pages ? undefined : config?.logfwdr,
-		assets: options?.pages
-			? undefined
-			: config?.assets?.binding
-				? { binding: config?.assets?.binding }
-				: undefined,
-		unsafe: options?.pages
-			? undefined
-			: {
-					bindings: config?.unsafe.bindings,
-					metadata: config?.unsafe.metadata,
-					capnp: config?.unsafe.capnp,
-				},
-	};
+): NonNullable<StartDevWorkerInput["bindings"]> {
+	if (!config) {
+		return {};
+	}
+	return convertConfigToBindings(config, {
+		usePreviewIds: false,
+		pages: options?.pages,
+	});
 }
 
 export type Settings = {
@@ -82,12 +63,14 @@ export type Settings = {
 
 abstract class ProvisionResourceHandler<
 	T extends WorkerMetadataBinding["type"],
-	B extends CfD1Database | CfR2Bucket | CfKvNamespace,
+	B extends ProvisionableBinding,
 > {
 	constructor(
 		public type: T,
+		public bindingName: string,
 		public binding: B,
 		public idField: keyof B,
+		public complianceConfig: ComplianceConfig,
 		public accountId: string
 	) {}
 
@@ -154,12 +137,17 @@ abstract class ProvisionResourceHandler<
 	}
 }
 
-class R2Handler extends ProvisionResourceHandler<"r2_bucket", CfR2Bucket> {
+class R2Handler extends ProvisionResourceHandler<
+	"r2_bucket",
+	Extract<Binding, { type: "r2_bucket" }>
+> {
 	get name(): string | undefined {
 		return this.binding.bucket_name as string;
 	}
+
 	async create(name: string) {
 		await createR2Bucket(
+			this.complianceConfig,
 			this.accountId,
 			name,
 			undefined,
@@ -167,15 +155,45 @@ class R2Handler extends ProvisionResourceHandler<"r2_bucket", CfR2Bucket> {
 		);
 		return name;
 	}
-	constructor(binding: CfR2Bucket, accountId: string) {
-		super("r2_bucket", binding, "bucket_name", accountId);
+	constructor(
+		bindingName: string,
+		binding: Extract<Binding, { type: "r2_bucket" }>,
+		complianceConfig: ComplianceConfig,
+		accountId: string
+	) {
+		super(
+			"r2_bucket",
+			bindingName,
+			binding,
+			"bucket_name",
+			complianceConfig,
+			accountId
+		);
 	}
+
+	/**
+	 * Inheriting an R2 binding replaces the id property (bucket_name for R2) with the inheritance symbol.
+	 * This works when deploying (and is appropriate for all other binding types), but it means that the
+	 * bucket_name for an R2 bucket is not displayed when deploying. As such, only use the inheritance symbol
+	 * if the R2 binding has no `bucket_name`.
+	 */
+	override inherit(): void {
+		this.binding.bucket_name ??= INHERIT_SYMBOL;
+	}
+
+	/**
+	 * R2 bindings can be inherited if the binding name and jurisdiction match.
+	 * Additionally, if the user has specified a bucket_name in config, make sure that matches
+	 */
 	canInherit(settings: Settings | undefined): boolean {
 		return !!settings?.bindings.find(
 			(existing) =>
 				existing.type === this.type &&
-				existing.name === this.binding.binding &&
-				existing.jurisdiction === this.binding.jurisdiction
+				existing.name === this.bindingName &&
+				existing.jurisdiction === this.binding.jurisdiction &&
+				(this.binding.bucket_name
+					? this.binding.bucket_name === existing.bucket_name
+					: true)
 		);
 	}
 	async isConnectedToExistingResource(): Promise<boolean> {
@@ -187,6 +205,7 @@ class R2Handler extends ProvisionResourceHandler<"r2_bucket", CfR2Bucket> {
 		}
 		try {
 			await getR2Bucket(
+				this.complianceConfig,
 				this.accountId,
 				this.binding.bucket_name,
 				this.binding.jurisdiction
@@ -205,23 +224,153 @@ class R2Handler extends ProvisionResourceHandler<"r2_bucket", CfR2Bucket> {
 	}
 }
 
+class AISearchNamespaceHandler extends ProvisionResourceHandler<
+	"ai_search_namespace",
+	Extract<Binding, { type: "ai_search_namespace" }>
+> {
+	get name(): string | undefined {
+		return this.binding.namespace as string;
+	}
+
+	async create(name: string) {
+		await createAISearchNamespace(this.complianceConfig, this.accountId, name);
+		return name;
+	}
+
+	constructor(
+		bindingName: string,
+		binding: Extract<Binding, { type: "ai_search_namespace" }>,
+		complianceConfig: ComplianceConfig,
+		accountId: string
+	) {
+		super(
+			"ai_search_namespace",
+			bindingName,
+			binding,
+			"namespace",
+			complianceConfig,
+			accountId
+		);
+	}
+
+	canInherit(settings: Settings | undefined): boolean {
+		return !!settings?.bindings.find(
+			(existing) =>
+				existing.type === this.type &&
+				existing.name === this.bindingName &&
+				(this.binding.namespace
+					? this.binding.namespace === existing.namespace
+					: true)
+		);
+	}
+
+	async isConnectedToExistingResource(): Promise<boolean> {
+		assert(typeof this.binding.namespace !== "symbol");
+
+		if (!this.binding.namespace) {
+			return false;
+		}
+
+		const namespace = await getAISearchNamespace(
+			this.complianceConfig,
+			this.accountId,
+			this.binding.namespace
+		);
+
+		return namespace !== null;
+	}
+}
+
+class AgentMemoryNamespaceHandler extends ProvisionResourceHandler<
+	"agent_memory",
+	Extract<Binding, { type: "agent_memory" }>
+> {
+	get name(): string | undefined {
+		return this.binding.namespace as string;
+	}
+
+	async create(name: string) {
+		await createAgentMemoryNamespace(
+			this.complianceConfig,
+			this.accountId,
+			name
+		);
+		return name;
+	}
+
+	constructor(
+		bindingName: string,
+		binding: Extract<Binding, { type: "agent_memory" }>,
+		complianceConfig: ComplianceConfig,
+		accountId: string
+	) {
+		super(
+			"agent_memory",
+			bindingName,
+			binding,
+			"namespace",
+			complianceConfig,
+			accountId
+		);
+	}
+
+	canInherit(settings: Settings | undefined): boolean {
+		return !!settings?.bindings.find(
+			(existing) =>
+				existing.type === this.type &&
+				existing.name === this.bindingName &&
+				(this.binding.namespace
+					? this.binding.namespace === existing.namespace
+					: true)
+		);
+	}
+
+	async isConnectedToExistingResource(): Promise<boolean> {
+		assert(typeof this.binding.namespace !== "symbol");
+
+		if (!this.binding.namespace) {
+			return false;
+		}
+
+		const namespace = await getAgentMemoryNamespace(
+			this.complianceConfig,
+			this.accountId,
+			this.binding.namespace
+		);
+
+		return namespace !== null;
+	}
+}
+
 class KVHandler extends ProvisionResourceHandler<
 	"kv_namespace",
-	CfKvNamespace
+	Extract<Binding, { type: "kv_namespace" }>
 > {
 	get name(): string | undefined {
 		return undefined;
 	}
 	async create(name: string) {
-		return await createKVNamespace(this.accountId, name);
+		return await createKVNamespace(this.complianceConfig, this.accountId, name);
 	}
-	constructor(binding: CfKvNamespace, accountId: string) {
-		super("kv_namespace", binding, "id", accountId);
+	constructor(
+		bindingName: string,
+		binding: Extract<Binding, { type: "kv_namespace" }>,
+		complianceConfig: ComplianceConfig,
+		accountId: string
+	) {
+		super(
+			"kv_namespace",
+			bindingName,
+			binding,
+			"id",
+			complianceConfig,
+			accountId
+		);
 	}
 	canInherit(settings: Settings | undefined): boolean {
 		return !!settings?.bindings.find(
 			(existing) =>
-				existing.type === this.type && existing.name === this.binding.binding
+				existing.type === this.type && existing.name === this.bindingName
 		);
 	}
 	isFullySpecified(): boolean {
@@ -229,21 +378,40 @@ class KVHandler extends ProvisionResourceHandler<
 	}
 }
 
-class D1Handler extends ProvisionResourceHandler<"d1", CfD1Database> {
+class D1Handler extends ProvisionResourceHandler<
+	"d1",
+	Extract<Binding, { type: "d1" }>
+> {
 	get name(): string | undefined {
 		return this.binding.database_name as string;
 	}
 	async create(name: string) {
-		const db = await createD1Database(this.accountId, name);
+		const db = await createD1Database(
+			this.complianceConfig,
+			this.accountId,
+			name
+		);
 		return db.uuid;
 	}
-	constructor(binding: CfD1Database, accountId: string) {
-		super("d1", binding, "database_id", accountId);
+	constructor(
+		bindingName: string,
+		binding: Extract<Binding, { type: "d1" }>,
+		complianceConfig: ComplianceConfig,
+		accountId: string
+	) {
+		super(
+			"d1",
+			bindingName,
+			binding,
+			"database_id",
+			complianceConfig,
+			accountId
+		);
 	}
 	async canInherit(settings: Settings | undefined): Promise<boolean> {
 		const maybeInherited = settings?.bindings.find(
 			(existing) =>
-				existing.type === this.type && existing.name === this.binding.binding
+				existing.type === this.type && existing.name === this.bindingName
 		) as Extract<WorkerMetadataBinding, { type: "d1" }> | undefined;
 		// A D1 binding with the same binding name exists is already present on the worker...
 		if (maybeInherited) {
@@ -255,6 +423,7 @@ class D1Handler extends ProvisionResourceHandler<"d1", CfD1Database> {
 			// ...and the user HAS specified a name in their config, so we need to check if the database_name they provided
 			// matches the database_name of the existing binding (which isn't present in settings, so we'll need to make an API call to check)
 			const dbFromId = await getDatabaseInfoFromIdOrName(
+				this.complianceConfig,
 				this.accountId,
 				maybeInherited.id
 			);
@@ -273,6 +442,7 @@ class D1Handler extends ProvisionResourceHandler<"d1", CfD1Database> {
 		}
 		try {
 			const db = await getDatabaseInfoFromIdOrName(
+				this.complianceConfig,
 				this.accountId,
 				this.binding.database_name
 			);
@@ -294,85 +464,256 @@ class D1Handler extends ProvisionResourceHandler<"d1", CfD1Database> {
 	}
 }
 
+type ProvisionableBinding =
+	| Extract<Binding, { type: "kv_namespace" }>
+	| Extract<Binding, { type: "d1" }>
+	| Extract<Binding, { type: "r2_bucket" }>
+	| Extract<Binding, { type: "ai_search_namespace" }>
+	| Extract<Binding, { type: "agent_memory" }>;
+
 const HANDLERS = {
-	kv_namespaces: {
+	kv_namespace: {
 		Handler: KVHandler,
 		sort: 0,
 		name: "KV Namespace",
 		keyDescription: "title or id",
+		configField: "kv_namespaces" as const,
+		load: async (complianceConfig: ComplianceConfig, accountId: string) => {
+			const preExistingKV = await listKVNamespaces(
+				complianceConfig,
+				accountId,
+				true
+			);
+			return preExistingKV.map((ns) => ({ title: ns.title, value: ns.id }));
+		},
+		toConfig: (
+			bindingName: string,
+			binding: Extract<Binding, { type: "kv_namespace" }>
+		): CfKvNamespace => {
+			const { type: _, ...rest } = binding;
+			return {
+				...rest,
+				binding: bindingName,
+			};
+		},
 	},
-
-	d1_databases: {
+	d1: {
 		Handler: D1Handler,
 		sort: 1,
 		name: "D1 Database",
 		keyDescription: "name or id",
+		configField: "d1_databases" as const,
+		load: async (complianceConfig: ComplianceConfig, accountId: string) => {
+			const preExisting = await listDatabases(
+				complianceConfig,
+				accountId,
+				true,
+				1000
+			);
+			return preExisting.map((db) => ({ title: db.name, value: db.uuid }));
+		},
+		toConfig: (
+			bindingName: string,
+			binding: Extract<Binding, { type: "d1" }>
+		): CfD1Database => {
+			const { type: _, ...rest } = binding;
+			return {
+				...rest,
+				binding: bindingName,
+			};
+		},
 	},
-	r2_buckets: {
+	r2_bucket: {
 		Handler: R2Handler,
 		sort: 2,
 		name: "R2 Bucket",
 		keyDescription: "name",
+		configField: "r2_buckets" as const,
+		load: async (complianceConfig: ComplianceConfig, accountId: string) => {
+			const preExisting = await listR2Buckets(complianceConfig, accountId);
+			return preExisting.map((bucket) => ({
+				title: bucket.name,
+				value: bucket.name,
+			}));
+		},
+		toConfig: (
+			bindingName: string,
+			binding: Extract<Binding, { type: "r2_bucket" }>
+		): CfR2Bucket => {
+			const { type: _, ...rest } = binding;
+			return {
+				...rest,
+				binding: bindingName,
+			};
+		},
 	},
-};
-
-const LOADERS = {
-	kv_namespaces: async (accountId: string) => {
-		const preExistingKV = await listKVNamespaces(accountId, true);
-		return preExistingKV.map((ns) => ({ title: ns.title, value: ns.id }));
+	ai_search_namespace: {
+		Handler: AISearchNamespaceHandler,
+		sort: 3,
+		name: "AI Search Namespace",
+		keyDescription: "namespace name",
+		configField: "ai_search_namespaces" as const,
+		load: async (_complianceConfig: ComplianceConfig, _accountId: string) => {
+			// AI Search namespaces don't have a general list API in this context.
+			// The provisioning system will create them if they don't exist.
+			return [];
+		},
+		toConfig: (
+			bindingName: string,
+			binding: Extract<Binding, { type: "ai_search_namespace" }>
+		): CfAISearchNamespace => {
+			const { type: _, ...rest } = binding;
+			return {
+				...rest,
+				binding: bindingName,
+			};
+		},
 	},
-	d1_databases: async (accountId: string) => {
-		const preExisting = await listDatabases(accountId, true, 1000);
-		return preExisting.map((db) => ({ title: db.name, value: db.uuid }));
-	},
-	r2_buckets: async (accountId: string) => {
-		const preExisting = await listR2Buckets(accountId);
-		return preExisting.map((bucket) => ({
-			title: bucket.name,
-			value: bucket.name,
-		}));
+	agent_memory: {
+		Handler: AgentMemoryNamespaceHandler,
+		sort: 4,
+		name: "Agent Memory",
+		keyDescription: "namespace name",
+		configField: "agent_memory" as const,
+		load: async (_complianceConfig: ComplianceConfig, _accountId: string) => {
+			// `load` only populates the interactive picker in `runProvisioningFlow`
+			// (the "Would you like to connect an existing X or create a new one?"
+			// prompt). For agent_memory, `namespace` is required in config — so
+			// `handler.name` is always set at provision time and `runProvisioningFlow`
+			// goes straight to the "Resource name found in config" branch without
+			// ever consulting this list. Whether or not the namespace already exists
+			// is decided by `isConnectedToExistingResource()` (which hits the GET
+			// /namespaces/:name endpoint), not by this list. Returning [] is
+			// therefore safe and avoids an unnecessary list call at deploy time.
+			return [];
+		},
+		toConfig: (
+			bindingName: string,
+			binding: Extract<Binding, { type: "agent_memory" }>
+		): CfAgentMemory => {
+			const { type: _, ...rest } = binding;
+			return {
+				...rest,
+				binding: bindingName,
+			};
+		},
 	},
 };
 
 type PendingResource = {
 	binding: string;
-	resourceType: "kv_namespaces" | "d1_databases" | "r2_buckets";
-	handler: KVHandler | D1Handler | R2Handler;
+	resourceType:
+		| "kv_namespace"
+		| "d1"
+		| "r2_bucket"
+		| "ai_search_namespace"
+		| "agent_memory";
+	handler:
+		| KVHandler
+		| D1Handler
+		| R2Handler
+		| AISearchNamespaceHandler
+		| AgentMemoryNamespaceHandler;
 };
 
+function isProvisionableBinding(
+	binding: Binding
+): binding is ProvisionableBinding {
+	return binding.type in HANDLERS;
+}
+
+function createHandler(
+	bindingName: string,
+	binding: ProvisionableBinding,
+	complianceConfig: ComplianceConfig,
+	accountId: string
+):
+	| KVHandler
+	| D1Handler
+	| R2Handler
+	| AISearchNamespaceHandler
+	| AgentMemoryNamespaceHandler {
+	switch (binding.type) {
+		case "kv_namespace":
+			return new KVHandler(bindingName, binding, complianceConfig, accountId);
+		case "d1":
+			return new D1Handler(bindingName, binding, complianceConfig, accountId);
+		case "r2_bucket":
+			return new R2Handler(bindingName, binding, complianceConfig, accountId);
+		case "ai_search_namespace":
+			return new AISearchNamespaceHandler(
+				bindingName,
+				binding,
+				complianceConfig,
+				accountId
+			);
+		case "agent_memory":
+			return new AgentMemoryNamespaceHandler(
+				bindingName,
+				binding,
+				complianceConfig,
+				accountId
+			);
+	}
+}
+
+function toConfigBinding(
+	bindingName: string,
+	binding: ProvisionableBinding
+):
+	| CfKvNamespace
+	| CfR2Bucket
+	| CfD1Database
+	| CfAISearchNamespace
+	| CfAgentMemory {
+	switch (binding.type) {
+		case "kv_namespace":
+			return HANDLERS.kv_namespace.toConfig(bindingName, binding);
+		case "d1":
+			return HANDLERS.d1.toConfig(bindingName, binding);
+		case "r2_bucket":
+			return HANDLERS.r2_bucket.toConfig(bindingName, binding);
+		case "ai_search_namespace":
+			return HANDLERS.ai_search_namespace.toConfig(bindingName, binding);
+		case "agent_memory":
+			return HANDLERS.agent_memory.toConfig(bindingName, binding);
+	}
+}
+
 async function collectPendingResources(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	scriptName: string,
-	bindings: CfWorkerInit["bindings"]
+	bindings: StartDevWorkerInput["bindings"],
+	requireRemote: boolean
 ): Promise<PendingResource[]> {
 	let settings: Settings | undefined;
 
 	try {
-		settings = await getSettings(accountId, scriptName);
-	} catch (error) {
+		settings = await getSettings(complianceConfig, accountId, scriptName);
+	} catch {
 		logger.debug("No settings found");
 	}
 
 	const pendingResources: PendingResource[] = [];
 
-	try {
-		settings = await getSettings(accountId, scriptName);
-	} catch (error) {
-		logger.debug("No settings found");
-	}
-	for (const resourceType of Object.keys(
-		HANDLERS
-	) as (keyof typeof HANDLERS)[]) {
-		for (const resource of bindings[resourceType] ?? []) {
-			const h = new HANDLERS[resourceType].Handler(resource, accountId);
+	for (const [bindingName, binding] of Object.entries(bindings ?? {})) {
+		if (!isProvisionableBinding(binding)) {
+			continue;
+		}
 
-			if (await h.shouldProvision(settings)) {
-				pendingResources.push({
-					binding: resource.binding,
-					resourceType,
-					handler: h,
-				});
-			}
+		if (requireRemote && !("remote" in binding && binding.remote)) {
+			continue;
+		}
+
+		const h = createHandler(bindingName, binding, complianceConfig, accountId);
+
+		if (await h.shouldProvision(settings)) {
+			pendingResources.push({
+				binding: bindingName,
+				resourceType: binding.type,
+				handler: h,
+			});
 		}
 	}
 
@@ -380,39 +721,55 @@ async function collectPendingResources(
 		(a, b) => HANDLERS[a.resourceType].sort - HANDLERS[b.resourceType].sort
 	);
 }
+
 export async function provisionBindings(
-	bindings: CfWorkerInit["bindings"],
+	bindings: StartDevWorkerInput["bindings"],
 	accountId: string,
 	scriptName: string,
 	autoCreate: boolean,
-	config: Config
+	config: Config,
+	requireRemote = false
 ): Promise<void> {
+	const configPath = config.userConfigPath ?? config.configPath;
 	const pendingResources = await collectPendingResources(
+		config,
 		accountId,
 		scriptName,
-		bindings
+		bindings,
+		requireRemote
 	);
 
 	if (pendingResources.length > 0) {
-		if (!isLegacyEnv(config)) {
+		assert(
+			configPath,
+			"Provisioning resources is not possible without a config file"
+		);
+
+		if (useServiceEnvironments(config)) {
 			throw new UserError(
-				"Provisioning resources is not supported with a service environment"
+				"Provisioning resources is not supported with a service environment",
+				{ telemetryMessage: "provision resources with service environment" }
 			);
 		}
 		logger.log();
-		const printable: Record<string, { binding: string }[]> = {};
-		for (const resource of pendingResources) {
-			printable[resource.resourceType] ??= [];
-			printable[resource.resourceType].push({ binding: resource.binding });
-		}
-		printBindings(printable, { provisioning: true });
+
+		printBindings(
+			Object.fromEntries(
+				pendingResources.map((r) => [r.binding, { type: r.resourceType }])
+			) as Record<string, Binding>,
+			config.tail_consumers,
+			config.streaming_tail_consumers,
+			config.containers,
+			{ provisioning: true }
+		);
 		logger.log();
 
 		const existingResources: Record<string, NormalisedResourceInfo[]> = {};
 
 		for (const resource of pendingResources) {
-			existingResources[resource.resourceType] ??=
-				await LOADERS[resource.resourceType](accountId);
+			existingResources[resource.resourceType] ??= await HANDLERS[
+				resource.resourceType
+			].load(config, accountId);
 
 			await runProvisioningFlow(
 				resource,
@@ -421,6 +778,76 @@ export async function provisionBindings(
 				scriptName,
 				autoCreate
 			);
+		}
+
+		const patch: RawConfig = {};
+
+		const existingBindingNames = new Set<string>();
+
+		const isUsingRedirectedConfig =
+			config.userConfigPath && config.userConfigPath !== config.configPath;
+
+		// If we're using a redirected config, then the redirected config potentially has injected
+		// bindings that weren't originally in the user config. These can be provisioned, but we
+		// should not write the IDs back to the user config file (because the bindings weren't there in the first place)
+		if (isUsingRedirectedConfig) {
+			const { rawConfig: unredirectedConfig } =
+				await experimental_readRawConfig(
+					{ config: config.userConfigPath },
+					{ useRedirectIfAvailable: false }
+				);
+			for (const resourceType of Object.keys(
+				HANDLERS
+			) as (keyof typeof HANDLERS)[]) {
+				const configField = HANDLERS[resourceType].configField;
+				for (const binding of unredirectedConfig[configField] ?? []) {
+					existingBindingNames.add(binding.binding);
+				}
+			}
+		}
+
+		for (const [bindingName, binding] of Object.entries(bindings ?? {})) {
+			if (!isProvisionableBinding(binding)) {
+				continue;
+			}
+
+			// See above for why we skip writing back some bindings to the config file
+			if (isUsingRedirectedConfig && !existingBindingNames.has(bindingName)) {
+				continue;
+			}
+
+			const resourceType = HANDLERS[binding.type].configField;
+
+			patch[resourceType] ??= [];
+
+			const bindingToWrite = toConfigBinding(bindingName, binding);
+
+			(patch[resourceType] as unknown as Array<Record<string, string>>).push(
+				Object.fromEntries(
+					Object.entries(bindingToWrite).filter(
+						// Make sure all the values are JSON serialisable.
+						// Otherwise we end up with "undefined" in the config
+						([_, value]) => typeof value === "string"
+					)
+				)
+			);
+		}
+
+		// If the user is performing an interactive deploy, write the provisioned IDs back to the config file.
+		// This is not necessary, as future deploys can use inherited resources, but it can help with
+		// portability of the config file, and adds robustness to bindings being renamed.
+		if (!isNonInteractiveOrCI()) {
+			try {
+				await experimental_patchConfig(configPath, patch, false);
+				logger.log(
+					"Your Worker was deployed with provisioned resources. We've written the IDs of these resources to your config file, which you can choose to save or discard. Either way future deploys will continue to work."
+				);
+			} catch (e) {
+				// no-op — if the user is using TOML config we can't update it.
+				if (!(e instanceof PatchConfigError)) {
+					throw e;
+				}
+			}
 		}
 
 		const resourceCount = pendingResources.reduce(
@@ -432,14 +859,20 @@ export async function provisionBindings(
 			{} as Record<string, number>
 		);
 		logger.log(`🎉 All resources provisioned, continuing with deployment...\n`);
+
 		metrics.sendMetricsEvent("provision resources", resourceCount, {
 			sendMetrics: config.send_metrics,
 		});
 	}
 }
 
-function getSettings(accountId: string, scriptName: string) {
+export function getSettings(
+	complianceConfig: ComplianceConfig,
+	accountId: string,
+	scriptName: string
+) {
 	return fetchResult<Settings>(
+		complianceConfig,
 		`/accounts/${accountId}/workers/scripts/${scriptName}/settings`
 	);
 }
@@ -497,6 +930,7 @@ async function runProvisioningFlow(
 						{ title: "Create new", value: NEW_OPTION_VALUE },
 					]),
 					defaultOption: options.length,
+					fallbackOption: options.length,
 				}
 			);
 		}

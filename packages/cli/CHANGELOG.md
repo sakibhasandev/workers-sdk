@@ -1,5 +1,118 @@
 # @cloudflare/cli
 
+## 0.1.6
+
+### Patch Changes
+
+- [#14112](https://github.com/cloudflare/workers-sdk/pull/14112) [`3a746ac`](https://github.com/cloudflare/workers-sdk/commit/3a746ac56a40b805e38f26ef5328e44917b543e6) Thanks [@penalosa](https://github.com/penalosa)! - Pin non-bundled runtime dependencies to exact versions
+
+  Dependencies that are not bundled into a package's published output are installed directly into consumers' dependency trees, so they are now pinned to exact versions instead of semver ranges. This closes a supply-chain gap where an unpinned external dependency could resolve to a compromised upstream release on a fresh install. A new `pnpm check:pinned-deps` lint enforces this for all published packages (and for the shared pnpm catalog) going forward.
+
+- Updated dependencies [[`e86489a`](https://github.com/cloudflare/workers-sdk/commit/e86489a5743ff9bad7bcb5b444ad3d952d5b0164), [`337e912`](https://github.com/cloudflare/workers-sdk/commit/337e9124cfa461a99ce7ffb800dcc341f7b2f026), [`65b5f9e`](https://github.com/cloudflare/workers-sdk/commit/65b5f9e1855651c2df2c1bdfc8930141e36413d5)]:
+  - @cloudflare/workers-utils@0.22.1
+
+## 0.1.5
+
+### Patch Changes
+
+- Updated dependencies [[`e3c862a`](https://github.com/cloudflare/workers-sdk/commit/e3c862a99f9b633ca288306eae8a8c3a900590ee), [`599b27a`](https://github.com/cloudflare/workers-sdk/commit/599b27aafb9bc432524a35eb4e5a414de21bef41), [`e3c862a`](https://github.com/cloudflare/workers-sdk/commit/e3c862a99f9b633ca288306eae8a8c3a900590ee), [`e3c862a`](https://github.com/cloudflare/workers-sdk/commit/e3c862a99f9b633ca288306eae8a8c3a900590ee)]:
+  - @cloudflare/workers-utils@0.22.0
+
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies [[`90092c0`](https://github.com/cloudflare/workers-sdk/commit/90092c0bca526e2e08a25fe7969534426eb6fd9f)]:
+  - @cloudflare/workers-utils@0.21.1
+
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [[`248bc08`](https://github.com/cloudflare/workers-sdk/commit/248bc08152cf9f792d98c8c78f8fb1417b1bb3b3)]:
+  - @cloudflare/workers-utils@0.21.0
+
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies [[`f3fed88`](https://github.com/cloudflare/workers-sdk/commit/f3fed8859b612d424388fe45a1d638cf6b1c42c7)]:
+  - @cloudflare/workers-utils@0.20.0
+
+## 0.1.1
+
+### Patch Changes
+
+- Updated dependencies [[`2b8c0cc`](https://github.com/cloudflare/workers-sdk/commit/2b8c0ccb9ede7487bd96cfc51b3262a717bb532c)]:
+  - @cloudflare/workers-utils@0.19.0
+
+## 0.1.0
+
+### Minor Changes
+
+- [#13651](https://github.com/cloudflare/workers-sdk/pull/13651) [`47ac63f`](https://github.com/cloudflare/workers-sdk/commit/47ac63f05ca86d781110490ff21ff88f2828fbbf) Thanks [@penalosa](https://github.com/penalosa)! - Publish `@cloudflare/cli-shared-helpers` and `@cloudflare/workers-utils` to npm
+
+### Patch Changes
+
+- Updated dependencies [[`5680287`](https://github.com/cloudflare/workers-sdk/commit/56802879641c123ee11160d77ecaf104915cd826), [`47ac63f`](https://github.com/cloudflare/workers-sdk/commit/47ac63f05ca86d781110490ff21ff88f2828fbbf)]:
+  - @cloudflare/workers-utils@0.18.0
+
+## 1.4.0
+
+### Minor Changes
+
+- [#13144](https://github.com/cloudflare/workers-sdk/pull/13144) [`db60b94`](https://github.com/cloudflare/workers-sdk/commit/db60b94d9620e7608df3e98876d5df4fde952ecf) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Add gitignore helpers for appending Wrangler-related entries
+
+  New `maybeAppendWranglerToGitIgnore` and `maybeAppendWranglerToGitIgnoreLikeFile` functions that automatically append Wrangler-related entries (`.wrangler`, `.dev.vars*`, `.env*`, and their negated example patterns) to `.gitignore` or similar ignore files. Existing entries are detected and skipped to avoid duplicates.
+
+## 1.3.0
+
+### Minor Changes
+
+- [#13068](https://github.com/cloudflare/workers-sdk/pull/13068) [`e631a94`](https://github.com/cloudflare/workers-sdk/commit/e631a946466ded834763497d094da9e93d3d3721) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Add `runCommand` and `quoteShellArgs`, `installPackages` and `installWrangler` utilities to `@cloudflare/cli/command`
+
+  These utilities are now available from `@cloudflare/cli` as dedicated sub-path exports: `runCommand` and `quoteShellArgs` via `@cloudflare/cli/command`, and `installPackages` and `installWrangler` via `@cloudflare/cli/packages`. This makes them reusable across packages in the SDK without duplication.
+
+## 1.2.1
+
+### Patch Changes
+
+- [#11940](https://github.com/cloudflare/workers-sdk/pull/11940) [`69ff962`](https://github.com/cloudflare/workers-sdk/commit/69ff9620487a6ae979f369eb1dbac887ce46e246) Thanks [@penalosa](https://github.com/penalosa)! - Mark macOS version compatibility errors as user errors
+
+  When checking macOS version compatibility, the CLI now throws `UserError` instead of generic `Error`. This ensures that version incompatibility issues are properly classified as user-facing errors that shouldn't be reported to Sentry.
+
+- [#11967](https://github.com/cloudflare/workers-sdk/pull/11967) [`202c59e`](https://github.com/cloudflare/workers-sdk/commit/202c59e4f4f28419fb6ac0aa8c7dc3960a0c8d3e) Thanks [@emily-shen](https://github.com/emily-shen)! - chore: update undici
+
+  The following dependency versions have been updated:
+
+  | Dependency | From   | To     |
+  | ---------- | ------ | ------ |
+  | undici     | 7.14.0 | 7.18.2 |
+
+## 1.2.0
+
+### Minor Changes
+
+- [#11578](https://github.com/cloudflare/workers-sdk/pull/11578) [`4201472`](https://github.com/cloudflare/workers-sdk/commit/4201472291fa1c864dbcca40c173a76e5b571a04) Thanks [@gpanders](https://github.com/gpanders)! - Add showCursor helper function to show or hide the cursor in the terminal
+
+## 1.1.4
+
+### Patch Changes
+
+- [#11448](https://github.com/cloudflare/workers-sdk/pull/11448) [`2b4813b`](https://github.com/cloudflare/workers-sdk/commit/2b4813b18076817bb739491246313c32b403651f) Thanks [@edmundhung](https://github.com/edmundhung)! - Builds package with esbuild `v0.27.0`
+
+## 1.1.3
+
+### Patch Changes
+
+- [#10764](https://github.com/cloudflare/workers-sdk/pull/10764) [`79a6b7d`](https://github.com/cloudflare/workers-sdk/commit/79a6b7dd811fea5a413b084fcd281915a418a85a) Thanks [@emily-shen](https://github.com/emily-shen)! - fix: respect the log level set by wrangler when logging using @cloudflare/cli
+
+## 1.1.2
+
+### Patch Changes
+
+- [#10492](https://github.com/cloudflare/workers-sdk/pull/10492) [`8ae9323`](https://github.com/cloudflare/workers-sdk/commit/8ae9323a5c45f3efe3685e36b1536cc25d39fbfb) Thanks [@gpanders](https://github.com/gpanders)! - Include cursor in text prompts
+
 ## 1.1.1
 
 ### Patch Changes

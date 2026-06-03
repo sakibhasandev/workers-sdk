@@ -3,13 +3,19 @@ name: Deploy Workers Shared Production
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   deploy-workers:
     name: Deploy Workers Shared Production
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Install Dependencies
         uses: ./.github/actions/install-dependencies

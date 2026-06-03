@@ -1,28 +1,26 @@
-import crypto from "crypto";
-import { existsSync } from "fs";
-import fs from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
+import crypto, { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { z } from "zod";
-import {
+import { MiniflareCoreError, PathSchema } from "../../shared";
+import { sanitisePath } from "../../workers";
+import type {
 	Extension,
 	Service,
 	Worker_Binding,
 	Worker_Module,
 } from "../../runtime";
-import {
-	Log,
-	MiniflareCoreError,
-	OptionalZodTypeOf,
-	PathSchema,
-} from "../../shared";
-import {
+import type { Log, OptionalZodTypeOf } from "../../shared";
+import type {
 	Awaitable,
 	QueueConsumerSchema,
 	QueueProducerSchema,
-	sanitisePath,
 } from "../../workers";
-import { UnsafeUniqueKey } from "./constants";
+import type { DOContainerOptions } from "../do";
+import type { HyperdriveProxyController } from "../hyperdrive/hyperdrive-proxy";
+import type { UnsafeUniqueKey } from "./constants";
 
 export const DEFAULT_PERSIST_ROOT = ".mf";
 
@@ -38,6 +36,13 @@ export type Persistence = z.infer<typeof PersistenceSchema>;
 // be added a regular worker services. These workers shouldn't be routable.
 export type WrappedBindingNames = Set<string>;
 
+// Maps workflow binding names to their workflow options
+export interface WorkflowOption {
+	name: string;
+	className: string;
+	scriptName?: string;
+}
+
 // Maps **service** names to the Durable Object class names exported by them
 export type DurableObjectClassNames = Map<
 	string,
@@ -47,6 +52,7 @@ export type DurableObjectClassNames = Map<
 			enableSql?: boolean;
 			unsafeUniqueKey?: UnsafeUniqueKey;
 			unsafePreventEviction?: boolean;
+			container?: DOContainerOptions;
 		}
 	>
 >;
@@ -71,8 +77,11 @@ export interface PluginServicesOptions<
 	workerIndex: number;
 	additionalModules: Worker_Module[];
 	tmpPath: string;
+	defaultPersistRoot: string | undefined;
 	workerNames: string[];
+	loopbackHost: string;
 	loopbackPort: number;
+	publicUrl: string | undefined;
 	unsafeStickyBlobs: boolean;
 
 	// ~~Leaky abstractions~~ "Plugin specific options" :)
@@ -81,6 +90,7 @@ export interface PluginServicesOptions<
 	unsafeEphemeralDurableObjects: boolean;
 	queueProducers: QueueProducers;
 	queueConsumers: QueueConsumers;
+	hyperdriveProxyController: HyperdriveProxyController;
 }
 
 export interface ServicesExtensions {
@@ -107,6 +117,9 @@ export interface PluginBase<
 		sharedOptions: OptionalZodTypeOf<SharedOptions>,
 		tmpPath: string
 	): string;
+	getExtensions?(options: {
+		options: z.infer<Options>[];
+	}): Awaitable<Extension[]>;
 }
 
 export type Plugin<
@@ -117,6 +130,34 @@ export type Plugin<
 		? { sharedOptions?: undefined }
 		: { sharedOptions: SharedOptions });
 
+/**
+ * loadExternalPlugins will take a packageName, and attempt to load additional
+ * external plugins to add to Miniflare's default ones
+ */
+export async function loadExternalPlugins(
+	packageName: string
+): Promise<Record<string, Plugin<z.AnyZodObject>>> {
+	let pluginModule;
+	try {
+		const pluginPath = require.resolve(packageName);
+		const moduleURL = pathToFileURL(pluginPath).href;
+
+		pluginModule = await import(moduleURL);
+	} catch (error) {
+		throw new MiniflareCoreError(
+			"ERR_PLUGIN_LOADING_FAILED",
+			`Package ${packageName} could not be loaded. ${error}`
+		);
+	}
+	if (!pluginModule.plugins) {
+		throw new MiniflareCoreError(
+			"ERR_PLUGIN_LOADING_FAILED",
+			`Package ${packageName} did not provide any plugins.`
+		);
+	}
+	return pluginModule.plugins;
+}
+
 // When an instance of this class is returned as the binding from `PluginBase#getNodeBindings()`,
 // Miniflare will replace it with a proxy to the binding in `workerd`, alongside applying the
 // specified overrides (if there is any)
@@ -125,7 +166,7 @@ export class ProxyNodeBinding {
 }
 
 export function namespaceKeys(
-	namespaces?: Record<string, string> | string[]
+	namespaces?: Record<string, unknown> | string[]
 ): string[] {
 	if (Array.isArray(namespaces)) {
 		return namespaces;
@@ -136,13 +177,40 @@ export function namespaceKeys(
 	}
 }
 
+export type RemoteProxyConnectionString = URL & {
+	__brand: "RemoteProxyConnectionString";
+};
+
 export function namespaceEntries(
-	namespaces?: Record<string, string> | string[]
-): [bindingName: string, id: string][] {
+	namespaces?:
+		| Record<
+				string,
+				| string
+				| {
+						id: string;
+						remoteProxyConnectionString?: RemoteProxyConnectionString;
+				  }
+		  >
+		| string[]
+): [
+	bindingName: string,
+	{ id: string; remoteProxyConnectionString?: RemoteProxyConnectionString },
+][] {
 	if (Array.isArray(namespaces)) {
-		return namespaces.map((bindingName) => [bindingName, bindingName]);
+		return namespaces.map((bindingName) => [bindingName, { id: bindingName }]);
 	} else if (namespaces !== undefined) {
-		return Object.entries(namespaces);
+		return Object.entries(namespaces).map(([key, value]) => {
+			if (typeof value === "string") {
+				return [key, { id: value }];
+			}
+			return [
+				key,
+				{
+					id: value.id,
+					remoteProxyConnectionString: value.remoteProxyConnectionString,
+				},
+			];
+		});
 	} else {
 		return [];
 	}
@@ -158,6 +226,7 @@ export function maybeParseURL(url: Persistence): URL | undefined {
 export function getPersistPath(
 	pluginName: string,
 	tmpPath: string,
+	defaultPersistRoot: string | undefined,
 	persist: Persistence
 ): string {
 	// If persistence is disabled, use "memory" storage. Note we're still
@@ -167,28 +236,45 @@ export function getPersistPath(
 	// keep Miniflare 2's behaviour, so persist to a temporary path which we
 	// destroy on `dispose()`.
 	const memoryishPath = path.join(tmpPath, pluginName);
-	if (persist === undefined || persist === false) {
-		return memoryishPath;
-	}
 
-	// Try parse `persist` as a URL
-	const url = maybeParseURL(persist);
-	if (url !== undefined) {
-		if (url.protocol === "memory:") {
-			return memoryishPath;
-		} else if (url.protocol === "file:") {
-			return fileURLToPath(url);
+	let result: string;
+	if (persist === false) {
+		result = memoryishPath;
+	} else if (persist === undefined) {
+		// If `persist` is undefined, use either the default path or fallback to the tmpPath
+		result =
+			defaultPersistRoot === undefined
+				? memoryishPath
+				: path.join(defaultPersistRoot, pluginName);
+	} else {
+		// Try parse `persist` as a URL
+		const url = maybeParseURL(persist);
+		if (url !== undefined) {
+			if (url.protocol === "memory:") {
+				result = memoryishPath;
+			} else if (url.protocol === "file:") {
+				result = fileURLToPath(url);
+			} else {
+				throw new MiniflareCoreError(
+					"ERR_PERSIST_UNSUPPORTED",
+					`Unsupported "${url.protocol}" persistence protocol for storage: ${url.href}`
+				);
+			}
+		} else {
+			// Otherwise, fallback to file storage
+			result =
+				persist === true
+					? path.join(defaultPersistRoot ?? DEFAULT_PERSIST_ROOT, pluginName)
+					: persist;
 		}
-		throw new MiniflareCoreError(
-			"ERR_PERSIST_UNSUPPORTED",
-			`Unsupported "${url.protocol}" persistence protocol for storage: ${url.href}`
-		);
 	}
 
-	// Otherwise, fallback to file storage
-	return persist === true
-		? path.join(DEFAULT_PERSIST_ROOT, pluginName)
-		: persist;
+	// Normalize to forward slashes for workerd's disk service compatibility on
+	// Windows. workerd is a Unix-oriented C++ program and its disk service does
+	// not handle Windows backslash paths correctly, resulting in SQLITE_CANTOPEN
+	// errors. Forward slashes work for both Node.js fs APIs and workerd on all
+	// platforms.
+	return result.replaceAll("\\", "/");
 }
 
 // https://github.com/cloudflare/workerd/blob/81d97010e44f848bb95d0083e2677bca8d1658b7/src/workerd/server/workerd-api.c%2B%2B#L436
@@ -245,6 +331,48 @@ export async function migrateDatabase(
 	} catch (e) {
 		log.warn(`Error migrating ${previousPath} to ${newPath}: ${e}`);
 	}
+}
+
+/**
+ * Service names for remote bindings should be unique depending on the remote proxy connection
+ * string (since in theory different remote bindings can have different remote proxy connections),
+ * however include the whole remote proxy connection string in the service name would make the name
+ * too long more cumbersome to deal with, so this function simply takes a remote proxy connection
+ * string and generates a suffix for the respective service name using a short sha of the connection
+ * string.
+ *
+ * @param remoteProxyConnectionString the remote proxy connection string for the service
+ * @returns suffix to use in the service name
+ */
+function getRemoteServiceNameSuffix(
+	remoteProxyConnectionString: RemoteProxyConnectionString
+) {
+	const remoteSha = createHash("sha256")
+		.update(remoteProxyConnectionString.href)
+		.digest("hex");
+	const remoteShortSha = remoteSha.slice(0, 6);
+	return `remote-${remoteShortSha}`;
+}
+
+/**
+ * Utility to get the name for a service implementing a user binding
+ *
+ * @param scope Scope of the service (this usually is the plugin name)
+ * @param identifier Identifier to use for the service
+ * @param remoteProxyConnectionString Optional remote proxy connection string (in case the service connects to a remote resource)
+ * @returns the name for the service
+ */
+export function getUserBindingServiceName(
+	scope: string,
+	identifier: string,
+	remoteProxyConnectionString?: RemoteProxyConnectionString
+): string {
+	const localServiceName = `${scope}:${identifier}`;
+	if (!remoteProxyConnectionString) {
+		return localServiceName;
+	}
+	const remoteSuffix = getRemoteServiceNameSuffix(remoteProxyConnectionString);
+	return `${localServiceName}:${remoteSuffix}`;
 }
 
 export * from "./constants";

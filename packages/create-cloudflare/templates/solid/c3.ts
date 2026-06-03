@@ -1,7 +1,7 @@
-import { logRaw, updateStatus } from "@cloudflare/cli";
-import { blue } from "@cloudflare/cli/colors";
+import { logRaw, updateStatus } from "@cloudflare/cli-shared-helpers";
+import { blue } from "@cloudflare/cli-shared-helpers/colors";
+import { mergeObjectProperties, transformFile } from "@cloudflare/codemod";
 import { runFrameworkGenerator } from "frameworks/index";
-import { mergeObjectProperties, transformFile } from "helpers/codemod";
 import { usesTypescript } from "helpers/files";
 import { detectPackageManager } from "helpers/packageManagers";
 import * as recast from "recast";
@@ -20,42 +20,31 @@ const generate = async (ctx: C3Context) => {
 
 const configure = async (ctx: C3Context) => {
 	usesTypescript(ctx);
-	const filePath = `app.config.${usesTypescript(ctx) ? "ts" : "js"}`;
+	const filePath = `vite.config.${usesTypescript(ctx) ? "ts" : "js"}`;
 
 	updateStatus(`Updating configuration in ${blue(filePath)}`);
 
 	transformFile(filePath, {
 		visitCallExpression: function (n) {
 			const callee = n.node.callee as recast.types.namedTypes.Identifier;
-			if (callee.name !== "defineConfig") {
+			if (callee.name !== "nitro") {
 				return this.traverse(n);
 			}
 
 			const b = recast.types.builders;
-
-			mergeObjectProperties(
-				n.node.arguments[0] as recast.types.namedTypes.ObjectExpression,
-				[
-					b.objectProperty(
-						b.identifier("server"),
-						b.objectExpression([
-							b.objectProperty(
-								b.identifier("preset"),
-								b.stringLiteral("cloudflare-pages"),
-							),
-							b.objectProperty(
-								b.identifier("rollupConfig"),
-								b.objectExpression([
-									b.objectProperty(
-										b.identifier("external"),
-										b.arrayExpression([b.stringLiteral("node:async_hooks")]),
-									),
-								]),
-							),
-						]),
-					),
-				],
+			const presetProp = b.objectProperty(
+				b.identifier("preset"),
+				b.stringLiteral("cloudflare-module")
 			);
+
+			if (n.node.arguments.length === 0) {
+				n.node.arguments.push(b.objectExpression([presetProp]));
+			} else {
+				mergeObjectProperties(
+					n.node.arguments[0] as recast.types.namedTypes.ObjectExpression,
+					[presetProp]
+				);
+			}
 
 			return false;
 		},
@@ -67,19 +56,20 @@ const config: TemplateConfig = {
 	id: "solid",
 	frameworkCli: "create-solid",
 	displayName: "SolidStart",
-	platform: "pages",
+	platform: "workers",
 	copyFiles: {
 		path: "./templates",
 	},
+	path: "templates/solid",
 	generate,
 	configure,
 	transformPackageJson: async () => ({
 		scripts: {
-			preview: `${npm} run build && npx wrangler pages dev`,
-			deploy: `${npm} run build && wrangler pages deploy`,
+			preview: `${npm} run build && npx wrangler dev`,
+			deploy: `${npm} run build && wrangler deploy`,
+			"cf-typegen": `wrangler types`,
 		},
 	}),
-	compatibilityFlags: ["nodejs_compat"],
 	devScript: "dev",
 	deployScript: "deploy",
 	previewScript: "preview",

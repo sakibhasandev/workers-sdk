@@ -1,6 +1,6 @@
 import { fetchPagedListResult, fetchResult } from "../cfetch";
 import { requireAuth } from "../user";
-import type { Config } from "../config";
+import type { Config } from "@cloudflare/workers-utils";
 
 export type HyperdriveConfig = {
 	id: string;
@@ -8,6 +8,7 @@ export type HyperdriveConfig = {
 	origin: PublicOrigin;
 	caching?: CachingOptions;
 	mtls?: Mtls;
+	origin_connection_limit?: number;
 };
 
 export type OriginDatabase = {
@@ -27,9 +28,10 @@ export type NetworkOriginHoA = {
 	host: string;
 	access_client_id: string;
 
-	// Ensure post is not set, and secrets are not set
+	// Ensure port is not set, and secrets are not set
 	port?: never;
 	access_client_secret?: never;
+	service_id?: never;
 };
 
 export type NetworkOriginHoAWithSecrets = Omit<
@@ -46,13 +48,28 @@ export type NetworkOriginHostAndPort = {
 	// Ensure HoA fields are not set
 	access_client_id?: never;
 	access_client_secret?: never;
+	service_id?: never;
+};
+
+export type NetworkOriginVpcService = {
+	service_id: string;
+
+	// Ensure other network fields are not set
+	host?: never;
+	port?: never;
+	access_client_id?: never;
+	access_client_secret?: never;
 };
 
 // NetworkOrigin is never partial in the API, it must be submitted in it's entirety
-export type NetworkOrigin = NetworkOriginHoA | NetworkOriginHostAndPort;
+export type NetworkOrigin =
+	| NetworkOriginHoA
+	| NetworkOriginHostAndPort
+	| NetworkOriginVpcService;
 export type NetworkOriginWithSecrets =
 	| NetworkOriginHoAWithSecrets
-	| NetworkOriginHostAndPort;
+	| NetworkOriginHostAndPort
+	| NetworkOriginVpcService;
 
 // Public responses of the full PublicOrigin type are never partial in the API
 export type PublicOrigin = OriginDatabase & NetworkOrigin;
@@ -75,6 +92,7 @@ export type CreateUpdateHyperdriveBody = {
 	origin: OriginWithSecrets;
 	caching?: CachingOptions;
 	mtls?: Mtls;
+	origin_connection_limit?: number;
 };
 
 export type PatchHyperdriveBody = {
@@ -82,6 +100,7 @@ export type PatchHyperdriveBody = {
 	origin?: OriginWithSecretsPartial;
 	caching?: CachingOptions;
 	mtls?: Mtls;
+	origin_connection_limit?: number;
 };
 
 export type Mtls = {
@@ -90,24 +109,33 @@ export type Mtls = {
 	sslmode?: string;
 };
 
-export const Sslmode = ["require", "verify-ca", "verify-full"];
+export const PostgresSslmode = ["require", "verify-ca", "verify-full"];
+export const MySqlSslmode = ["REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY"];
 
 export async function createConfig(
 	config: Config,
 	body: CreateUpdateHyperdriveBody
 ): Promise<HyperdriveConfig> {
 	const accountId = await requireAuth(config);
-	return await fetchResult(`/accounts/${accountId}/hyperdrive/configs`, {
-		method: "POST",
-		body: JSON.stringify(body),
-	});
+	return await fetchResult(
+		config,
+		`/accounts/${accountId}/hyperdrive/configs`,
+		{
+			method: "POST",
+			body: JSON.stringify(body),
+		}
+	);
 }
 
 export async function deleteConfig(config: Config, id: string): Promise<void> {
 	const accountId = await requireAuth(config);
-	return await fetchResult(`/accounts/${accountId}/hyperdrive/configs/${id}`, {
-		method: "DELETE",
-	});
+	return await fetchResult(
+		config,
+		`/accounts/${accountId}/hyperdrive/configs/${id}`,
+		{
+			method: "DELETE",
+		}
+	);
 }
 
 export async function getConfig(
@@ -115,14 +143,19 @@ export async function getConfig(
 	id: string
 ): Promise<HyperdriveConfig> {
 	const accountId = await requireAuth(config);
-	return await fetchResult(`/accounts/${accountId}/hyperdrive/configs/${id}`, {
-		method: "GET",
-	});
+	return await fetchResult(
+		config,
+		`/accounts/${accountId}/hyperdrive/configs/${id}`,
+		{
+			method: "GET",
+		}
+	);
 }
 
 export async function listConfigs(config: Config): Promise<HyperdriveConfig[]> {
 	const accountId = await requireAuth(config);
 	return await fetchPagedListResult(
+		config,
 		`/accounts/${accountId}/hyperdrive/configs`,
 		{
 			method: "GET",
@@ -136,8 +169,12 @@ export async function patchConfig(
 	body: PatchHyperdriveBody
 ): Promise<HyperdriveConfig> {
 	const accountId = await requireAuth(config);
-	return await fetchResult(`/accounts/${accountId}/hyperdrive/configs/${id}`, {
-		method: "PATCH",
-		body: JSON.stringify(body),
-	});
+	return await fetchResult(
+		config,
+		`/accounts/${accountId}/hyperdrive/configs/${id}`,
+		{
+			method: "PATCH",
+			body: JSON.stringify(body),
+		}
+	);
 }

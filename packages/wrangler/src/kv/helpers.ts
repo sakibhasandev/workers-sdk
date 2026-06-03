@@ -1,14 +1,22 @@
+import assert from "node:assert";
 import { Blob } from "node:buffer";
 import { URLSearchParams } from "node:url";
+import { type KVNamespace } from "@cloudflare/workers-types/experimental";
+import {
+	isOptionalProperty,
+	isRequiredProperty,
+	UserError,
+} from "@cloudflare/workers-utils";
 import { Miniflare } from "miniflare";
 import { FormData } from "undici";
 import { fetchKVGetValue, fetchListResult, fetchResult } from "../cfetch";
+import { getSettings } from "../deployment-bundle/bindings";
 import { getLocalPersistencePath } from "../dev/get-local-persistence-path";
-import { buildPersistOptions } from "../dev/miniflare";
-import { UserError } from "../errors";
+import { getDefaultPersistRoot } from "../dev/miniflare";
+import { getFlag } from "../experimental-flags";
 import { logger } from "../logger";
-import type { Config } from "../config";
-import type { KVNamespace } from "@cloudflare/workers-types/experimental";
+import { requireAuth } from "../user";
+import type { ComplianceConfig, Config } from "@cloudflare/workers-utils";
 import type { ReplaceWorkersTypes } from "miniflare";
 
 /** The largest number of kv items we can pass to the API in a single request. */
@@ -16,8 +24,12 @@ const API_MAX = 10000;
 // The const below are lowered from the API's true capacity to help avoid
 // hammering it with large requests.
 export const BATCH_KEY_MAX = API_MAX / 10;
+// Limit the number of errors or warnings to logs during a bulk put.
+// They might end up filling memory for invalid inputs.
+export const BATCH_MAX_ERRORS_WARNINGS = 12;
 
 type KvArgs = {
+	namespace?: string;
 	binding?: string;
 	"namespace-id"?: string;
 	preview?: boolean;
@@ -29,10 +41,12 @@ type KvArgs = {
  * @returns the generated id of the created namespace.
  */
 export async function createKVNamespace(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	title: string
 ): Promise<string> {
 	const response = await fetchResult<{ id: string }>(
+		complianceConfig,
 		`/accounts/${accountId}/storage/kv/namespaces`,
 		{
 			method: "POST",
@@ -61,6 +75,7 @@ export interface KVNamespaceInfo {
  * Fetch a list of all the namespaces under the given `accountId`.
  */
 export async function listKVNamespaces(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	limitCalls: boolean = false
 ): Promise<KVNamespaceInfo[]> {
@@ -69,6 +84,7 @@ export async function listKVNamespaces(
 	const results: KVNamespaceInfo[] = [];
 	while (results.length % pageSize === 0) {
 		const json = await fetchResult<KVNamespaceInfo[]>(
+			complianceConfig,
 			`/accounts/${accountId}/storage/kv/namespaces`,
 			{},
 			new URLSearchParams({
@@ -97,22 +113,52 @@ export interface NamespaceKeyInfo {
 }
 
 export async function listKVNamespaceKeys(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	prefix = ""
 ) {
 	return await fetchListResult<NamespaceKeyInfo>(
+		complianceConfig,
 		`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/keys`,
 		{},
 		new URLSearchParams({ prefix })
 	);
 }
 
+/**
+ * Update a KV namespace title under the given `accountId` with the given `namespaceId`.
+ *
+ * @returns the updated namespace information.
+ */
+export async function updateKVNamespace(
+	complianceConfig: ComplianceConfig,
+	accountId: string,
+	namespaceId: string,
+	title: string
+): Promise<KVNamespaceInfo> {
+	return await fetchResult<KVNamespaceInfo>(
+		complianceConfig,
+		`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}`,
+		{
+			method: "PUT",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				title,
+			}),
+		}
+	);
+}
+
 export async function deleteKVNamespace(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string
 ) {
 	return await fetchResult<{ id: string }>(
+		complianceConfig,
 		`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}`,
 		{ method: "DELETE" }
 	);
@@ -140,54 +186,19 @@ const KeyValueKeys = new Set([
 ]);
 
 /**
- * The object has the specified property.
- */
-function hasProperty<T extends object>(
-	obj: object,
-	property: keyof T
-): obj is T {
-	return property in obj;
-}
-
-/**
- * The object has a required property of the specified type.
- */
-function hasTypedProperty<T extends object>(
-	obj: object,
-	property: keyof T,
-	type: string
-): obj is T {
-	return hasProperty(obj, property) && typeof obj[property] === type;
-}
-
-/**
- * The object an optional property, of the specified type.
- */
-function hasOptionalTypedProperty<T extends object>(
-	obj: object,
-	property: keyof T,
-	type: string
-): obj is Omit<T, typeof property> | T {
-	return !hasProperty(obj, property) || typeof obj[property] === type;
-}
-
-/**
  * Is the given object a valid `KeyValue` type?
  */
 export function isKVKeyValue(keyValue: unknown): keyValue is KeyValue {
-	if (
-		keyValue === null ||
-		typeof keyValue !== "object" ||
-		!hasTypedProperty(keyValue, "key", "string") ||
-		!hasTypedProperty(keyValue, "value", "string") ||
-		!hasOptionalTypedProperty(keyValue, "expiration", "number") ||
-		!hasOptionalTypedProperty(keyValue, "expiration_ttl", "number") ||
-		!hasOptionalTypedProperty(keyValue, "base64", "boolean") ||
-		!hasOptionalTypedProperty(keyValue, "metadata", "object")
-	) {
-		return false;
-	}
-	return true;
+	return (
+		keyValue !== null &&
+		typeof keyValue === "object" &&
+		isRequiredProperty(keyValue, "key", "string") &&
+		isRequiredProperty(keyValue, "value", "string") &&
+		isOptionalProperty(keyValue, "expiration", "number") &&
+		isOptionalProperty(keyValue, "expiration_ttl", "number") &&
+		isOptionalProperty(keyValue, "base64", "boolean") &&
+		isOptionalProperty(keyValue, "metadata", "object")
+	);
 }
 
 /**
@@ -212,6 +223,7 @@ function asFormData(fields: Record<string, unknown>): FormData {
 }
 
 export async function putKVKeyValue(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	keyValue: KeyValue
@@ -227,6 +239,7 @@ export async function putKVKeyValue(
 		}
 	}
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${encodeURIComponent(
 			keyValue.key
 		)}`,
@@ -244,19 +257,27 @@ export async function putKVKeyValue(
 }
 
 export async function getKVKeyValue(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	key: string
 ): Promise<ArrayBuffer> {
-	return await fetchKVGetValue(accountId, namespaceId, encodeURIComponent(key));
+	return await fetchKVGetValue(
+		complianceConfig,
+		accountId,
+		namespaceId,
+		encodeURIComponent(key)
+	);
 }
 
 export async function deleteKVKeyValue(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	key: string
 ) {
 	return await fetchResult(
+		complianceConfig,
 		`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${encodeURIComponent(
 			key
 		)}`,
@@ -296,12 +317,14 @@ type BulkGetResponse = {
 };
 
 export async function getKVBulkKeyValue(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	keys: string[]
 ) {
 	const requestPayload = { keys };
 	const result = await fetchResult<BulkGetResponse>(
+		complianceConfig,
 		`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/bulk/get`,
 		{
 			method: "POST",
@@ -313,6 +336,7 @@ export async function getKVBulkKeyValue(
 }
 
 export async function putKVBulkKeyValue(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	keyValues: KeyValue[],
@@ -325,6 +349,7 @@ export async function putKVBulkKeyValue(
 		}
 
 		await fetchResult(
+			complianceConfig,
 			`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/bulk`,
 			{
 				method: "PUT",
@@ -342,6 +367,7 @@ export async function putKVBulkKeyValue(
 }
 
 export async function deleteKVBulkKeyValue(
+	complianceConfig: ComplianceConfig,
 	accountId: string,
 	namespaceId: string,
 	keys: string[],
@@ -353,6 +379,7 @@ export async function deleteKVBulkKeyValue(
 		}
 
 		await fetchResult(
+			complianceConfig,
 			`/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/bulk`,
 			{
 				method: "DELETE",
@@ -366,56 +393,128 @@ export async function deleteKVBulkKeyValue(
 	}
 }
 
-export function getKVNamespaceId(
-	{ preview, binding, "namespace-id": namespaceId }: KvArgs,
-	config: Config
-): string {
-	// nice
+async function getIdFromSettings(
+	config: Config,
+	binding: string,
+	isLocal: boolean
+) {
+	// Don't do any network stuff when local, instead respect what
+	// Wrangler dev does, which is to use the binding name as a fallback
+	// for the namespace ID
+	if (isLocal) {
+		return binding;
+	}
+	const accountId = await requireAuth(config);
+	if (!config.name) {
+		throw new UserError("No Worker name found in config", {
+			telemetryMessage: "kv binding resolution missing worker name",
+		});
+	}
+	const settings = await getSettings(config, accountId, config.name);
+	const existingKV = settings?.bindings.find(
+		(existing) => existing.type === "kv_namespace" && existing.name === binding
+	);
+	if (!existingKV || !("namespace_id" in existingKV)) {
+		throw new UserError(
+			`No namespace ID found for binding "${binding}". Add one to your wrangler config file or pass it via \`--namespace-id\`.`,
+			{
+				telemetryMessage:
+					"kv namespace id missing from deployed worker binding",
+			}
+		);
+	}
+	return existingKV.namespace_id as string;
+}
+
+/**
+ * Result of resolving a KV namespace ID.
+ */
+export interface KVNamespaceIdResult {
+	namespaceId: string;
+	displayName: string;
+}
+
+export async function getKVNamespaceId(
+	{ namespace, preview, binding, "namespace-id": namespaceId }: KvArgs,
+	config: Config,
+	isLocal: boolean
+): Promise<KVNamespaceIdResult> {
 	if (namespaceId) {
-		return namespaceId;
+		return { namespaceId, displayName: `id: "${namespaceId}"` };
+	}
+
+	// If namespace name is provided, look up the ID from the API
+	if (namespace) {
+		const accountId = await requireAuth(config);
+		const namespaces = await listKVNamespaces(config, accountId);
+		const found = namespaces.find((ns) => ns.title === namespace);
+
+		if (!found) {
+			throw new UserError(
+				`No namespace found with the name "${namespace}". ` +
+					`Use --namespace-id or --binding instead, or check available namespaces with "wrangler kv namespace list".`,
+				{ telemetryMessage: "kv namespace name not found" }
+			);
+		}
+		return {
+			namespaceId: found.id,
+			displayName: `name: "${namespace}" (id: "${found.id}")`,
+		};
 	}
 
 	// begin pre-flight checks
 
 	// `--binding` is only valid if there's a wrangler configuration.
 	if (binding && !config) {
-		throw new UserError("--binding specified, but no config file was found.");
+		throw new UserError("--binding specified, but no config file was found.", {
+			telemetryMessage: "kv namespace resolution binding requires config",
+		});
 	}
 
 	// there's no config. abort here
 	if (!config) {
 		throw new UserError(
 			"Failed to find a config file.\n" +
-				"Either use --namespace-id to upload directly or create a configuration file with a binding."
+				"Either use --namespace-id to upload directly or create a configuration file with a binding.",
+			{ telemetryMessage: "kv namespace resolution missing config file" }
 		);
 	}
 
 	// there's no KV namespaces
 	if (!config.kv_namespaces || config.kv_namespaces.length === 0) {
 		throw new UserError(
-			"No KV Namespaces configured! Either use --namespace-id to upload directly or add a KV namespace to your wrangler config file."
+			"No KV Namespaces configured! Either use --namespace-id to upload directly or add a KV namespace to your wrangler config file.",
+			{ telemetryMessage: "kv namespaces not configured" }
 		);
 	}
 
-	const namespace = config.kv_namespaces.find((ns) => ns.binding === binding);
+	const configNamespace = config.kv_namespaces.find(
+		(ns) => ns.binding === binding
+	);
 
 	// we couldn't find a namespace with that binding
-	if (!namespace) {
+	if (!configNamespace) {
 		throw new UserError(
-			`A namespace with binding name "${binding}" was not found in the configured "kv_namespaces".`
+			`A namespace with binding name "${binding}" was not found in the configured "kv_namespaces".`,
+			{ telemetryMessage: "kv namespace binding not found in config" }
 		);
 	}
 
 	// end pre-flight checks
 
+	// Helper to format displayName for binding-based lookups
+	const formatDisplayName = (nsId: string) =>
+		`binding: "${binding}" (id: "${nsId}")`;
+
 	// we're in preview mode, `--preview true` or `--preview` was passed
-	if (preview && namespace.preview_id) {
-		namespaceId = namespace.preview_id;
+	if (preview && configNamespace.preview_id) {
+		const nsId = configNamespace.preview_id;
 		// We don't want to execute code below if preview is set to true, so we just return. Otherwise we will get errors!
-		return namespaceId;
+		return { namespaceId: nsId, displayName: formatDisplayName(nsId) };
 	} else if (preview) {
 		throw new UserError(
-			`No preview ID found for ${binding}. Add one to your wrangler config file to use a separate namespace for previewing your worker.`
+			`No preview ID found for ${binding}. Add one to your wrangler config file to use a separate namespace for previewing your worker.`,
+			{ telemetryMessage: "kv namespace preview id missing" }
 		);
 	}
 
@@ -424,38 +523,44 @@ export function getKVNamespaceId(
 	const previewIsDefined = typeof preview !== "undefined";
 
 	// --preview false was passed
-	if (previewIsDefined && namespace.id) {
-		namespaceId = namespace.id;
+	if (previewIsDefined && configNamespace.id) {
+		const nsId = configNamespace.id;
 		// We don't want to execute code below if preview is set to true, so we just return. Otherwise we can get error!
-		return namespaceId;
+		return { namespaceId: nsId, displayName: formatDisplayName(nsId) };
 	} else if (previewIsDefined) {
+		if (getFlag("RESOURCES_PROVISION")) {
+			assert(binding);
+			const nsId = await getIdFromSettings(config, binding, isLocal);
+			return { namespaceId: nsId, displayName: formatDisplayName(nsId) };
+		}
 		throw new UserError(
-			`No namespace ID found for ${binding}. Add one to your wrangler config file to use a separate namespace for previewing your worker.`
+			`No namespace ID found for ${binding}. Add one to your wrangler config file or pass it via \`--namespace-id\`.`,
+			{ telemetryMessage: "kv namespace id missing" }
 		);
 	}
 
 	// `--preview` wasn't passed
 	const bindingHasOnlyOneId =
-		(namespace.id && !namespace.preview_id) ||
-		(!namespace.id && namespace.preview_id);
+		(configNamespace.id && !configNamespace.preview_id) ||
+		(!configNamespace.id && configNamespace.preview_id);
 	if (bindingHasOnlyOneId) {
-		namespaceId = namespace.id || namespace.preview_id;
+		const nsId = configNamespace.id || configNamespace.preview_id;
+		assert(nsId);
+		return { namespaceId: nsId, displayName: formatDisplayName(nsId) };
+	} else if (
+		getFlag("RESOURCES_PROVISION") &&
+		!configNamespace.id &&
+		!configNamespace.preview_id
+	) {
+		assert(binding);
+		const nsId = await getIdFromSettings(config, binding, isLocal);
+		return { namespaceId: nsId, displayName: formatDisplayName(nsId) };
 	} else {
 		throw new UserError(
-			`${binding} has both a namespace ID and a preview ID. Specify "--preview" or "--preview false" to avoid writing data to the wrong namespace.`
+			`${binding} has both a namespace ID and a preview ID. Specify "--preview" or "--preview false" to avoid writing data to the wrong namespace.`,
+			{ telemetryMessage: "kv namespace requires preview selection" }
 		);
 	}
-
-	// shouldn't happen. we should be able to prove this with strong typing.
-	// TODO: when we add strongly typed commands, rewrite these checks so they're exhaustive
-	if (!namespaceId) {
-		throw new Error(
-			"Something went wrong trying to determine which namespace to upload to.\n" +
-				"Please create a github issue with the command you just ran along with your wrangler configuration."
-		);
-	}
-
-	return namespaceId;
 }
 
 // TODO(soon): once we upgrade to TypeScript 5.2, this should actually use `using`:
@@ -466,12 +571,14 @@ export async function usingLocalNamespace<T>(
 	namespaceId: string,
 	closure: (namespace: ReplaceWorkersTypes<KVNamespace>) => Promise<T>
 ): Promise<T> {
+	// We need to cast to Config for the getLocalPersistencePath function since
+	// it expects a full Config object, even though it only uses compliance_region
 	const persist = getLocalPersistencePath(persistTo, config);
-	const persistOptions = buildPersistOptions(persist);
+	const defaultPersistRoot = getDefaultPersistRoot(persist);
 	const mf = new Miniflare({
 		script:
 			'addEventListener("fetch", (e) => e.respondWith(new Response(null, { status: 404 })))',
-		...persistOptions,
+		defaultPersistRoot,
 		kvNamespaces: { NAMESPACE: namespaceId },
 	});
 	const namespace = await mf.getKVNamespace("NAMESPACE");

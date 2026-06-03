@@ -2,7 +2,7 @@ import type {
 	HttpOptions_Style,
 	TlsOptions_Version,
 	Worker_Binding_CryptoKey_Usage,
-} from "./generated";
+} from "./generated/workerd";
 
 // TODO: auto-generate this file
 
@@ -10,7 +10,7 @@ export {
 	HttpOptions_Style,
 	TlsOptions_Version,
 	Worker_Binding_CryptoKey_Usage,
-} from "./generated";
+} from "./generated/workerd";
 
 export const kVoid = Symbol("kVoid");
 export type Void = typeof kVoid;
@@ -21,6 +21,7 @@ export interface Config {
 	v8Flags?: string[];
 	extensions?: Extension[];
 	autogates?: string[];
+	structuredLogging?: boolean;
 }
 
 export type Socket = {
@@ -46,7 +47,17 @@ export type Service = {
 export interface ServiceDesignator {
 	name?: string;
 	entrypoint?: string;
+	props?: { json: string };
 }
+
+export type Worker_DockerConfiguration = {
+	socketPath: string;
+	containerEgressInterceptorImage?: string;
+};
+
+export type Worker_ContainerEngine = {
+	localDocker: Worker_DockerConfiguration;
+};
 
 export type Worker = (
 	| { modules?: Worker_Module[] }
@@ -62,6 +73,9 @@ export type Worker = (
 	durableObjectUniqueKeyModifier?: string;
 	durableObjectStorage?: Worker_DurableObjectStorage;
 	moduleFallback?: string;
+	tails?: ServiceDesignator[];
+	streamingTails?: ServiceDesignator[];
+	containerEngine?: Worker_ContainerEngine;
 };
 
 export type Worker_DurableObjectStorage =
@@ -102,6 +116,8 @@ export type Worker_Binding = {
 	| { analyticsEngine?: ServiceDesignator }
 	| { hyperdrive?: Worker_Binding_Hyperdrive }
 	| { unsafeEval?: Void }
+	| { workerLoader?: Worker_Binding_WorkerLoader }
+	| { workerdDebugPort?: Void }
 );
 
 export interface Worker_Binding_Parameter {
@@ -158,6 +174,10 @@ export interface Worker_Binding_Hyperdrive {
 	user?: string;
 	password?: string;
 	scheme?: string;
+}
+
+export interface Worker_Binding_WorkerLoader {
+	id?: string;
 }
 
 export interface Worker_Binding_MemoryCache {

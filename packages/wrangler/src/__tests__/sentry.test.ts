@@ -1,13 +1,13 @@
-import assert from "node:assert";
 import path from "node:path";
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import * as Sentry from "@sentry/node";
 import { http, HttpResponse } from "msw";
+import { afterEach, assert, beforeEach, describe, it } from "vitest";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
-import { clearDialogs, mockConfirm } from "./helpers/mock-dialogs";
+import { clearDialogs } from "./helpers/mock-dialogs";
 import { useMockIsTTY } from "./helpers/mock-istty";
-import { msw } from "./helpers/msw";
-import { runInTempDir } from "./helpers/run-in-tmp";
+import { createFetchResult, msw } from "./helpers/msw";
 import { runWrangler } from "./helpers/run-wrangler";
 
 declare const global: { SENTRY_DSN: string | undefined };
@@ -41,12 +41,12 @@ describe("sentry", () => {
 	});
 	describe("non interactive", () => {
 		beforeEach(() => setIsTTY(false));
-		it("should not hit sentry in normal usage", async () => {
+		it("should not hit sentry in normal usage", async ({ expect }) => {
 			await runWrangler("--version");
 			expect(sentryRequests?.length).toEqual(0);
 		});
 
-		it("should not hit sentry after error", async () => {
+		it("should not hit sentry after error", async ({ expect }) => {
 			// Trigger an API error
 			msw.use(
 				http.get(
@@ -55,17 +55,21 @@ describe("sentry", () => {
 						return HttpResponse.error();
 					},
 					{ once: true }
-				)
+				),
+				http.get("*/user/tokens/verify", () => {
+					return HttpResponse.json(createFetchResult([]));
+				})
 			);
 			await expect(runWrangler("whoami")).rejects.toMatchInlineSnapshot(
 				`[TypeError: Failed to fetch]`
 			);
 			expect(std.out).toMatchInlineSnapshot(`
-				"Getting User settings...
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Getting User settings...
 
-				[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m
-				? Would you like to report this error to Cloudflare? Wrangler's output and the error details will be shared with the Wrangler team to help us diagnose and fix the issue.
-				🤖 Using fallback value in non-interactive context: no"
+				[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
 			`);
 			expect(sentryRequests?.length).toEqual(0);
 		});
@@ -78,20 +82,27 @@ describe("sentry", () => {
 			setIsTTY(false);
 		});
 
-		it("should not hit sentry in normal usage", async () => {
+		it("should not hit sentry in normal usage", async ({ expect }) => {
 			await runWrangler("--version");
 			expect(sentryRequests?.length).toEqual(0);
 		});
 
-		it("should not hit sentry with user error", async () => {
+		it("should not hit sentry with user error", async ({ expect }) => {
 			await expect(runWrangler("delete")).rejects.toMatchInlineSnapshot(
 				`[Error: A worker name must be defined, either via --name, or in your Wrangler configuration file]`
 			);
-			expect(std.out).toMatchInlineSnapshot(`""`);
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				"
+			`);
 			expect(sentryRequests?.length).toEqual(0);
 		});
 
-		it("should not hit sentry after reportable error when permission denied", async () => {
+		it("should not hit sentry (or even ask) after reportable error if WRANGLER_SEND_ERROR_REPORTS is explicitly false", async ({
+			expect,
+		}) => {
 			// Trigger an API error
 			msw.use(
 				http.get(
@@ -100,24 +111,28 @@ describe("sentry", () => {
 						return HttpResponse.error();
 					},
 					{ once: true }
-				)
+				),
+				http.get("*/user/tokens/verify", () => {
+					return HttpResponse.json(createFetchResult([]));
+				})
 			);
-			mockConfirm({
-				text: "Would you like to report this error to Cloudflare? Wrangler's output and the error details will be shared with the Wrangler team to help us diagnose and fix the issue.",
-				result: false,
-			});
-			await expect(runWrangler("whoami")).rejects.toMatchInlineSnapshot(
-				`[TypeError: Failed to fetch]`
-			);
+			await expect(
+				runWrangler("whoami", { WRANGLER_SEND_ERROR_REPORTS: "false" })
+			).rejects.toMatchInlineSnapshot(`[TypeError: Failed to fetch]`);
 			expect(std.out).toMatchInlineSnapshot(`
-			"Getting User settings...
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Getting User settings...
 
-			[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
-		`);
+				[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
+			`);
 			expect(sentryRequests?.length).toEqual(0);
 		});
 
-		it("should hit sentry after reportable error when permission provided", async () => {
+		it("should hit sentry after reportable error (without confirmation) if WRANGLER_SEND_ERROR_REPORTS is explicitly true", async ({
+			expect,
+		}) => {
 			// Trigger an API error
 			msw.use(
 				http.get(
@@ -126,24 +141,26 @@ describe("sentry", () => {
 						return HttpResponse.error();
 					},
 					{ once: true }
-				)
+				),
+				http.get("*/user/tokens/verify", () => {
+					return HttpResponse.json(createFetchResult([]));
+				})
 			);
-			mockConfirm({
-				text: "Would you like to report this error to Cloudflare? Wrangler's output and the error details will be shared with the Wrangler team to help us diagnose and fix the issue.",
-				result: true,
-			});
-			await expect(runWrangler("whoami")).rejects.toMatchInlineSnapshot(
-				`[TypeError: Failed to fetch]`
-			);
+			await expect(
+				runWrangler("whoami", { WRANGLER_SEND_ERROR_REPORTS: "true" })
+			).rejects.toMatchInlineSnapshot(`[TypeError: Failed to fetch]`);
 			expect(std.out).toMatchInlineSnapshot(`
-			"Getting User settings...
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Getting User settings...
 
-			[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
-		`);
+				[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
+			`);
 
 			// Sentry sends multiple HTTP requests to capture breadcrumbs
-			expect(sentryRequests?.length).toBeGreaterThan(0);
 			assert(sentryRequests !== undefined);
+			expect(sentryRequests.length).toBeGreaterThan(0);
 
 			// Check requests don't include PII
 			const envelopes = sentryRequests.map(({ envelope }) => {
@@ -218,206 +235,206 @@ describe("sentry", () => {
 
 			// If more data is included in the Sentry request, we'll need to verify it
 			// couldn't contain PII and update this snapshot
-			expect(event).toMatchInlineSnapshot(`
-				Object {
-				  "data": Object {
-				    "breadcrumbs": Array [
-				      Object {
-				        "level": "log",
-				        "message": "wrangler whoami",
-				        "timestamp": 0,
-				      },
-				    ],
-				    "contexts": Object {
-				      "app": Object {
-				        "app_memory": 0,
-				        "app_start_time": "",
-				      },
-				      "cloud_resource": Object {},
-				      "device": Object {},
-				      "os": Object {},
-				      "runtime": Object {
-				        "name": "node",
-				        "version": "",
-				      },
-				      "trace": Object {
-				        "span_id": "",
-				        "trace_id": "",
-				      },
-				    },
-				    "environment": "production",
-				    "event_id": "",
-				    "exception": Object {
-				      "values": Array [
-				        Object {
-				          "mechanism": Object {
-				            "handled": true,
-				            "type": "generic",
-				          },
-				          "stacktrace": Object {
-				            "frames": Array [
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/core/register-yargs-command.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "register-yargs-command.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/user/commands.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "commands.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/user/whoami.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "whoami.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/user/whoami.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "whoami.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/user/whoami.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "whoami.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/cfetch/index.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "index.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/cfetch/internal.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "internal.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/wrangler/packages/wrangler/src/cfetch/internal.ts",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "internal.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/project/...",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "@mswjs.interceptors.src.interceptors.fetch:index.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				              Object {
-				                "colno": 0,
-				                "context_line": "",
-				                "filename": "/project/...",
-				                "function": "",
-				                "in_app": false,
-				                "lineno": 0,
-				                "module": "@mswjs.interceptors.src.interceptors.fetch:index.ts",
-				                "post_context": Array [],
-				                "pre_context": Array [],
-				              },
-				            ],
-				          },
-				          "type": "TypeError",
-				          "value": "Failed to fetch",
-				        },
-				      ],
-				    },
-				    "modules": Object {},
-				    "platform": "node",
-				    "release": "",
-				    "sdk": Object {
-				      "integrations": Array [
-				        "InboundFilters",
-				        "FunctionToString",
-				        "LinkedErrors",
-				        "Console",
-				        "OnUncaughtException",
-				        "OnUnhandledRejection",
-				        "ContextLines",
-				        "Context",
-				        "Modules",
-				      ],
-				      "name": "sentry.javascript.node",
-				      "packages": Array [
-				        Object {
-				          "name": "npm:@sentry/node",
-				          "version": "7.87.0",
-				        },
-				      ],
-				      "version": "7.87.0",
-				    },
-				    "timestamp": 0,
-				  },
-				  "header": Object {
-				    "event_id": "",
-				    "sdk": Object {
-				      "name": "sentry.javascript.node",
-				      "version": "7.87.0",
-				    },
-				    "sent_at": "",
-				    "trace": Object {
-				      "environment": "production",
-				      "public_key": "9edbb8417b284aa2bbead9b4c318918b",
-				      "release": "",
-				      "trace_id": "",
-				    },
-				  },
-				  "type": Object {
-				    "type": "event",
-				  },
-				}
-			`);
+			expect(event).toStrictEqual({
+				data: {
+					breadcrumbs: [
+						{
+							level: "log",
+							message: "wrangler whoami",
+							timestamp: 0,
+						},
+					],
+					contexts: {
+						app: {
+							app_memory: 0,
+							app_start_time: "",
+						},
+						cloud_resource: {},
+						device: {},
+						os: {},
+						runtime: {
+							name: "node",
+							version: "",
+						},
+						trace: {
+							span_id: "",
+							trace_id: "",
+						},
+					},
+					environment: "production",
+					event_id: "",
+					exception: {
+						values: [
+							{
+								mechanism: {
+									handled: true,
+									type: "generic",
+								},
+								stacktrace: {
+									frames: [
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: expect.any(String),
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module: expect.any(String),
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: "/project/...",
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module:
+												"@mswjs.interceptors.src.interceptors.fetch:index.ts",
+											post_context: [],
+											pre_context: [],
+										},
+										{
+											colno: 0,
+											context_line: "",
+											filename: "/project/...",
+											function: "",
+											in_app: false,
+											lineno: 0,
+											module:
+												"@mswjs.interceptors.src.interceptors.fetch:index.ts",
+											post_context: [],
+											pre_context: [],
+										},
+									],
+								},
+								type: "TypeError",
+								value: "Failed to fetch",
+							},
+						],
+					},
+					modules: {},
+					platform: "node",
+					release: "",
+					sdk: {
+						integrations: [
+							"InboundFilters",
+							"FunctionToString",
+							"LinkedErrors",
+							"Console",
+							"OnUncaughtException",
+							"OnUnhandledRejection",
+							"ContextLines",
+							"Context",
+							"Modules",
+						],
+						name: "sentry.javascript.node",
+						packages: [
+							{
+								name: "npm:@sentry/node",
+								version: "7.87.0",
+							},
+						],
+						version: "7.87.0",
+					},
+					timestamp: 0,
+				},
+				header: {
+					event_id: "",
+					sdk: {
+						name: "sentry.javascript.node",
+						version: "7.87.0",
+					},
+					sent_at: "",
+					trace: {
+						environment: "production",
+						public_key: "9edbb8417b284aa2bbead9b4c318918b",
+						release: "",
+						trace_id: "",
+					},
+				},
+				type: {
+					type: "event",
+				},
+			});
 		});
 	});
 });

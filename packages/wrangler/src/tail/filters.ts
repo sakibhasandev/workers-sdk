@@ -2,10 +2,10 @@
  * When tailing logs from a worker, oftentimes you don't want to see _every
  * single event_. That's where filters come in. We can send a set of filters
  * to the tail worker, and it will pre-filter any logs for us so that we
- * only recieve the ones we care about.
+ * only receive the ones we care about.
  */
 
-import { UserError } from "../errors";
+import { UserError } from "@cloudflare/workers-utils";
 
 /**
  * These are the filters we accept in the CLI. They
@@ -191,7 +191,8 @@ export function translateCLICommandToFilterMessage(
 function parseSamplingRate(sampling_rate: number): SamplingRateFilter {
 	if (sampling_rate <= 0 || sampling_rate >= 1) {
 		throw new UserError(
-			"A sampling rate must be between 0 and 1 in order to have any effect.\nFor example, a sampling rate of 0.25 means 25% of events will be logged."
+			"A sampling rate must be between 0 and 1 in order to have any effect.\nFor example, a sampling rate of 0.25 means 25% of events will be logged.",
+			{ telemetryMessage: "tail filters invalid sampling rate" }
 		);
 	}
 

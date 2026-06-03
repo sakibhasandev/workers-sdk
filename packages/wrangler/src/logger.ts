@@ -1,9 +1,14 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { format } from "node:util";
+import {
+	getEnvironmentVariableFactory,
+	getSanitizeLogs,
+	ParseError,
+} from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import CLITable from "cli-table3";
 import { formatMessagesSync } from "esbuild";
-import { getEnvironmentVariableFactory } from "./environment-variables/factory";
-import { getSanitizeLogs } from "./environment-variables/misc-variables";
+import { formatMessage } from "./utils/format-message";
 import { appendToDebugLogFile } from "./utils/log-file";
 import type { Message } from "esbuild";
 
@@ -49,7 +54,48 @@ function getLoggerLevel(): LoggerLevel {
 	return "log";
 }
 
+const overrideLoggerLevel = new AsyncLocalStorage<{
+	logLevel: LoggerLevel | undefined;
+}>();
+
+/**
+ * This function runs a callback with a specified log level
+ * The provided log level is stored using AsyncLocalStorage, and will be used
+ * for all logger.* calls that happen within the callback.
+ */
+export const runWithLogLevel = <V>(
+	overrideLogLevel: LoggerLevel | undefined,
+	cb: () => V
+) => overrideLoggerLevel.run({ logLevel: overrideLogLevel }, cb);
+
+/**
+ * Determines whether Wrangler should write logs to disk.
+ * Exported for testability — skips disk logging in unit tests
+ * and when WRANGLER_WRITE_LOGS is "false" or "0".
+ */
+export function shouldLogToDisk(
+	isTestEnvironment = typeof vitest !== "undefined"
+): boolean {
+	if (isTestEnvironment) {
+		return false;
+	}
+	const setting = process.env.WRANGLER_WRITE_LOGS?.toLowerCase();
+	return setting !== "false" && setting !== "0";
+}
+
 export type TableRow<Keys extends string> = Record<Keys, string>;
+
+function consoleMethodToLoggerLevel(
+	method: Exclude<keyof Console, "Console">
+): LoggerLevel {
+	if (method in LOGGER_LEVELS) {
+		return method as LoggerLevel;
+	}
+	// categorize anything different from the common console methods as
+	// a standard log (in the future if need be we can add logic here to
+	// associate different methods to different log levels)
+	return "log";
+}
 
 export class Logger {
 	constructor() {}
@@ -58,7 +104,11 @@ export class Logger {
 	private onceHistory = new Set<string>();
 
 	get loggerLevel() {
-		return this.overrideLoggerLevel ?? getLoggerLevel();
+		return (
+			overrideLoggerLevel.getStore()?.logLevel ??
+			this.overrideLoggerLevel ??
+			getLoggerLevel()
+		);
 	}
 
 	set loggerLevel(val) {
@@ -71,45 +121,74 @@ export class Logger {
 
 	columns = process.stdout.columns;
 
+	json = (data: unknown) => {
+		// eslint-disable-next-line no-console -- The logger implementation has to use console directly
+		console.log(JSON.stringify(data, null, 4));
+	};
+
 	debug = (...args: unknown[]) => this.doLog("debug", args);
 	debugWithSanitization = (label: string, ...args: unknown[]) => {
-		if (getSanitizeLogs() === "false") {
-			this.doLog("debug", [label, ...args]);
-		} else {
+		if (getSanitizeLogs()) {
 			this.doLog("debug", [
 				label,
 				"omitted; set WRANGLER_LOG_SANITIZE=false to include sanitized data",
 			]);
+		} else {
+			this.doLog("debug", [label, ...args]);
 		}
 	};
 	info = (...args: unknown[]) => this.doLog("info", args);
 	log = (...args: unknown[]) => this.doLog("log", args);
 	warn = (...args: unknown[]) => this.doLog("warn", args);
-	error = (...args: unknown[]) => this.doLog("error", args);
-	table<Keys extends string>(data: TableRow<Keys>[]) {
-		const keys: Keys[] =
+
+	error(...args: unknown[]): void;
+	error(error: ParseError): void;
+	error(...args: unknown[] | [ParseError]) {
+		if (args.length === 1 && args[0] instanceof ParseError) {
+			this.doLog("error", formatMessage(args[0]));
+		} else {
+			this.doLog("error", args);
+		}
+	}
+	table<Keys extends string>(
+		data: TableRow<Keys>[],
+		options?: { wordWrap: boolean; head?: Keys[] }
+	) {
+		const derivedHead =
 			data.length === 0 ? [] : (Object.keys(data[0]) as Keys[]);
-		const t = new CLITable({
-			head: keys,
+		const wordWrap = options?.wordWrap ?? false;
+		const head = options?.head ?? derivedHead;
+
+		const tableOptions = {
 			style: {
 				head: chalk.level ? ["blue"] : [],
 				border: chalk.level ? ["gray"] : [],
 			},
-		});
-		t.push(...data.map((row) => keys.map((k) => row[k])));
+			wordWrap,
+			head,
+		};
+		const t = new CLITable(tableOptions);
+		t.push(...data.map((row) => head.map((k) => row[k])));
 		return this.doLog("log", [t.toString()]);
 	}
 	console<M extends Exclude<keyof Console, "Console">>(
 		method: M,
 		...args: Parameters<Console[M]>
 	) {
+		// eslint-disable-next-line no-console -- Logger implementation must use console directly
 		if (typeof console[method] !== "function") {
 			throw new Error(`console.${method}() is not a function`);
 		}
 
-		Logger.#beforeLogHook?.();
-		(console[method] as (...args: unknown[]) => unknown).apply(console, args);
-		Logger.#afterLogHook?.();
+		if (
+			LOGGER_LEVELS[this.loggerLevel] >=
+			LOGGER_LEVELS[consoleMethodToLoggerLevel(method)]
+		) {
+			Logger.#beforeLogHook?.();
+			// eslint-disable-next-line no-console -- Logger implementation must use console directly
+			(console[method] as (...args: unknown[]) => unknown).apply(console, args);
+			Logger.#afterLogHook?.();
+		}
 	}
 
 	get once() {
@@ -134,18 +213,24 @@ export class Logger {
 		}
 	}
 
-	private doLog(messageLevel: Exclude<LoggerLevel, "none">, args: unknown[]) {
-		const message = this.formatMessage(messageLevel, format(...args));
+	private doLog(
+		messageLevel: Exclude<LoggerLevel, "none">,
+		args: unknown[] | string
+	) {
+		const message = Array.isArray(args)
+			? this.formatMessage(messageLevel, format(...args))
+			: args;
 
 		// unless in unit-tests, send ALL logs to the debug log file (even non-debug logs for context & order)
-		const inUnitTests = typeof vitest !== "undefined";
-		if (!inUnitTests) {
+		// users can opt out of disk logging entirely by setting WRANGLER_WRITE_LOGS=false (or "0")
+		if (shouldLogToDisk()) {
 			void appendToDebugLogFile(messageLevel, message);
 		}
 
 		// only send logs to the terminal if their level is at least the configured log-level
 		if (LOGGER_LEVELS[this.loggerLevel] >= LOGGER_LEVELS[messageLevel]) {
 			Logger.#beforeLogHook?.();
+			// eslint-disable-next-line no-console -- Logger implementation must use console directly
 			console[messageLevel](message);
 			Logger.#afterLogHook?.();
 		}

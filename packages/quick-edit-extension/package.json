@@ -1,5 +1,5 @@
 {
-	"name": "quick-edit-extension",
+	"name": "@cloudflare/quick-edit-extension",
 	"displayName": "Cloudflare Logic",
 	"version": "0.0.1",
 	"private": true,
@@ -10,11 +10,16 @@
 	"publisher": "cloudflare",
 	"browser": "./dist/extension.js",
 	"scripts": {
-		"check:lint": "eslint src --max-warnings=0",
 		"check:type": "tsc",
 		"package-web": "node -r esbuild-register scripts/bundle.ts",
 		"vscode:prepublish": "pnpm run package-web",
 		"watch-web": "pnpm run package-web -- --watch"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-tsconfig": "workspace:^",
+		"@cloudflare/workers-types": "catalog:default",
+		"esbuild": "catalog:default",
+		"esbuild-register": "^3.5.0"
 	},
 	"contributes": {
 		"commands": [
@@ -41,12 +46,6 @@
 	"activationEvents": [
 		"onFileSystem:cfs"
 	],
-	"devDependencies": {
-		"@cloudflare/workers-tsconfig": "workspace:^",
-		"@cloudflare/workers-types": "^4.20250409.0",
-		"esbuild": "catalog:default",
-		"esbuild-register": "^3.5.0"
-	},
 	"engines": {
 		"vscode": "^1.76.0"
 	},

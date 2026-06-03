@@ -1,33 +1,118 @@
-import events from "node:events";
 import path from "node:path";
+import { runInTempDir, seed } from "@cloudflare/workers-utils/test-helpers";
 import dedent from "ts-dedent";
-import { describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { ConfigController } from "../../../api/startDevWorker/ConfigController";
 import { unwrapHook } from "../../../api/startDevWorker/utils";
+import { logger } from "../../../logger";
+import { FakeBus } from "../../helpers/fake-bus";
 import { mockAccountId, mockApiToken } from "../../helpers/mock-account-id";
 import { mockConsoleMethods } from "../../helpers/mock-console";
-import { runInTempDir } from "../../helpers/run-in-tmp";
-import { seed } from "../../helpers/seed";
-import type { ConfigUpdateEvent, StartDevWorkerInput } from "../../../api";
-
-async function waitForConfigUpdate(
-	controller: ConfigController
-): Promise<ConfigUpdateEvent> {
-	const [event] = await events.once(controller, "configUpdate");
-	return event;
-}
+import { runWrangler } from "../../helpers/run-wrangler";
 
 describe("ConfigController", () => {
 	runInTempDir();
-	mockConsoleMethods();
+	const std = mockConsoleMethods();
 	mockAccountId();
 	mockApiToken();
 
-	it("should emit configUpdate events with defaults applied", async () => {
-		const controller = new ConfigController();
-		const event = waitForConfigUpdate(controller);
+	// We are not using `test.extend` or `onTestFinished` helpers here to create and tear down
+	// the controller because these run the teardown after all the `afterEach()` blocks have run.
+	// This means that the controller doesn't get torn down until after the temporary directory has been
+	// removed.
+	// And so the file watchers that the controller creates can randomly fail because they are trying to
+	// watch files in a directory that no longer exists.
+	// By doing it ourselves in `beforeEach()` and `afterEach()` we can ensure the controller
+	// is torn down before the temporary directory is removed.
+	let bus: FakeBus;
+	let controller: ConfigController;
+	beforeEach(() => {
+		bus = new FakeBus();
+		controller = new ConfigController(bus);
+		logger.loggerLevel = "debug";
+	});
+	afterEach(async () => {
+		logger.debug("tearing down");
+		await controller.teardown();
+		logger.debug("teardown complete");
+		logger.resetLoggerLevel();
+	});
+
+	it("should prompt user to update types if they're out of date", async ({
+		expect,
+	}) => {
 		await seed({
-			"src/index.ts": dedent/* javascript */ `
+			"src/index.ts": dedent /* javascript */ `
+				export default {}
+			`,
+			"wrangler.toml": dedent /* toml */ `
+				name = "my-worker"
+				main = "src/index.ts"
+				compatibility_date = \"2024-06-01\"
+			`,
+		});
+		await runWrangler("types");
+		await controller.set({ config: "./wrangler.toml" });
+
+		await seed({
+			"wrangler.toml": dedent /* toml */ `
+				name = "my-worker"
+				main = "src/index.ts"
+				compatibility_date = \"2025-06-01\"
+		    `,
+		});
+		await controller.set({ config: "./wrangler.toml" });
+
+		await vi.waitFor(() => {
+			expect(std.out).toContain("Your types might be out of date.");
+		});
+	});
+
+	it("should use account_id from config file before env var", async ({
+		expect,
+	}) => {
+		await seed({
+			"src/index.ts": dedent /* javascript */ `
+                export default {}
+            `,
+			"wrangler.toml": dedent /* toml */ `
+                name = "my-worker"
+                main = "src/index.ts"
+				compatibility_date = \"2024-06-01\"
+            `,
+		});
+
+		await controller.set({ config: "./wrangler.toml" });
+		await expect(
+			unwrapHook(controller.latestConfig?.dev.auth)
+		).resolves.toMatchObject({
+			accountId: "some-account-id",
+			apiToken: { apiToken: "some-api-token" },
+		});
+
+		await seed({
+			"wrangler.toml": dedent /* toml */ `
+                name = "my-worker"
+                main = "src/index.ts"
+								compatibility_date = \"2024-06-01\"
+                account_id = "1234567890"
+            `,
+		});
+		await controller.set({ config: "./wrangler.toml" });
+		await expect(
+			unwrapHook(controller.latestConfig?.dev.auth)
+		).resolves.toMatchObject({
+			accountId: "1234567890",
+			apiToken: { apiToken: "some-api-token" },
+		});
+	});
+
+	it("should emit configUpdate events with defaults applied", async ({
+		expect,
+	}) => {
+		const event = bus.waitFor("configUpdate");
+		await seed({
+			"src/index.ts": dedent /* javascript */ `
 				export default {
 					fetch(request, env, ctx) {
 						return new Response("hello world")
@@ -35,11 +120,10 @@ describe("ConfigController", () => {
 				} satisfies ExportedHandler
 			`,
 		});
-		const config: StartDevWorkerInput = {
-			entrypoint: "src/index.ts",
-		};
 
-		await controller.set(config);
+		await controller.set({
+			entrypoint: "src/index.ts",
+		});
 
 		await expect(event).resolves.toMatchObject({
 			type: "configUpdate",
@@ -57,11 +141,12 @@ describe("ConfigController", () => {
 		});
 	});
 
-	it("should apply module root to parent if main is nested from base_dir", async () => {
-		const controller = new ConfigController();
-		const event = waitForConfigUpdate(controller);
+	it("should apply module root to parent if main is nested from base_dir", async ({
+		expect,
+	}) => {
+		const event = bus.waitFor("configUpdate");
 		await seed({
-			"some/base_dir/nested/index.js": dedent/* javascript */ `
+			"some/base_dir/nested/index.js": dedent /* javascript */ `
 				export default {
 					fetch(request, env, ctx) {
 						return new Response("hello world")
@@ -70,12 +155,11 @@ describe("ConfigController", () => {
 			`,
 			"wrangler.toml": dedent`
 				main = \"./some/base_dir/nested/index.js\"
-base_dir = \"./some/base_dir\"`,
+				compatibility_date = \"2024-06-01\"
+				base_dir = \"./some/base_dir\"`,
 		});
 
-		const config: StartDevWorkerInput = {};
-
-		await controller.set(config);
+		await controller.set({});
 
 		await expect(event).resolves.toMatchObject({
 			type: "configUpdate",
@@ -92,11 +176,11 @@ base_dir = \"./some/base_dir\"`,
 			},
 		});
 	});
-	it("should shallow merge patched config", async () => {
-		const controller = new ConfigController();
-		const event1 = waitForConfigUpdate(controller);
+
+	it("should shallow merge patched config", async ({ expect }) => {
+		const event1 = bus.waitFor("configUpdate");
 		await seed({
-			"src/index.ts": dedent/* javascript */ `
+			"src/index.ts": dedent /* javascript */ `
 				export default {
 					fetch(request, env, ctx) {
 						return new Response("hello world")
@@ -104,11 +188,10 @@ base_dir = \"./some/base_dir\"`,
 				} satisfies ExportedHandler
 			`,
 		});
-		const config: StartDevWorkerInput = {
-			entrypoint: "src/index.ts",
-		};
 
-		await controller.set(config);
+		await controller.set({
+			entrypoint: "src/index.ts",
+		});
 
 		await expect(event1).resolves.toMatchObject({
 			type: "configUpdate",
@@ -125,7 +208,7 @@ base_dir = \"./some/base_dir\"`,
 			},
 		});
 
-		const event2 = waitForConfigUpdate(controller);
+		const event2 = bus.waitFor("configUpdate");
 		await controller.patch({
 			dev: {
 				remote: true,
@@ -154,7 +237,7 @@ base_dir = \"./some/base_dir\"`,
 			},
 		});
 
-		const event3 = waitForConfigUpdate(controller);
+		const event3 = bus.waitFor("configUpdate");
 		await controller.patch({
 			dev: {
 				origin: { hostname: "myexample.com" },
@@ -186,41 +269,52 @@ base_dir = \"./some/base_dir\"`,
 		});
 	});
 
-	it("should use account_id from config file before env var", async () => {
-		const controller = new ConfigController();
+	it("should only log warnings once even with multiple config updates", async ({
+		expect,
+	}) => {
 		await seed({
-			"src/index.ts": dedent/* javascript */ `
-                export default {}
-            `,
-			"wrangler.toml": dedent/* toml */ `
-                name = "my-worker"
-                main = "src/index.ts"
-            `,
+			"src/index.js": dedent /* javascript */ `
+				addEventListener('fetch', event => {
+					event.respondWith(new Response('hello world'))
+				})
+			`,
+			"wrangler.toml": dedent /* toml */ `
+				name = "my-worker"
+				main = "src/index.js"
+				compatibility_date = "2024-06-01"
+
+				[[analytics_engine_datasets]]
+				binding = "ANALYTICS"
+				dataset = "analytics_dataset"
+			`,
 		});
 
-		const event = waitForConfigUpdate(controller);
-		await controller.set({ config: "./wrangler.toml" });
-
-		const { config } = await event;
-		await expect(unwrapHook(config.dev.auth)).resolves.toMatchObject({
-			accountId: "some-account-id",
-			apiToken: { apiToken: "some-api-token" },
+		const event1 = bus.waitFor("configUpdate");
+		await controller.set({
+			config: "./wrangler.toml",
 		});
+		await event1;
 
-		const event2 = waitForConfigUpdate(controller);
-		await seed({
-			"wrangler.toml": dedent/* toml */ `
-                name = "my-worker"
-                main = "src/index.ts"
-                account_id = "1234567890"
-            `,
+		const event2 = bus.waitFor("configUpdate");
+		await controller.patch({
+			dev: { liveReload: true },
 		});
-		await controller.set({ config: "./wrangler.toml" }); // no file watching during tests
+		await event2;
 
-		const { config: config2 } = await event2;
-		await expect(unwrapHook(config2.dev.auth)).resolves.toMatchObject({
-			accountId: "1234567890",
-			apiToken: { apiToken: "some-api-token" },
+		const event3 = bus.waitFor("configUpdate");
+		await controller.patch({
+			dev: { server: { port: 8787 } },
 		});
+		await event3;
+
+		const warningCount = std.warn
+			.split("\n")
+			.filter((line) =>
+				line.includes(
+					"Analytics Engine is not supported locally when using the service-worker format"
+				)
+			).length;
+
+		expect(warningCount).toBe(1);
 	});
 });

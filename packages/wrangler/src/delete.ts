@@ -1,18 +1,14 @@
-import assert from "assert";
+import assert from "node:assert";
+import { configFileName, UserError } from "@cloudflare/workers-utils";
 import { fetchResult } from "./cfetch";
-import { configFileName, readConfig } from "./config";
+import { createCommand } from "./core/create-command";
 import { confirm } from "./dialogs";
-import { UserError } from "./errors";
 import { deleteKVNamespace, listKVNamespaces } from "./kv/helpers";
 import { logger } from "./logger";
 import * as metrics from "./metrics";
 import { requireAuth } from "./user";
 import { getScriptName } from "./utils/getScriptName";
-import { printWranglerBanner } from "./wrangler-banner";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "./yargs-types";
+import type { ComplianceConfig } from "@cloudflare/workers-utils";
 
 // Types returned by the /script/{name}/references API
 type ServiceReference = {
@@ -35,6 +31,7 @@ export type ServiceReferenceResponse = {
 	services?: {
 		incoming: ServiceReference[];
 		outgoing: ServiceReference[];
+		pages_function?: boolean;
 	};
 	durable_objects?: DurableObjectServiceReference[];
 	dispatch_outbounds?: DispatchOutboundsServiceReference[];
@@ -61,112 +58,123 @@ export type Tail = {
 	modified_on: string;
 };
 
-export function deleteOptions(yargs: CommonYargsArgv) {
-	return yargs
-		.positional("script", {
+export const deleteCommand = createCommand({
+	metadata: {
+		description: "🗑️ Delete a Worker from Cloudflare",
+		owner: "Workers: Authoring and Testing",
+		status: "stable",
+		category: "Compute & AI",
+	},
+	args: {
+		script: {
 			describe: "The path to an entry point for your worker",
 			type: "string",
 			requiresArg: true,
-		})
-		.option("name", {
+			// TODO: the script argument is meaningless for the delete command, we haven't removed it as that could be
+			//       considered a breaking change, we should do so in the next major Wrangler release
+			hidden: true,
+		},
+		name: {
 			describe: "Name of the worker",
 			type: "string",
 			requiresArg: true,
-		})
-		.option("dry-run", {
+		},
+		"dry-run": {
 			describe: "Don't actually delete",
 			type: "boolean",
-		})
-		.option("force", {
+		},
+		force: {
 			describe:
 				"Delete even if doing so will break other Workers that depend on this one",
 			type: "boolean",
-		})
-		.option("legacy-env", {
+		},
+		"legacy-env": {
 			type: "boolean",
 			describe: "Use legacy environments",
 			hidden: true,
-		});
-}
-
-type DeleteArgs = StrictYargsOptionsToInterface<typeof deleteOptions>;
-
-export async function deleteHandler(args: DeleteArgs) {
-	await printWranglerBanner();
-
-	const config = readConfig(args);
-	if (config.pages_build_output_dir) {
-		throw new UserError(
-			"It looks like you've run a Workers-specific command in a Pages project.\n" +
-				"For Pages, please run `wrangler pages project delete` instead.",
-			{ telemetryMessage: true }
+		},
+	},
+	positionalArgs: ["name"],
+	async handler(args, { config }) {
+		if (config.pages_build_output_dir) {
+			throw new UserError(
+				"It looks like you've run a Workers-specific command in a Pages project.\n" +
+					"For Pages, please run `wrangler pages project delete` instead.",
+				{ telemetryMessage: "delete command pages project mismatch" }
+			);
+		}
+		metrics.sendMetricsEvent(
+			"delete worker script",
+			{},
+			{ sendMetrics: config.send_metrics }
 		);
-	}
-	metrics.sendMetricsEvent(
-		"delete worker script",
-		{},
-		{ sendMetrics: config.send_metrics }
-	);
 
-	const accountId = args.dryRun ? undefined : await requireAuth(config);
+		const accountId = args.dryRun ? undefined : await requireAuth(config);
 
-	const scriptName = getScriptName(args, config);
-	if (!scriptName) {
-		throw new UserError(
-			`A worker name must be defined, either via --name, or in your ${configFileName(config.configPath)} file`,
-			{
-				telemetryMessage:
-					"`A worker name must be defined, either via --name, or in your config file",
-			}
-		);
-	}
+		const scriptName = getScriptName(args, config);
+		if (!scriptName) {
+			throw new UserError(
+				`A worker name must be defined, either via --name, or in your ${configFileName(config.configPath)} file`,
+				{
+					telemetryMessage:
+						"`A worker name must be defined, either via --name, or in your config file",
+				}
+			);
+		}
 
-	if (args.dryRun) {
-		logger.log(`--dry-run: exiting now.`);
-		return;
-	}
-
-	assert(accountId, "Missing accountId");
-
-	const confirmed =
-		args.force ||
-		(await confirm(
-			`Are you sure you want to delete ${scriptName}? This action cannot be undone.`
-		));
-
-	if (confirmed) {
-		const needsForceDelete =
-			args.force ||
-			(await checkAndConfirmForceDeleteIfNecessary(scriptName, accountId));
-		if (needsForceDelete === null) {
-			// null means the user rejected the extra confirmation - return early
+		if (args.dryRun) {
+			logger.log(`--dry-run: exiting now.`);
 			return;
 		}
 
-		await fetchResult(
-			`/accounts/${accountId}/workers/services/${scriptName}`,
-			{ method: "DELETE" },
-			new URLSearchParams({ force: needsForceDelete.toString() })
-		);
+		assert(accountId, "Missing accountId");
 
-		await deleteSiteNamespaceIfExisting(scriptName, accountId);
+		const confirmed =
+			args.force ||
+			(await confirm(
+				`Are you sure you want to delete ${scriptName}? This action cannot be undone.`
+			));
 
-		logger.log("Successfully deleted", scriptName);
-	}
-}
+		if (confirmed) {
+			const needsForceDelete =
+				args.force ||
+				(await checkAndConfirmForceDeleteIfNecessary(
+					config,
+					scriptName,
+					accountId
+				));
+			if (needsForceDelete === null) {
+				// null means the user rejected the extra confirmation - return early
+				return;
+			}
+
+			await fetchResult(
+				config,
+				`/accounts/${accountId}/workers/services/${scriptName}`,
+				{ method: "DELETE" },
+				new URLSearchParams({ force: needsForceDelete.toString() })
+			);
+
+			await deleteSiteNamespaceIfExisting(config, scriptName, accountId);
+
+			logger.log("Successfully deleted", scriptName);
+		}
+	},
+});
 
 async function deleteSiteNamespaceIfExisting(
+	complianceConfig: ComplianceConfig,
 	scriptName: string,
 	accountId: string
 ): Promise<void> {
 	const title = `__${scriptName}-workers_sites_assets`;
 	const previewTitle = `__${scriptName}-workers_sites_assets_preview`;
-	const allNamespaces = await listKVNamespaces(accountId);
+	const allNamespaces = await listKVNamespaces(complianceConfig, accountId);
 	const namespacesToDelete = allNamespaces.filter(
 		(ns) => ns.title === title || ns.title === previewTitle
 	);
 	for (const ns of namespacesToDelete) {
-		await deleteKVNamespace(accountId, ns.id);
+		await deleteKVNamespace(complianceConfig, accountId, ns.id);
 		logger.log(`🌀 Deleted asset namespace for Workers Site "${ns.title}"`);
 	}
 }
@@ -196,6 +204,10 @@ function isUsedAsServiceBinding(references: ServiceReferenceResponse) {
 	return (references.services?.incoming.length || 0) > 0;
 }
 
+function isUsedByPagesFunction(references: ServiceReferenceResponse) {
+	return references.services?.pages_function === true;
+}
+
 function isUsedAsDurableObjectNamespace(
 	references: ServiceReferenceResponse,
 	scriptName: string
@@ -215,17 +227,21 @@ function isUsedAsTailConsumer(tailProducers: Tail[]) {
 }
 
 async function checkAndConfirmForceDeleteIfNecessary(
+	complianceConfig: ComplianceConfig,
 	scriptName: string,
 	accountId: string
 ): Promise<boolean | null> {
 	const references = await fetchResult<ServiceReferenceResponse>(
+		complianceConfig,
 		`/accounts/${accountId}/workers/scripts/${scriptName}/references`
 	);
 	const tailProducers = await fetchResult<Tail[]>(
+		complianceConfig,
 		`/accounts/${accountId}/workers/tails/by-consumer/${scriptName}`
 	);
 	const isDependentService =
 		isUsedAsServiceBinding(references) ||
+		isUsedByPagesFunction(references) ||
 		isUsedAsDurableObjectNamespace(references, scriptName) ||
 		isUsedAsDispatchOutbound(references) ||
 		isUsedAsTailConsumer(tailProducers);
@@ -238,6 +254,11 @@ async function checkAndConfirmForceDeleteIfNecessary(
 		const dependentScript = renderScriptName(serviceBindingReference);
 		dependentMessages.push(
 			`- Worker ${dependentScript} uses this Worker as a Service Binding`
+		);
+	}
+	if (isUsedByPagesFunction(references)) {
+		dependentMessages.push(
+			`- A Pages project has a Service Binding to this Worker`
 		);
 	}
 	for (const implementedDOBindingReference of references.durable_objects ||

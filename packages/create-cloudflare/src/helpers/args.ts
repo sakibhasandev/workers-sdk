@@ -1,4 +1,4 @@
-import { inputPrompt } from "@cloudflare/cli/interactive";
+import { inputPrompt } from "@cloudflare/cli-shared-helpers/interactive";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { version } from "../../package.json";
@@ -10,7 +10,7 @@ import {
 	getOtherTemplateMap,
 } from "../templates";
 import { C3_DEFAULTS, WRANGLER_DEFAULTS } from "./cli";
-import type { PromptConfig } from "@cloudflare/cli/interactive";
+import type { PromptConfig } from "@cloudflare/cli-shared-helpers/interactive";
 import type { C3Args } from "types";
 import type { Argv } from "yargs";
 
@@ -44,7 +44,7 @@ export type ArgumentsDefinition = {
 
 export const cliDefinition: ArgumentsDefinition = {
 	intro: `
-    The create-cloudflare cli (also known as C3) is a command-line tool designed to help you set up and deploy new applications to Cloudflare. In addition to speed, it leverages officially developed templates for Workers and framework-specific setup guides to ensure each new application that you set up follows Cloudflare and any third-party best practices for deployment on the Cloudflare network.
+    The create-cloudflare CLI (also known as C3) is a command-line tool designed to help you set up and deploy new applications to Cloudflare. In addition to speed, it leverages officially developed templates for Workers and framework-specific setup guides to ensure each new application that you set up follows Cloudflare and any third-party best practices for deployment on the Cloudflare network.
   `,
 	positionals: [
 		{
@@ -69,8 +69,18 @@ export const cliDefinition: ArgumentsDefinition = {
 			description: `Specifies the kind of templates that should be created`,
 			values(args) {
 				const experimental = Boolean(args?.["experimental"]);
+				const platform = args?.["platform"] as string | undefined;
 				if (experimental) {
 					return [{ name: "web-framework", description: "Framework Starter" }];
+				} else if (platform === "pages") {
+					// Only framework starters can produce Pages projects
+					return [
+						{ name: "web-framework", description: "Framework Starter" },
+						{
+							name: "remote-template",
+							description: "Template from a GitHub repo",
+						},
+					];
 				} else {
 					return [
 						{ name: "hello-world", description: "Hello World Starter" },
@@ -109,18 +119,18 @@ export const cliDefinition: ArgumentsDefinition = {
 			requiresArg: true,
 			description: `The type of framework to use to create a web application (when using this option "--category" is coerced to "web-framework")
 
-      When using the --framework option, C3 will dispatch to the official creation tool used by the framework (ex. "create-remix" is used for Remix).
+      When using the --framework option, C3 will dispatch to the official creation tool used by the framework (e.g. "create-astro" is used for Astro).
 
       You may specify additional arguments to be passed directly to these underlying tools by adding them after a "--" argument, like so:
 
-      npm create cloudflare -- --framework next -- --ts
-      pnpm create cloudflare --framework next -- --ts
+      npm create cloudflare -- --framework svelte -- --types=ts
+      pnpm create cloudflare --framework svelte -- --types=ts
       `,
 			values: (args) =>
 				getNamesAndDescriptions(
 					getFrameworkMap({
 						experimental: Boolean(args?.["experimental"]),
-					}),
+					})
 				),
 		},
 		{
@@ -139,6 +149,12 @@ export const cliDefinition: ArgumentsDefinition = {
 						"Create a web application that can be deployed to Pages.",
 				},
 			],
+			requiresArg: true,
+		},
+		{
+			name: "variant",
+			type: "string",
+			description: `The variant of the framework to use. This is only applicable for certain frameworks that support multiple variants (e.g. React with TypeScript, TypeScript + SWC, JavaScript, JavaScript + SWC).`,
 			requiresArg: true,
 		},
 		{
@@ -162,6 +178,12 @@ export const cliDefinition: ArgumentsDefinition = {
 			name: "git",
 			type: "boolean",
 			description: "Initialize a local git repository for your application",
+		},
+		{
+			name: "agents",
+			type: "boolean",
+			description:
+				"Add an AGENTS.md file to provide AI coding agents with guidance for the Cloudflare platform",
 		},
 		{
 			name: "open",
@@ -200,6 +222,29 @@ export const cliDefinition: ArgumentsDefinition = {
         `,
 		},
 		{
+			name: "template-mode",
+			type: "string",
+			requiresArg: true,
+			description: `The mechanism to use when fetching the template.
+
+        Can be either "git" or "tar". "tar" does not support fetching from private
+				repositories. By default, degit will use "tar" if the template is hosted on GitHub, BitBucket, GitLab, or git.sr.ht.
+				Otherwise, it will use "git".
+        `,
+			values: [
+				{
+					name: "git",
+					description:
+						"Use git to fetch the template. Supports private repositories.",
+				},
+				{
+					name: "tar",
+					description:
+						"Use tar to fetch the template. Only supported on public repositories hosted on GitHub, BitBucket, GitLab, or git.sr.ht.",
+				},
+			],
+		},
+		{
 			name: "accept-defaults",
 			alias: "y",
 			type: "boolean",
@@ -229,7 +274,7 @@ export const cliDefinition: ArgumentsDefinition = {
 };
 
 export const parseArgs = async (
-	argv: string[],
+	argv: string[]
 ): Promise<
 	| {
 			type: "default";
@@ -249,7 +294,7 @@ export const parseArgs = async (
 	const doubleDashesIdx = argv.indexOf("--");
 	const c3Args = argv.slice(
 		0,
-		doubleDashesIdx < 0 ? undefined : doubleDashesIdx,
+		doubleDashesIdx < 0 ? undefined : doubleDashesIdx
 	);
 	const additionalArgs =
 		doubleDashesIdx < 0 ? [] : argv.slice(doubleDashesIdx + 1);
@@ -382,7 +427,7 @@ const camelize = (str: string) => str.replace(/-./g, (x) => x[1].toUpperCase());
 export const processArgument = async <Key extends keyof C3Args>(
 	args: Partial<C3Args>,
 	key: Key,
-	promptConfig: PromptConfig,
+	promptConfig: PromptConfig
 ) => {
 	return await reporter.collectAsyncMetrics({
 		eventPrefix: "c3 prompt",
@@ -396,7 +441,11 @@ export const processArgument = async <Key extends keyof C3Args>(
 		disableTelemetry: args[key] !== undefined,
 		async promise() {
 			const value = args[key];
-			const error = promptConfig.validate?.(value) ?? null;
+			const validationResult = promptConfig.validate?.(value);
+			const error =
+				validationResult instanceof Error
+					? validationResult.message
+					: (validationResult ?? null);
 			const result = await inputPrompt<Required<C3Args>[Key]>({
 				...promptConfig,
 				// Accept the default value if the arg is already set

@@ -1,91 +1,45 @@
-import { applyCommand, applyCommandOptionalYargs } from "./apply";
-import { buildCommand, buildYargs, pushCommand, pushYargs } from "./build";
-import { handleFailure } from "./common";
-import { createCommand, createCommandOptionalYargs } from "./create";
-import { curlCommand, yargsCurl } from "./curl";
-import { deleteCommand, deleteCommandOptionalYargs } from "./delete";
-import { registriesCommand } from "./images/images";
-import { imagesCommand } from "./images/list";
-import { listCommand, listDeploymentsYargs } from "./list";
-import { modifyCommand, modifyCommandOptionalYargs } from "./modify";
-import { sshCommand } from "./ssh/ssh";
-import type { CommonYargsArgvJSON, CommonYargsOptions } from "../yargs-types";
-import type { CommandModule } from "yargs";
+import { createNamespace } from "../core/create-command";
 
-function internalCommands(args: CommonYargsArgvJSON) {
-	try {
-		// Add dynamically an internal module that we can attach internal commands
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
-		const cloudchamberInternalRequireEntry = require("./internal/index");
-		return cloudchamberInternalRequireEntry.internalCommands(args);
-	} catch {
-		return args;
-	}
-}
+// --- Namespace definition ---
+export const cloudchamberNamespace = createNamespace({
+	metadata: {
+		description: "Manage Cloudchamber",
+		status: "alpha",
+		owner: "Product: Cloudchamber",
+		hidden: true,
+	},
+});
 
-export const cloudchamber = (
-	yargs: CommonYargsArgvJSON,
-	subHelp: CommandModule<CommonYargsOptions, CommonYargsOptions>
-) => {
-	yargs = internalCommands(yargs);
-	return yargs
-		.command(
-			"delete [deploymentId]",
-			"Delete an existing deployment that is running in the Cloudflare edge",
-			(args) => deleteCommandOptionalYargs(args),
-			(args) => handleFailure(deleteCommand)(args)
-		)
-		.command(
-			"create",
-			"Create a new deployment",
-			(args) => createCommandOptionalYargs(args),
-			(args) => handleFailure(createCommand)(args)
-		)
-		.command(
-			"list [deploymentIdPrefix]",
-			"List and view status of deployments",
-			(args) => listDeploymentsYargs(args),
-			(args) => handleFailure(listCommand)(args)
-		)
-		.command(
-			"modify [deploymentId]",
-			"Modify an existing deployment",
-			(args) => modifyCommandOptionalYargs(args),
-			(args) => handleFailure(modifyCommand)(args)
-		)
-		.command("ssh", "Manage the ssh keys of your account", (args) =>
-			sshCommand(args).command(subHelp)
-		)
-		.command("registries", "Configure registries via Cloudchamber", (args) =>
-			registriesCommand(args).command(subHelp)
-		)
-		.command(
-			"curl <path>",
-			"send a request to an arbitrary cloudchamber endpoint",
-			(args) => yargsCurl(args),
-			(args) => handleFailure(curlCommand)(args)
-		)
-		.command(
-			"apply",
-			"apply the changes in the container applications to deploy",
-			(args) => applyCommandOptionalYargs(args),
-			(args) => handleFailure(applyCommand)(args)
-		)
-		.command(
-			"build [PATH]",
-			"build a dockerfile",
-			(args) => buildYargs(args),
-			(args) => handleFailure(buildCommand)(args)
-		)
-		.command(
-			"push [TAG]",
-			"push a tagged image to a Cloudflare managed registry, which is automatically integrated with your account",
-			(args) => pushYargs(args),
-			(args) => handleFailure(pushCommand)(args)
-		)
-		.command(
-			"images",
-			"perform operations on images in your clouchamber registry",
-			(args) => imagesCommand(args).command(subHelp)
-		);
-};
+// --- Re-export commands from their respective files ---
+export { cloudchamberListCommand } from "./list";
+export { cloudchamberCreateCommand } from "./create";
+export { cloudchamberDeleteCommand } from "./delete";
+export { cloudchamberModifyCommand } from "./modify";
+export { cloudchamberApplyCommand } from "./apply";
+export { cloudchamberCurlCommand } from "./curl";
+
+// Build and push commands
+export { cloudchamberBuildCommand, cloudchamberPushCommand } from "./build";
+
+// SSH subcommands
+export {
+	cloudchamberSshNamespace,
+	cloudchamberSshListCommand,
+	cloudchamberSshCreateCommand,
+} from "./ssh/ssh";
+
+// Registries subcommands
+export {
+	cloudchamberRegistriesNamespace,
+	cloudchamberRegistriesConfigureCommand,
+	cloudchamberRegistriesCredentialsCommand,
+	cloudchamberRegistriesRemoveCommand,
+	cloudchamberRegistriesListCommand,
+} from "./images/registries";
+
+// Images subcommands
+export {
+	cloudchamberImagesNamespace,
+	cloudchamberImagesListCommand,
+	cloudchamberImagesDeleteCommand,
+} from "./images/images";

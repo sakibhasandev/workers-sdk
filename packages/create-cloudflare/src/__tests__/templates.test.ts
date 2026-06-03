@@ -1,288 +1,164 @@
-import { existsSync, statSync } from "fs";
-import { spinner } from "@cloudflare/cli/interactive";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { spinner } from "@cloudflare/cli-shared-helpers/interactive";
 import degit from "degit";
 import { mockSpinner } from "helpers/__tests__/mocks";
+import { readFile, readJSON, writeFile, writeJSON } from "helpers/files";
+import { beforeEach, describe, test, vi } from "vitest";
+import { getAgentsMd } from "../agents-md";
 import {
-	appendFile,
-	directoryExists,
-	readFile,
-	writeFile,
-} from "helpers/files";
-import { beforeEach, describe, expect, test, vi } from "vitest";
-import {
-	addWranglerToGitIgnore,
 	deriveCorrelatedArgs,
 	downloadRemoteTemplate,
+	updatePackageName,
+	writeAgentsMd,
 } from "../templates";
-import type { PathLike } from "fs";
 import type { C3Args, C3Context } from "types";
+import type { Mock } from "vitest";
 
 vi.mock("degit");
 vi.mock("fs");
 vi.mock("helpers/files");
-vi.mock("@cloudflare/cli/interactive");
-
-beforeEach(() => {
-	mockSpinner();
-});
-
-describe("addWranglerToGitIgnore", () => {
-	const writeFileResults: {
-		file: string | undefined;
-		content: string | undefined;
-	} = { file: undefined, content: undefined };
-	const appendFileResults: {
-		file: string | undefined;
-		content: string | undefined;
-	} = { file: undefined, content: undefined };
-
-	beforeEach(() => {
-		vi.mocked(writeFile).mockImplementation((file: string, content: string) => {
-			writeFileResults.file = file;
-			writeFileResults.content = content;
-		});
-		vi.mocked(appendFile).mockImplementation(
-			(file: string, content: string) => {
-				appendFileResults.file = file;
-				appendFileResults.content = content;
-			},
-		);
-	});
-
-	beforeEach(() => {
-		vi.mocked(statSync).mockImplementation(
-			// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-			// @ts-ignore
-			(path: string) => ({
-				isDirectory() {
-					return path.endsWith(".git");
-				},
-			}),
-		);
-		vi.mocked(existsSync).mockReset();
-		vi.mocked(readFile).mockReset();
-		vi.mocked(directoryExists).mockReset();
-		appendFileResults.file = undefined;
-		appendFileResults.content = undefined;
-		writeFileResults.file = undefined;
-		writeFileResults.content = undefined;
-	});
-
-	test("should append the wrangler section to a standard gitignore file", () => {
-		mockGitIgnore(
-			"my-project/.gitignore",
-			`
-      node_modules
-      .vscode`,
-		);
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		expect(appendFileResults.file).toMatchInlineSnapshot(
-			`"my-project/.gitignore"`,
-		);
-		expect(appendFileResults.content).toMatchInlineSnapshot(`
-			"
-
-			# wrangler files
-			.wrangler
-			.dev.vars*
-			"
-		`);
-	});
-
-	test("should not touch the gitignore file if it already contains all wrangler files", () => {
-		mockGitIgnore(
-			"my-project/.gitignore",
-			`
-      node_modules
-      .dev.vars
-      .vscode
-      .wrangler
-    `,
-		);
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		expect(appendFileResults.file).toBeUndefined();
-		expect(appendFileResults.content).toBeUndefined();
-	});
-
-	test("should not touch the gitignore file if contains all wrangler files (and can cope with comments)", () => {
-		mockGitIgnore(
-			"my-project/.gitignore",
-			`
-      node_modules
-      .wrangler # This is for wrangler
-      .dev.vars # this is for wrangler and getPlatformProxy
-      .vscode
-    `,
-		);
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		expect(appendFileResults.file).toBeUndefined();
-		expect(appendFileResults.content).toBeUndefined();
-	});
-
-	test("should append to the gitignore file the missing wrangler files when some is already present (without including the section heading)", () => {
-		mockGitIgnore(
-			"my-project/.gitignore",
-			`
-      node_modules
-      .dev.vars
-      .vscode`,
-		);
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		expect(appendFileResults.file).toMatchInlineSnapshot(
-			`"my-project/.gitignore"`,
-		);
-		expect(appendFileResults.content).toMatchInlineSnapshot(`
-			"
-
-			.wrangler
-			"
-		`);
-	});
-
-	test("when it appends to the gitignore file it doesn't include an empty line only if there was one already", () => {
-		mockGitIgnore(
-			"my-project/.gitignore",
-			`
-      node_modules
-      .dev.vars
-      .vscode
-
-    `,
-		);
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		expect(appendFileResults.file).toMatchInlineSnapshot(
-			`"my-project/.gitignore"`,
-		);
-		expect(appendFileResults.content).toMatchInlineSnapshot(`
-			"
-			.wrangler
-			"
-		`);
-	});
-
-	test("should create the gitignore file if it didn't exist already", () => {
-		// let's mock a gitignore file to be read by readFile
-		mockGitIgnore("my-project/.gitignore", "");
-		// but let's pretend that it doesn't exist
-		vi.mocked(existsSync).mockImplementation(() => false);
-		// let's also pretend that the .git directory exists
-		vi.mocked(directoryExists).mockImplementation(() => true);
-
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		// writeFile wrote the (empty) gitignore file
-		expect(writeFileResults.file).toMatchInlineSnapshot(
-			`"my-project/.gitignore"`,
-		);
-		expect(writeFileResults.content).toMatchInlineSnapshot(`""`);
-
-		// and the correct lines were then added to it
-		expect(appendFileResults.file).toMatchInlineSnapshot(
-			`"my-project/.gitignore"`,
-		);
-		expect(appendFileResults.content).toMatchInlineSnapshot(`
-			"
-
-			# wrangler files
-			.wrangler
-			.dev.vars*
-			"
-		`);
-	});
-
-	test("should not create the gitignore file the project doesn't use git", () => {
-		// no .gitignore file exists
-		vi.mocked(existsSync).mockImplementation(() => false);
-		// neither a .git directory does
-		vi.mocked(directoryExists).mockImplementation(() => false);
-
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		expect(writeFileResults.file).toBeUndefined();
-		expect(writeFileResults.content).toBeUndefined();
-	});
-
-	test("should not add the .wrangler entry if a .wrangler/ is already included)", () => {
-		mockGitIgnore(
-			"my-project/.gitignore",
-			`
-      node_modules
-      .wrangler/ # This is for wrangler
-      .vscode
-    `,
-		);
-		addWranglerToGitIgnore({
-			project: { path: "my-project" },
-		} as unknown as C3Context);
-
-		expect(appendFileResults.file).toMatchInlineSnapshot(
-			`"my-project/.gitignore"`,
-		);
-		expect(appendFileResults.content).toMatchInlineSnapshot(`
-			"
-			.dev.vars*
-			"
-		`);
-	});
-
-	function mockGitIgnore(path: string, content: string) {
-		vi.mocked(existsSync).mockImplementation(
-			(filePath: PathLike) => filePath === path,
-		);
-		vi.mocked(readFile).mockImplementation((filePath: string) =>
-			filePath === path ? content.replace(/\n\s*/g, "\n") : "",
-		);
-	}
-});
+vi.mock("@cloudflare/cli-shared-helpers/interactive");
 
 describe("downloadRemoteTemplate", () => {
-	function mockDegit() {
-		// @ts-expect-error only clone will be used
-		return vi.mocked(degit).mockReturnValue({
-			clone: () => Promise.resolve(),
-		});
-	}
+	let cloneMock: Mock;
 
-	test("should download template using degit", async () => {
-		const mock = mockDegit();
-
-		await downloadRemoteTemplate("cloudflare/workers-sdk");
-
-		expect(mock).toBeCalled();
+	beforeEach(() => {
+		cloneMock = vi.fn().mockResolvedValue(undefined);
+		vi.mocked(degit).mockReturnValue({
+			clone: cloneMock,
+		} as unknown as ReturnType<typeof degit>);
 	});
 
-	test("should not use a spinner", async () => {
-		// Degit runs `git clone` internally which might prompt for credentials
-		// A spinner will suppress the prompt and keep the CLI waiting in the cloning stage
-		mockDegit();
-
+	test("should download template using degit", async ({ expect }) => {
 		await downloadRemoteTemplate("cloudflare/workers-sdk");
 
-		expect(spinner).not.toBeCalled();
+		expect(degit).toHaveBeenCalled();
+		expect(cloneMock).toHaveBeenCalled();
+	});
+
+	test("should not use a spinner", async ({ expect }) => {
+		// Degit runs `git clone` internally which might prompt for credentials
+		// A spinner will suppress the prompt and keep the CLI waiting in the cloning stage
+		await downloadRemoteTemplate("cloudflare/workers-sdk");
+
+		expect(spinner).not.toHaveBeenCalled();
+	});
+
+	test("should call degit with a mode of undefined if not specified", async ({
+		expect,
+	}) => {
+		await downloadRemoteTemplate("cloudflare/workers-sdk");
+
+		expect(degit).toHaveBeenCalledWith("cloudflare/workers-sdk", {
+			cache: false,
+			verbose: false,
+			force: true,
+			mode: undefined,
+		});
+	});
+
+	test("should call degit with a mode of 'git' if specified", async ({
+		expect,
+	}) => {
+		await downloadRemoteTemplate("cloudflare/workers-sdk", { mode: "git" });
+
+		expect(degit).toHaveBeenCalledWith("cloudflare/workers-sdk", {
+			cache: false,
+			verbose: false,
+			force: true,
+			mode: "git",
+		});
+	});
+
+	test("should clone into the passed folder", async ({ expect }) => {
+		await downloadRemoteTemplate("cloudflare/workers-sdk", {
+			intoFolder: "/path/to/clone",
+		});
+
+		expect(cloneMock).toHaveBeenCalledWith("/path/to/clone");
+	});
+
+	test("should transform GitHub URL without path to degit format", async ({
+		expect,
+	}) => {
+		await downloadRemoteTemplate(
+			"https://github.com/cloudflare/workers-graphql-server"
+		);
+
+		expect(degit).toHaveBeenCalledWith(
+			"github:cloudflare/workers-graphql-server",
+			expect.anything()
+		);
+	});
+
+	test("should transform GitHub URL with trailing slash to degit format", async ({
+		expect,
+	}) => {
+		await downloadRemoteTemplate("https://github.com/cloudflare/workers-sdk/");
+
+		expect(degit).toHaveBeenCalledWith(
+			"github:cloudflare/workers-sdk",
+			expect.anything()
+		);
+	});
+
+	test("should transform GitHub URL with subdirectory to degit format", async ({
+		expect,
+	}) => {
+		await downloadRemoteTemplate(
+			"https://github.com/cloudflare/workers-sdk/templates/worker-r2"
+		);
+
+		expect(degit).toHaveBeenCalledWith(
+			"github:cloudflare/workers-sdk/templates/worker-r2",
+			expect.anything()
+		);
+	});
+
+	test("should transform GitHub URL with tree/main to degit format", async ({
+		expect,
+	}) => {
+		await downloadRemoteTemplate(
+			"https://github.com/cloudflare/workers-sdk/tree/main"
+		);
+
+		expect(degit).toHaveBeenCalledWith(
+			"github:cloudflare/workers-sdk#main",
+			expect.anything()
+		);
+	});
+
+	test("should transform GitHub URL with tree/main/subdirectory to degit format", async ({
+		expect,
+	}) => {
+		await downloadRemoteTemplate(
+			"https://github.com/cloudflare/workers-sdk/tree/main/templates"
+		);
+
+		expect(degit).toHaveBeenCalledWith(
+			"github:cloudflare/workers-sdk/templates#main",
+			expect.anything()
+		);
+	});
+
+	test("should throw error when using a branch other than main", async ({
+		expect,
+	}) => {
+		await expect(
+			downloadRemoteTemplate(
+				"https://github.com/cloudflare/workers-sdk/tree/dev"
+			)
+		).rejects.toThrow(
+			"Failed to clone remote template: https://github.com/cloudflare/workers-sdk/tree/dev\nUse the format \"github:<owner>/<repo>/sub/directory[#<branch>]\" to clone a specific branch other than 'main'"
+		);
 	});
 });
 
 describe("deriveCorrelatedArgs", () => {
-	test("should derive the lang as TypeScript if `--ts` is specified", () => {
+	test("should derive the lang as TypeScript if `--ts` is specified", ({
+		expect,
+	}) => {
 		const args: Partial<C3Args> = {
 			ts: true,
 		};
@@ -292,7 +168,9 @@ describe("deriveCorrelatedArgs", () => {
 		expect(args.lang).toBe("ts");
 	});
 
-	test("should derive the lang as JavaScript if `--ts=false` is specified", () => {
+	test("should derive the lang as JavaScript if `--ts=false` is specified", ({
+		expect,
+	}) => {
 		const args: Partial<C3Args> = {
 			ts: false,
 		};
@@ -302,19 +180,120 @@ describe("deriveCorrelatedArgs", () => {
 		expect(args.lang).toBe("js");
 	});
 
-	test("should crash if both the lang and ts arguments are specified", () => {
+	test("should crash if both the lang and ts arguments are specified", ({
+		expect,
+	}) => {
 		expect(() =>
 			deriveCorrelatedArgs({
 				lang: "ts",
-			}),
+			})
 		).not.toThrow();
 		expect(() =>
 			deriveCorrelatedArgs({
 				ts: true,
 				lang: "ts",
-			}),
+			})
 		).toThrow(
-			"The `--ts` argument cannot be specified in conjunction with the `--lang` argument",
+			"The `--ts` argument cannot be specified in conjunction with the `--lang` argument"
 		);
+	});
+});
+
+describe("updatePackageName", () => {
+	let writeJSONMock: Mock;
+	let writeFileMock: Mock;
+
+	beforeEach(() => {
+		vi.resetAllMocks();
+		mockSpinner();
+		writeJSONMock = vi.mocked(writeJSON);
+		writeFileMock = vi.mocked(writeFile);
+		vi.mocked(readFile).mockReturnValue("");
+	});
+
+	test('should update the "name" field in package.json', ({ expect }) => {
+		const ctx = {
+			project: { path: "my-project", name: "my-project" },
+			args: {},
+		} as unknown as C3Context;
+
+		vi.mocked(readJSON).mockReturnValue({
+			name: "<PACKAGE_NAME>",
+			version: "1.0.0",
+		});
+
+		// There is no `pyproject.toml`
+		vi.mocked(existsSync).mockReturnValue(false);
+
+		updatePackageName(ctx);
+
+		expect(writeJSONMock).toHaveBeenCalledWith(
+			expect.stringContaining("package.json"),
+			expect.objectContaining({ name: "my-project" })
+		);
+	});
+
+	test("it should update pyproject.toml if it exists", ({ expect }) => {
+		const ctx = {
+			project: { path: "my-project", name: "my-project" },
+			args: {},
+		} as unknown as C3Context;
+
+		// There is a `pyproject.toml`
+		vi.mocked(existsSync).mockReturnValue(true);
+
+		vi.mocked(readJSON).mockReturnValue({
+			name: "<PACKAGE_NAME>",
+			version: "1.0.0",
+		});
+
+		vi.mocked(readFile).mockImplementation((path: string) => {
+			if (path.endsWith("pyproject.toml")) {
+				return `[project]
+name = "<PROJECT_NAME>"
+version = "0.1.0"`;
+			}
+			return "";
+		});
+
+		updatePackageName(ctx);
+
+		expect(writeJSONMock).toHaveBeenCalledWith(
+			expect.stringContaining("package.json"),
+			expect.objectContaining({ name: "my-project" })
+		);
+
+		expect(writeFileMock).toHaveBeenCalledWith(
+			expect.stringContaining("pyproject.toml"),
+			expect.stringContaining(`name = "my-project"`)
+		);
+	});
+});
+
+describe("writeAgentsMd", () => {
+	let writeFileMock: Mock;
+
+	beforeEach(() => {
+		vi.resetAllMocks();
+		writeFileMock = vi.mocked(writeFile);
+	});
+
+	test("should write AGENTS.md to the project directory", ({ expect }) => {
+		vi.mocked(existsSync).mockReturnValue(false);
+		const projectPath = join("/path/to/my-project");
+		writeAgentsMd(projectPath);
+
+		expect(writeFileMock).toHaveBeenCalledWith(
+			join(projectPath, "AGENTS.md"),
+			getAgentsMd()
+		);
+	});
+
+	test("should not overwrite existing AGENTS.md", ({ expect }) => {
+		vi.mocked(existsSync).mockReturnValue(true);
+		const projectPath = join("/path/to/my-project");
+		writeAgentsMd(projectPath);
+
+		expect(writeFileMock).not.toHaveBeenCalled();
 	});
 });

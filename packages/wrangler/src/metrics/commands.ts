@@ -1,10 +1,10 @@
+import { getWranglerSendMetricsFromEnv } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import {
 	createAlias,
 	createCommand,
 	createNamespace,
 } from "../core/create-command";
-import { getWranglerSendMetricsFromEnv } from "../environment-variables/misc-variables";
 import { logger } from "../logger";
 import { readMetricsConfig, updateMetricsPermission } from "./metrics-config";
 
@@ -26,6 +26,9 @@ export const telemetryDisableCommand = createCommand({
 		description: "Disable Wrangler telemetry collection",
 		owner: "Workers: Authoring and Testing",
 		status: "stable",
+	},
+	behaviour: {
+		sendMetrics: false,
 	},
 	async handler() {
 		updateMetricsPermission(false);
@@ -61,10 +64,7 @@ export const telemetryStatusCommand = createCommand({
 		const savedConfig = readMetricsConfig();
 		const sendMetricsEnv = getWranglerSendMetricsFromEnv();
 		if (config.send_metrics !== undefined || sendMetricsEnv !== undefined) {
-			const resolvedPermission =
-				sendMetricsEnv !== undefined
-					? sendMetricsEnv === "true"
-					: config.send_metrics;
+			const resolvedPermission = sendMetricsEnv ?? config.send_metrics;
 			logger.log(
 				`Status: ${resolvedPermission ? chalk.green("Enabled") : chalk.red("Disabled")} (set by ${sendMetricsEnv !== undefined ? "environment variable" : "wrangler.toml"})\n`
 			);
@@ -74,7 +74,7 @@ export const telemetryStatusCommand = createCommand({
 		logger.log(
 			"To configure telemetry globally on this machine, you can run `wrangler telemetry disable / enable`.\n" +
 				"You can override this for individual projects with the environment variable `WRANGLER_SEND_METRICS=true/false`.\n" +
-				"Learn more at https://github.com/cloudflare/workers-sdk/tree/main/telemetry.md\n"
+				"Learn more at https://github.com/cloudflare/workers-sdk/tree/main/packages/wrangler/telemetry.md\n"
 		);
 	},
 });

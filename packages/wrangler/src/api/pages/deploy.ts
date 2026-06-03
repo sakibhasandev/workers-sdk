@@ -3,12 +3,17 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path, { join, resolve as resolvePath } from "node:path";
 import { cwd } from "node:process";
-import { File, FormData } from "undici";
+import {
+	COMPLIANCE_REGION_CONFIG_PUBLIC,
+	FatalError,
+	ParseError,
+	parseJSON,
+} from "@cloudflare/workers-utils";
+import { FormData } from "undici";
 import { fetchResult } from "../../cfetch";
 import { readPagesConfig } from "../../config";
 import { shouldCheckFetch } from "../../deployment-bundle/bundle";
 import { validateNodeCompatMode } from "../../deployment-bundle/node-compat";
-import { FatalError } from "../../errors";
 import { logger } from "../../logger";
 import { isNavigatorDefined } from "../../navigator-user-agent";
 import { buildFunctions } from "../../pages/buildFunctions";
@@ -25,13 +30,16 @@ import {
 	produceWorkerBundleForWorkerJSDirectory,
 } from "../../pages/functions/buildWorker";
 import { validateRoutes } from "../../pages/functions/routes-validation";
-import { upload } from "../../pages/upload";
-import { getPagesTmpDir } from "../../pages/utils";
+import { maxFileCountAllowedFromClaims, upload } from "../../pages/upload";
+import { getPagesTmpDir, truncateUtf8Bytes } from "../../pages/utils";
 import { validate } from "../../pages/validate";
 import { createUploadWorkerBundleContents } from "./create-worker-bundle-contents";
-import type { Config } from "../../config";
 import type { BundleResult } from "../../deployment-bundle/bundle";
+import type { RoutesJSONSpec } from "../../pages/functions/routes-transformation";
 import type { Deployment, Project } from "@cloudflare/types";
+import type { Config } from "@cloudflare/workers-utils";
+
+const MAX_COMMIT_MESSAGE_BYTES = 384;
 
 interface PagesDeployOptions {
 	/**
@@ -139,15 +147,15 @@ export async function deploy({
 		_routesCustom = readFileSync(join(directory, "_routes.json"), "utf-8");
 	} catch {}
 
-	try {
-		_workerJSIsDirectory = lstatSync(_workerPath).isDirectory();
-		if (!_workerJSIsDirectory) {
-			_workerJS = readFileSync(_workerPath, "utf-8");
-		}
-	} catch {}
+	const workerJSStats = lstatSync(_workerPath, { throwIfNoEntry: false });
+	_workerJSIsDirectory = workerJSStats?.isDirectory() ?? false;
+	if (workerJSStats !== undefined && !_workerJSIsDirectory) {
+		_workerJS = readFileSync(_workerPath, "utf-8");
+	}
 
 	// Grab the bindings from the API, we need these for shims and other such hacky inserts
 	const project = await fetchResult<Project>(
+		COMPLIANCE_REGION_CONFIG_PUBLIC,
 		`/accounts/${accountId}/pages/projects/${projectName}`
 	);
 	let isProduction = true;
@@ -243,7 +251,15 @@ export async function deploy({
 		}
 	}
 
-	const fileMap = await validate({ directory });
+	// Fetch JWT to get file count limit for validation
+	const { jwt } = await fetchResult<{ jwt: string }>(
+		COMPLIANCE_REGION_CONFIG_PUBLIC,
+		`/accounts/${accountId}/pages/projects/${projectName}/upload-token`
+	);
+
+	const fileCountLimit = maxFileCountAllowedFromClaims(jwt);
+
+	const fileMap = await validate({ directory, fileCountLimit });
 
 	const manifest = await upload({
 		fileMap,
@@ -261,7 +277,10 @@ export async function deploy({
 	}
 
 	if (commitMessage) {
-		formData.append("commit_message", commitMessage);
+		formData.append(
+			"commit_message",
+			truncateUtf8Bytes(commitMessage, MAX_COMMIT_MESSAGE_BYTES)
+		);
 	}
 
 	if (commitHash) {
@@ -372,8 +391,12 @@ export async function deploy({
 		if (_routesCustom) {
 			// user provided a custom _routes.json file
 			try {
-				const routesCustomJSON = JSON.parse(_routesCustom);
-				validateRoutes(routesCustomJSON, join(directory, "_routes.json"));
+				const routesPath = join(directory, "_routes.json");
+				const routesCustomJSON = parseJSON(
+					_routesCustom,
+					routesPath
+				) as RoutesJSONSpec;
+				validateRoutes(routesCustomJSON, routesPath);
 
 				formData.append(
 					"_routes.json",
@@ -384,6 +407,13 @@ export async function deploy({
 				if (err instanceof FatalError) {
 					throw err;
 				}
+				if (err instanceof ParseError) {
+					throw new FatalError(
+						`Invalid _routes.json file at ${join(directory, "_routes.json")}: ${err.text}`,
+						{ code: 1, telemetryMessage: "pages deploy invalid routes json" }
+					);
+				}
+				throw err;
 			}
 		}
 	}
@@ -397,7 +427,6 @@ export async function deploy({
 			workerBundle as BundleResult,
 			config
 		);
-
 		formData.append(
 			"_worker.bundle",
 			new File([workerBundleContents], "_worker.bundle")
@@ -407,8 +436,12 @@ export async function deploy({
 		if (_routesCustom) {
 			// user provided a custom _routes.json file
 			try {
-				const routesCustomJSON = JSON.parse(_routesCustom);
-				validateRoutes(routesCustomJSON, join(directory, "_routes.json"));
+				const routesPath = join(directory, "_routes.json");
+				const routesCustomJSON = parseJSON(
+					_routesCustom,
+					routesPath
+				) as RoutesJSONSpec;
+				validateRoutes(routesCustomJSON, routesPath);
 
 				formData.append(
 					"_routes.json",
@@ -419,6 +452,13 @@ export async function deploy({
 				if (err instanceof FatalError) {
 					throw err;
 				}
+				if (err instanceof ParseError) {
+					throw new FatalError(
+						`Invalid _routes.json file at ${join(directory, "_routes.json")}: ${err.text}`,
+						{ code: 1, telemetryMessage: "pages deploy invalid routes json" }
+					);
+				}
+				throw err;
 			}
 		} else if (routesOutputPath) {
 			// no custom _routes.json file found, so fallback to the generated one
@@ -440,6 +480,7 @@ export async function deploy({
 	while (attempts < MAX_DEPLOYMENT_ATTEMPTS) {
 		try {
 			const deploymentResponse = await fetchResult<Deployment>(
+				COMPLIANCE_REGION_CONFIG_PUBLIC,
 				`/accounts/${accountId}/pages/projects/${projectName}/deployments`,
 				{
 					method: "POST",

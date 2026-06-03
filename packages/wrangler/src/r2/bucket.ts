@@ -1,10 +1,17 @@
+import {
+	bucketFormatMessage,
+	isValidR2BucketName,
+	UserError,
+} from "@cloudflare/workers-utils";
 import dedent from "ts-dedent";
-import { formatConfigSnippet } from "../config";
 import { createCommand, createNamespace } from "../core/create-command";
-import { UserError } from "../errors";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
 import { requireAuth } from "../user";
+import {
+	createdResourceConfig,
+	sharedResourceCreationArgs,
+} from "../utils/add-created-resource-config";
 import { getValidBindingName } from "../utils/getValidBindingName";
 import formatLabelledValues from "../utils/render-labelled-values";
 import { LOCATION_CHOICES } from "./constants";
@@ -13,11 +20,10 @@ import {
 	deleteR2Bucket,
 	getR2Bucket,
 	getR2BucketMetrics,
-	isValidR2BucketName,
 	listR2Buckets,
-	tablefromR2BucketsListResponse,
+	tableFromR2BucketsListResponse,
 	updateR2BucketStorageClass,
-} from "./helpers";
+} from "./helpers/bucket";
 
 export const r2BucketNamespace = createNamespace({
 	metadata: {
@@ -59,6 +65,7 @@ export const r2BucketCreateCommand = createCommand({
 			requiresArg: true,
 			type: "string",
 		},
+		...sharedResourceCreationArgs,
 	},
 	async handler(args, { config }) {
 		const accountId = await requireAuth(config);
@@ -66,14 +73,18 @@ export const r2BucketCreateCommand = createCommand({
 
 		if (!isValidR2BucketName(name)) {
 			throw new UserError(
-				`The bucket name "${name}" is invalid. ` +
-					"Bucket names must begin and end with an alphanumeric and can only contain letters (a-z), numbers (0-9), and hyphens (-)."
+				`The bucket name "${name}" is invalid. ${bucketFormatMessage}`,
+				{ telemetryMessage: "r2 bucket create invalid bucket name" }
 			);
 		}
 
 		if (jurisdiction && location) {
 			throw new UserError(
-				"Provide either a jurisdiction or location hint - not both."
+				"Provide either a jurisdiction or location hint - not both.",
+				{
+					telemetryMessage:
+						"r2 bucket create conflicting jurisdiction and location",
+				}
 			);
 		}
 
@@ -83,15 +94,29 @@ export const r2BucketCreateCommand = createCommand({
 		}
 
 		logger.log(`Creating bucket '${fullBucketName}'...`);
-		await createR2Bucket(accountId, name, location, jurisdiction, storageClass);
+		await createR2Bucket(
+			config,
+			accountId,
+			name,
+			location,
+			jurisdiction,
+			storageClass
+		);
 		logger.log(dedent`
 			✅ Created bucket '${fullBucketName}' with${
 				location ? ` location hint ${location} and` : ``
-			} default storage class of ${storageClass ? storageClass : `Standard`}.
+			} default storage class of ${storageClass ? storageClass : `Standard`}.`);
 
-			Configure your Worker to write objects to this bucket:
-
-			${formatConfigSnippet({ r2_buckets: [{ bucket_name: args.name, binding: getValidBindingName(args.name, "r2") }] }, config.configPath)}`);
+		await createdResourceConfig(
+			"r2_buckets",
+			(bindingName) => ({
+				bucket_name: args.name,
+				binding: getValidBindingName(bindingName ?? args.name, "r2"),
+			}),
+			config.configPath,
+			args.env,
+			args
+		);
 
 		metrics.sendMetricsEvent("create r2 bucket", {
 			sendMetrics: config.send_metrics,
@@ -145,6 +170,7 @@ export const r2BucketUpdateStorageClassCommand = createCommand({
 			`Updating bucket ${fullBucketName} to ${args.storageClass} default storage class.`
 		);
 		await updateR2BucketStorageClass(
+			config,
 			accountId,
 			args.name,
 			args.storageClass,
@@ -162,6 +188,12 @@ export const r2BucketListCommand = createCommand({
 		status: "stable",
 		owner: "Product: R2",
 	},
+	behaviour: {
+		// This is an account-level command and does not require a valid project config.
+		// Keeping config parsing out of the critical path avoids blocking users who are
+		// using `wrangler r2 bucket list` to debug/fix an invalid wrangler.jsonc/toml.
+		provideConfig: false,
+	},
 	args: {
 		jurisdiction: {
 			describe: "The jurisdiction to list",
@@ -175,8 +207,8 @@ export const r2BucketListCommand = createCommand({
 
 		logger.log(`Listing buckets...`);
 
-		const buckets = await listR2Buckets(accountId, args.jurisdiction);
-		const tableOutput = tablefromR2BucketsListResponse(buckets);
+		const buckets = await listR2Buckets(config, accountId, args.jurisdiction);
+		const tableOutput = tableFromR2BucketsListResponse(buckets);
 		logger.log(tableOutput.map((x) => formatLabelledValues(x)).join("\n\n"));
 	},
 });
@@ -190,7 +222,7 @@ export const r2BucketInfoCommand = createCommand({
 	positionalArgs: ["bucket"],
 	args: {
 		bucket: {
-			describe: "The name of the bucket to delete",
+			describe: "The name of the bucket to retrieve info for",
 			type: "string",
 			demandOption: true,
 		},
@@ -200,18 +232,32 @@ export const r2BucketInfoCommand = createCommand({
 			requiresArg: true,
 			type: "string",
 		},
+		json: {
+			describe: "Return the bucket information as JSON",
+			type: "boolean",
+			default: false,
+		},
 	},
+	behaviour: {
+		printBanner: (args) => !args.json,
+	},
+
 	async handler(args, { config }) {
 		const accountId = await requireAuth(config);
 
-		logger.log(`Getting info for '${args.bucket}'...`);
+		if (!args.json) {
+			logger.log(`Getting info for '${args.bucket}'...`);
+		}
 
 		const bucketInfo = await getR2Bucket(
+			config,
 			accountId,
 			args.bucket,
 			args.jurisdiction
 		);
+
 		const bucketMetrics = await getR2BucketMetrics(
+			config,
 			accountId,
 			args.bucket,
 			args.jurisdiction
@@ -226,7 +272,11 @@ export const r2BucketInfoCommand = createCommand({
 			bucket_size: bucketMetrics.totalSize,
 		};
 
-		logger.log(formatLabelledValues(output));
+		if (args.json) {
+			logger.json(output);
+		} else {
+			logger.log(formatLabelledValues(output));
+		}
 	},
 });
 
@@ -258,7 +308,7 @@ export const r2BucketDeleteCommand = createCommand({
 			fullBucketName += ` (${args.jurisdiction})`;
 		}
 		logger.log(`Deleting bucket ${fullBucketName}.`);
-		await deleteR2Bucket(accountId, args.bucket, args.jurisdiction);
+		await deleteR2Bucket(config, accountId, args.bucket, args.jurisdiction);
 		logger.log(`Deleted bucket ${fullBucketName}.`);
 		metrics.sendMetricsEvent("delete r2 bucket", {
 			sendMetrics: config.send_metrics,

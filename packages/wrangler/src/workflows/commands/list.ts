@@ -2,15 +2,21 @@ import { fetchResult } from "../../cfetch";
 import { createCommand } from "../../core/create-command";
 import { logger } from "../../logger";
 import { requireAuth } from "../../user";
+import {
+	fetchLocalResult,
+	localWorkflowArgs,
+	type LocalWorkflow,
+} from "../local";
 import type { Workflow } from "../types";
 
 export const workflowsListCommand = createCommand({
 	metadata: {
 		description: "List Workflows associated to account",
 		owner: "Product: Workflows",
-		status: "open-beta",
+		status: "stable",
 	},
 	args: {
+		...localWorkflowArgs,
 		page: {
 			describe:
 				'Show a sepecific page from the listing, can configure page size using "per-page"',
@@ -23,32 +29,63 @@ export const workflowsListCommand = createCommand({
 		},
 	},
 	async handler(args, { config }) {
-		const accountId = await requireAuth(config);
-
-		const URLParams = new URLSearchParams();
-
-		if (args.perPage !== undefined) {
-			URLParams.set("per_page", args.perPage.toString());
-		}
-
-		URLParams.set("page", args.page.toString());
-
-		const workflows = await fetchResult<Workflow[]>(
-			`/accounts/${accountId}/workflows`,
-			undefined,
-			URLParams
-		);
-
-		if (workflows.length === 0) {
-			logger.warn("There are no deployed Workflows in this account");
-		} else {
-			// TODO(lduarte): can we improve this message once pagination is deployed
-			logger.info(
-				`Showing last ${workflows.length} workflow${workflows.length > 1 ? "s" : ""}:`
+		if (args.local) {
+			const workflows = await fetchLocalResult<LocalWorkflow[]>(
+				args.port,
+				"/workflows"
 			);
-			// sort by name and make the table head prettier by changing the keys
+
+			if (workflows.length === 0) {
+				logger.warn("There are no Workflows in the local dev session");
+				return;
+			}
+
+			logger.info(
+				`Showing ${workflows.length} workflow${workflows.length > 1 ? "s" : ""} from local dev session:`
+			);
+
+			const prettierWorkflows = workflows.map((workflow) => ({
+				Name: workflow.name,
+				"Script name": workflow.script_name,
+				"Class name": workflow.class_name,
+			}));
+			logger.table(prettierWorkflows);
+		} else {
+			const accountId = await requireAuth(config);
+
+			const URLParams = new URLSearchParams();
+
+			if (args.perPage !== undefined) {
+				URLParams.set("per_page", args.perPage.toString());
+			}
+
+			URLParams.set("page", args.page.toString());
+
+			const workflows = await fetchResult<Workflow[]>(
+				config,
+				`/accounts/${accountId}/workflows`,
+				undefined,
+				URLParams
+			);
+
+			if (workflows.length === 0 && args.page === 1) {
+				logger.warn("There are no deployed Workflows in this account");
+				return;
+			}
+
+			if (workflows.length === 0 && args.page > 1) {
+				logger.warn(
+					`No Workflows found on page ${args.page}. Please try a smaller page number.`
+				);
+				return;
+			}
+
+			logger.info(
+				`Showing ${workflows.length} workflow${workflows.length > 1 ? "s" : ""} from page ${args.page}:`
+			);
+
 			const prettierWorkflows = workflows
-				.sort((a, b) => a.name.localeCompare(b.name))
+				.sort((a, b) => b.created_on.localeCompare(a.created_on))
 				.map((workflow) => ({
 					Name: workflow.name,
 					"Script name": workflow.script_name,

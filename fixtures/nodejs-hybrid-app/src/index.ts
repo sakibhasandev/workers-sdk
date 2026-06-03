@@ -22,6 +22,10 @@ export default {
 				return testGetRandomValues();
 			case "/test-process":
 				return testProcessBehavior();
+			case "/env":
+				return Response.json(env);
+			case "/process-env":
+				return Response.json(process.env);
 			case "/query":
 				return testPostgresLibrary(env, ctx);
 			case "/test-x509-certificate":
@@ -34,6 +38,14 @@ export default {
 				return await testTls();
 			case "/test-crypto":
 				return await testCrypto();
+			case "/test-sqlite":
+				return await testSqlite();
+			case "/test-http":
+				return await testHttp();
+			case "/test-debug-import":
+				return await testDebugImport();
+			case "/test-debug-require":
+				return await testDebugRequire();
 		}
 
 		return new Response(
@@ -45,6 +57,10 @@ export default {
 <a href="test-immediate">Test setImmediate</a>
 <a href="test-tls">node:tls</a>
 <a href="test-crypto">node:crypto</a>
+<a href="test-sqlite">node:sqlite</a>
+<a href="test-http">node:http</a>
+<a href="test-debug-import">debug (import)</a>
+<a href="test-debug-require">debug (require)</a>
 `,
 			{ headers: { "Content-Type": "text/html; charset=utf-8" } }
 		);
@@ -104,7 +120,6 @@ GzEf4UxiLBbUB6WRBgyVyquGfUMlKl/tnm4q0yeYQloYKSoHpGeHVJuN
 }
 
 function testGetRandomValues() {
-	assert.strictEqual(webcrypto.getRandomValues, getRandomValues);
 	assert.strictEqual(nodeCrypto.getRandomValues, getRandomValues);
 
 	return Response.json([
@@ -140,6 +155,9 @@ function testBasicNodejsProperties() {
 }
 
 function testProcessBehavior() {
+	assert.strictEqual(typeof process.version, "string");
+	assert.strictEqual(typeof process.versions.node, "string");
+
 	const originalProcess = process;
 	try {
 		assert.notEqual(process, undefined);
@@ -191,7 +209,9 @@ async function testPostgresLibrary(env: Env, ctx: Context) {
 		database: env.DB_NAME,
 	});
 	await client.connect();
-	const result = await client.query(`SELECT * FROM rnc_database`);
+	const result = await client.query(
+		`SELECT * FROM rnacen.rnc_database LIMIT 5`
+	);
 	// Return the first row as JSON
 	const resp = new Response(JSON.stringify(result.rows[0]), {
 		headers: { "Content-Type": "application/json" },
@@ -219,6 +239,8 @@ async function testTls() {
 		true
 	);
 
+	assert.strictEqual(typeof tls.convertALPNProtocols, "function");
+
 	return new Response("OK");
 }
 
@@ -239,5 +261,94 @@ async function testCrypto() {
 	data += decipher.final();
 	assert.strictEqual(data, "Hello World");
 
+	assert.strictEqual(crypto.constants.DH_UNABLE_TO_CHECK_GENERATOR, 4);
+	assert.strictEqual(crypto.constants.RSA_PSS_SALTLEN_DIGEST, -1);
+	assert.strictEqual(
+		crypto.constants.SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION,
+		262144
+	);
+	assert.strictEqual(crypto.constants.SSL_OP_NO_TICKET, 16384);
+
 	return new Response("OK");
+}
+
+async function testSqlite() {
+	const sqlite = await import("node:sqlite");
+
+	assert.strictEqual(typeof sqlite.DatabaseSync, "function");
+
+	return new Response("OK");
+}
+
+async function testHttp() {
+	const http = await import("node:http");
+
+	const agent = new http.Agent();
+	assert.strictEqual(typeof agent.options, "object");
+
+	return new Response("OK");
+}
+
+async function testDebugImport() {
+	const debug = (await import("debug")).default;
+	const capturedLogs: string[] = [];
+
+	// Override debug.log to capture output for verification
+	debug.log = (...args: string[]) => {
+		capturedLogs.push(args.join(" "));
+	};
+
+	// Test different namespaces based on DEBUG env var: "example:*,test"
+	const testNamespace = debug("test"); // Should log (matches "test")
+	const exampleNamespace = debug("example"); // Should NOT log (doesn't match "example:*")
+	const exampleFooNamespace = debug("example:foo"); // Should log (matches "example:*")
+
+	testNamespace("Test import message 1");
+	exampleNamespace("Example import message (should not appear)");
+	exampleFooNamespace("Example foo import message");
+
+	if (testNamespace.enabled) {
+		testNamespace("Test import enabled message");
+	}
+
+	// Strip timestamps from captured logs, keeping namespace and message
+	// Format: "2025-08-14T20:09:49.769Z test Test import message 1"
+	const logsWithoutTimestamp = capturedLogs.map((log) => {
+		const parts = log.split(" ");
+		return parts.slice(1).join(" "); // Remove timestamp, keep namespace + message
+	});
+
+	return Response.json(logsWithoutTimestamp);
+}
+
+async function testDebugRequire() {
+	const debug = require("debug");
+	const capturedLogs: string[] = [];
+
+	// Override debug.log to capture output for verification
+	debug.log = (...args: string[]) => {
+		capturedLogs.push(args.join(" "));
+	};
+
+	// Test different namespaces based on DEBUG env var: "example:*,test"
+	const testNamespace = debug("test"); // Should log (matches "test")
+	const exampleNamespace = debug("example"); // Should NOT log (doesn't match "example:*")
+	const exampleFooNamespace = debug("example:foo"); // Should log (matches "example:*")
+
+	testNamespace("Test require message 1");
+	exampleNamespace("Example require message (should not appear)");
+	exampleFooNamespace("Example foo require message");
+
+	if (testNamespace.enabled) {
+		testNamespace("Test require enabled message");
+	}
+
+	// Strip timestamps from captured logs, keeping namespace and message
+	// Format: "2025-08-14T20:09:49.769Z test Test require message 1"
+	const logsWithoutTimestamp = capturedLogs.map((log) => {
+		const parts = log.split(" ");
+		return parts.slice(1).join(" "); // Remove timestamp, keep namespace + message
+	});
+
+	return Response.json(logsWithoutTimestamp);
 }

@@ -1,35 +1,50 @@
 import { readdir, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { FatalError, UserError } from "@cloudflare/workers-utils";
 import { getType } from "mime";
 import { Minimatch } from "minimatch";
 import prettyBytes from "pretty-bytes";
-import { FatalError } from "../errors";
-import { MAX_ASSET_COUNT, MAX_ASSET_SIZE } from "./constants";
+import { createCommand } from "../core/create-command";
+import { MAX_ASSET_COUNT_DEFAULT, MAX_ASSET_SIZE } from "./constants";
 import { hashFile } from "./hash";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../yargs-types";
+import { maxFileCountAllowedFromClaims } from "./upload";
 
-type UploadArgs = StrictYargsOptionsToInterface<typeof Options>;
+export const pagesProjectValidateCommand = createCommand({
+	metadata: {
+		description: "Validate a Pages project",
+		status: "stable",
+		owner: "Workers: Authoring and Testing",
+		hidden: true,
+	},
+	behaviour: {
+		provideConfig: false,
+	},
+	args: {
+		directory: {
+			type: "string",
+			demandOption: true,
+			description: "The directory of static files to validate",
+		},
+	},
+	positionalArgs: ["directory"],
+	async handler({ directory }) {
+		if (!directory) {
+			throw new UserError(
+				"Missing directory. Provide the path to the directory to validate as a positional argument.",
+				{ telemetryMessage: "pages validate missing directory" }
+			);
+		}
 
-export function Options(yargs: CommonYargsArgv) {
-	return yargs.positional("directory", {
-		type: "string",
-		demandOption: true,
-		description: "The directory of static files to validate",
-	});
-}
+		const fileCountLimit = process.env.CF_PAGES_UPLOAD_JWT
+			? maxFileCountAllowedFromClaims(process.env.CF_PAGES_UPLOAD_JWT)
+			: undefined;
 
-export const Handler = async ({ directory }: UploadArgs) => {
-	if (!directory) {
-		throw new FatalError("Must specify a directory.", 1);
-	}
-
-	await validate({
-		directory,
-	});
-};
+		await validate({
+			directory,
+			fileCountLimit,
+		});
+	},
+});
 
 export type FileContainer = {
 	path: string;
@@ -40,6 +55,7 @@ export type FileContainer = {
 
 export const validate = async (args: {
 	directory: string;
+	fileCountLimit?: number;
 }): Promise<Map<string, FileContainer>> => {
 	const IGNORE_LIST = [
 		"_worker.js",
@@ -50,6 +66,7 @@ export const validate = async (args: {
 		"**/.DS_Store",
 		"**/node_modules",
 		"**/.git",
+		".wrangler",
 	].map((pattern) => new Minimatch(pattern));
 
 	const directory = resolve(args.directory);
@@ -62,12 +79,25 @@ export const validate = async (args: {
 	// 	maxMemory = (parsed['max-old-space-size'] ? parsed['max-old-space-size'] : parsed['max_old_space_size']) * 1000 * 1000; // Turn MB into bytes
 	// }
 
+	const fileCountLimit = args.fileCountLimit ?? MAX_ASSET_COUNT_DEFAULT;
+
 	const walk = async (
 		dir: string,
 		fileMap: Map<string, FileContainer> = new Map(),
 		startingDir: string = dir
 	) => {
-		const files = await readdir(dir);
+		let files: string[];
+		try {
+			files = await readdir(dir);
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+				// File not found exeptions should be marked as user error
+				throw new FatalError((e as NodeJS.ErrnoException).message, {
+					telemetryMessage: "pages validate directory not found",
+				});
+			}
+			throw e;
+		}
 
 		await Promise.all(
 			files.map(async (file) => {
@@ -98,7 +128,7 @@ export const validate = async (args: {
 							)} in size\n${name} is ${prettyBytes(filestat.size, {
 								binary: true,
 							})} in size`,
-							1
+							{ code: 1, telemetryMessage: "pages validate file too large" }
 						);
 					}
 
@@ -118,10 +148,10 @@ export const validate = async (args: {
 
 	const fileMap = await walk(directory);
 
-	if (fileMap.size > MAX_ASSET_COUNT) {
+	if (fileMap.size > fileCountLimit) {
 		throw new FatalError(
-			`Error: Pages only supports up to ${MAX_ASSET_COUNT.toLocaleString()} files in a deployment. Ensure you have specified your build output directory correctly.`,
-			1
+			`Error: Pages only supports up to ${fileCountLimit.toLocaleString()} files in a deployment for your current plan. Ensure you have specified your build output directory correctly.`,
+			{ code: 1, telemetryMessage: "pages validate too many files" }
 		);
 	}
 

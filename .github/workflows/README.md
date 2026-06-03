@@ -4,33 +4,52 @@ See below for a summary of this repo's Actions
 
 - _Actions marked with "⚠️" are expected to sometimes fail._
 
+## Security auditing
+
+We use [`zizmor`](https://docs.zizmor.sh/) to audit GitHub Actions workflow definitions and keep CI workflows as safe as possible. When changing files in this directory, run:
+
+```sh
+zizmor .github/workflows/*.yml
+```
+
+Workflow changes should avoid unsuppressed `zizmor` findings. In particular:
+
+- Pin external actions to immutable commit SHAs, not tags.
+- Use `actions/checkout` v6 or newer so persisted credentials are stored under `$RUNNER_TEMP`; set `persist-credentials: false` when a job does not need follow-up authenticated Git operations.
+- Pass GitHub expression values into shell steps through `env` instead of expanding `${{ ... }}` directly inside `run` blocks.
+- Treat privileged triggers such as `pull_request_target` and `workflow_run` as security-sensitive. If a privileged trigger is required, document the safety model and add a targeted `zizmor` ignore with a reason.
+
 ## PR related actions
 
 ### Tests + Checks (test-and-check.yml)
 
 - Triggers
   - Updates to PRs.
+  - PRs in the merge queue.
 - Actions
   - Builds all the packages.
   - Runs formatting, linting and type checks.
   - Runs fixture tests, Wrangler unit tests, C3 unit tests, Miniflare unit tests, and ESLint + Prettier checks.
   - Adds the PR to a GitHub project
+  - Makes sure that Wrangler's warning for old Node.js versions works.
 
-### E2E tests (e2e.yml)
+### Wrangler E2E tests (e2e-wrangler.yml)
 
 - Triggers
-  - Commits merged to the `changeset-release/main` branch (i.e. on "Version Packages" PRs).
-  - Updates to PRs, on the Cloudflare fork, with the `e2e` label applied.
+  - Updates to PRs on the Cloudflare fork.
+  - PRs in the merge queue.
 - Actions
   - Runs the E2E tests for Wrangler.
-  - **If you're making a change that feels particularly risky, make sure you add the `e2e` label to get early warning of E2E test failures.**
+  - Cloudflare API credentials are only passed on Version Packages PRs (`changeset-release/main`), in the merge queue, or when the `run-remote-tests` label is applied. Other PRs run the E2E suite without remote tests.
 
-## Test old Node.js version (test-old-node-error.yml)
+### Vite Plugin E2E tests (e2e-vite.yml)
 
 - Triggers
-  - Commits merged to the `changeset-release/main` branch.
+  - Updates to PRs on the Cloudflare fork.
+  - PRs in the merge queue.
 - Actions
-  - Makes sure that Wrangler's warning for old Node.js versions works.
+  - Runs the E2E tests for the Vite plugin.
+  - Cloudflare API credentials are only passed on Version Packages PRs (`changeset-release/main`), in the merge queue, or when the `run-remote-tests` label is applied. Other PRs run the E2E suite without remote tests.
 
 ## Deploy Pages Previews (deploy-pages-preview.yml)
 
@@ -47,7 +66,7 @@ See below for a summary of this repo's Actions
 - Actions
   - Runs integrations tests to ensure the behaviour of the Worker powering the Workers Playground.
 
-## Create Pull Request Prerelease (create-pullrequest-prerelease.yml)
+## Create Pull Request Prerelease (prerelease.yml)
 
 - Triggers
   - Updates to PRs.
@@ -92,43 +111,29 @@ See below for a summary of this repo's Actions
     - Public packages are deployed to npm
     - Private packages will run their `deploy` script, if they have one.
 
-### Publish @beta pre-releases (prereleases.yml)
-
-- Triggers
-  - Commits merged to the `main` branch, on the Cloudflare fork.
-- Actions
-  - Publishes the `wrangler` package to npm under the `beta` dist-tag.
-  - Publishes the `create-cloudflare` package to npm under the `beta` dist-tag.
-
-## Product-specific branch actions
-
-### D1 (d1.yml)
-
-- Triggers
-  - Commits merged to the `d1` branch, on the Cloudflare fork.
-- Actions
-  - Publishes the `wrangler` package to npm under the `d1` dist-tag.
-
 ## C3 related actions
 
 ### C3 E2E Tests (c3-e2e.yml)
 
 - Triggers
-  - Commits merged to the `changeset-release/main` branch (i.e. on "Version Packages" PRs).
-  - Updates to PRs, on the Cloudflare fork, with the `c3-e2e` label applied.
+  - Updates to PRs.
 - Actions
   - Runs the E2E tests for C3.
+  - Cloudflare API credentials are only passed on Version Packages PRs (`changeset-release/main`), in the merge queue, or when the `run-remote-tests` label is applied. Other PRs run the E2E suite without remote tests.
 
-### C3 E2E (Quarantine) (c3-e2e-quarantine.yml) ⚠️
-
-- Triggers
-  - 3AM every day
-- Actions
-  - Runs the _quarantined_ E2E tests for C3. It is expected to sometimes fail.
-
-### C3 E2E Tests (Dependabot) (c3-e2e-dependabot.yml)
+### Rerun Code Owners (rerun-codeowners.yml + rerun-codeowners-privileged.yml)
 
 - Triggers
-  - Updates to PRs, by the dependabot user, which touch c3-frameworks-update changesets.
+  - A review is submitted or dismissed on a PR.
 - Actions
-  - Runs the all the C3 E2E (including quarantined) tests for the framework that was updated.
+  - Re-runs the "Run Codeowners Plus" check so it re-evaluates approval status after the review change.
+  - Uses the `workflow_run` pattern: the trigger workflow exists solely to fire a `workflow_run` event; the privileged companion workflow (which has full permissions) reads the PR head SHA from `github.event.workflow_run.head_sha` and performs the re-run. This is necessary because `pull_request_review` gives a read-only token for fork PRs and has no `_target` variant.
+
+### Rerun Remote Tests (rerun-remote-tests.yml)
+
+- Triggers
+  - The `run-remote-tests` or `run-c3-frameworks-tests` label is added to or removed from a PR.
+- Actions
+  - Re-runs the E2E workflows for the PR so they pick up the label change and pass (or withhold) API credentials to the test steps.
+  - `run-remote-tests` re-runs Wrangler, Vite, and C3 E2E workflows; `run-c3-frameworks-tests` re-runs only C3 E2E.
+  - Uses `pull_request_target` to get a privileged token even for fork PRs (safe because no untrusted code is checked out).

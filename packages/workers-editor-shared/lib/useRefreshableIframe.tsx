@@ -42,11 +42,13 @@ export function useRefreshableIframe(
 				second.removeEventListener("load", onLoadEvent);
 			};
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- refs are stable across renders and should not trigger re-subscription
 	}, [onLoad]);
 
 	function listen() {
-		!firstLoad && setFirstLoad(true);
+		if (!firstLoad) {
+			setFirstLoad(true);
+		}
 		requestAnimationFrame(() => {
 			setIndex(index === 0 ? 1 : 0);
 			setIsLoadingContent(false);
@@ -70,7 +72,7 @@ export function useRefreshableIframe(
 		if (src) {
 			setUrl(src);
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- setUrl depends on mutable state that would cause infinite loops if included
 	}, [src]);
 	const isLoading = isLoadingContent;
 	return {

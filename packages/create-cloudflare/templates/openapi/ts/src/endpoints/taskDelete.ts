@@ -1,6 +1,6 @@
-import { Bool, OpenAPIRoute, Str } from "chanfana";
+import { OpenAPIRoute } from "chanfana";
 import { z } from "zod";
-import { Task } from "../types";
+import { type AppContext, Task } from "../types";
 
 export class TaskDelete extends OpenAPIRoute {
 	schema = {
@@ -8,7 +8,7 @@ export class TaskDelete extends OpenAPIRoute {
 		summary: "Delete a Task",
 		request: {
 			params: z.object({
-				taskSlug: Str({ description: "Task slug" }),
+				taskSlug: z.string().describe("Task slug"),
 			}),
 		},
 		responses: {
@@ -17,11 +17,9 @@ export class TaskDelete extends OpenAPIRoute {
 				content: {
 					"application/json": {
 						schema: z.object({
-							series: z.object({
-								success: Bool(),
-								result: z.object({
-									task: Task,
-								}),
+							success: z.boolean(),
+							result: z.object({
+								task: Task,
 							}),
 						}),
 					},
@@ -30,7 +28,7 @@ export class TaskDelete extends OpenAPIRoute {
 		},
 	};
 
-	async handle(c) {
+	async handle(c: AppContext) {
 		// Get validated data
 		const data = await this.getValidatedData<typeof this.schema>();
 

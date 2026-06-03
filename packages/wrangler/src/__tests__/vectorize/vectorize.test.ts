@@ -1,4 +1,6 @@
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import { validateQueryFilter } from "../../vectorize/query";
 import { endEventLoop } from "../helpers/end-event-loop";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
@@ -6,7 +8,6 @@ import { mockConsoleMethods } from "../helpers/mock-console";
 import { clearDialogs, mockConfirm } from "../helpers/mock-dialogs";
 import { useMockIsTTY } from "../helpers/mock-istty";
 import { createFetchResult, msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
 import type { VectorizeQueryOptions } from "../../vectorize/types";
 
@@ -14,20 +15,21 @@ describe("vectorize help", () => {
 	const std = mockConsoleMethods();
 	runInTempDir();
 
-	it("should show help when no argument is passed", async () => {
+	it("should show help when no argument is passed", async ({ expect }) => {
 		await runWrangler("vectorize");
 		await endEventLoop();
 
 		expect(std.out).toMatchInlineSnapshot(`
 			"wrangler vectorize
 
-			🧮 Manage Vectorize indexes [open beta]
+			🧮 Manage Vectorize indexes
 
 			COMMANDS
 			  wrangler vectorize create <name>                 Create a Vectorize index
 			  wrangler vectorize delete <name>                 Delete a Vectorize index
 			  wrangler vectorize get <name>                    Get a Vectorize index by name
 			  wrangler vectorize list                          List your Vectorize indexes
+			  wrangler vectorize list-vectors <name>           List vector identifiers in a Vectorize index
 			  wrangler vectorize query <name>                  Query a Vectorize index
 			  wrangler vectorize insert <name>                 Insert vectors into a Vectorize index
 			  wrangler vectorize upsert <name>                 Upsert vectors into a Vectorize index
@@ -39,24 +41,19 @@ describe("vectorize help", () => {
 			  wrangler vectorize delete-metadata-index <name>  Delete metadata indexes
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
-
-			--------------------
-			📣 Vectorize is now Generally Available.
-			📣 Please use the '--deprecated-v1' flag to create, get, list, delete and insert vectors into legacy Vectorize indexes
-			📣 Creation of legacy Vectorize indexes will be blocked by December 2024. Other operations will continue to function
-			📣 See the Vectorize docs to get started: https://developers.cloudflare.com/vectorize
-			📣 Please report any bugs to https://github.com/cloudflare/workers-sdk/issues/new/choose
-			📣 To give feedback, visit https://discord.cloudflare.com/
-			--------------------"
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("should show help when an invalid argument is passed", async () => {
+	it("should show help when an invalid argument is passed", async ({
+		expect,
+	}) => {
 		await expect(() => runWrangler("vectorize foobarfofum")).rejects.toThrow(
 			"Unknown argument: foobarfofum"
 		);
@@ -70,13 +67,14 @@ describe("vectorize help", () => {
 			"
 			wrangler vectorize
 
-			🧮 Manage Vectorize indexes [open beta]
+			🧮 Manage Vectorize indexes
 
 			COMMANDS
 			  wrangler vectorize create <name>                 Create a Vectorize index
 			  wrangler vectorize delete <name>                 Delete a Vectorize index
 			  wrangler vectorize get <name>                    Get a Vectorize index by name
 			  wrangler vectorize list                          List your Vectorize indexes
+			  wrangler vectorize list-vectors <name>           List vector identifiers in a Vectorize index
 			  wrangler vectorize query <name>                  Query a Vectorize index
 			  wrangler vectorize insert <name>                 Insert vectors into a Vectorize index
 			  wrangler vectorize upsert <name>                 Upsert vectors into a Vectorize index
@@ -88,24 +86,19 @@ describe("vectorize help", () => {
 			  wrangler vectorize delete-metadata-index <name>  Delete metadata indexes
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
-
-			--------------------
-			📣 Vectorize is now Generally Available.
-			📣 Please use the '--deprecated-v1' flag to create, get, list, delete and insert vectors into legacy Vectorize indexes
-			📣 Creation of legacy Vectorize indexes will be blocked by December 2024. Other operations will continue to function
-			📣 See the Vectorize docs to get started: https://developers.cloudflare.com/vectorize
-			📣 Please report any bugs to https://github.com/cloudflare/workers-sdk/issues/new/choose
-			📣 To give feedback, visit https://discord.cloudflare.com/
-			--------------------"
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("should show help when the get command is passed without an index", async () => {
+	it("should show help when the get command is passed without an index", async ({
+		expect,
+	}) => {
 		await expect(() => runWrangler("vectorize get")).rejects.toThrow(
 			"Not enough non-option arguments: got 0, need at least 1"
 		);
@@ -125,28 +118,23 @@ describe("vectorize help", () => {
 			  name  The name of the Vectorize index.  [string] [required]
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
-			      --json           return output as clean JSON  [boolean] [default: false]
-			      --deprecated-v1  Fetch a deprecated V1 Vectorize index. This must be enabled if the index was created with V1 option.  [boolean] [default: false]
-
-			--------------------
-			📣 Vectorize is now Generally Available.
-			📣 Please use the '--deprecated-v1' flag to create, get, list, delete and insert vectors into legacy Vectorize indexes
-			📣 Creation of legacy Vectorize indexes will be blocked by December 2024. Other operations will continue to function
-			📣 See the Vectorize docs to get started: https://developers.cloudflare.com/vectorize
-			📣 Please report any bugs to https://github.com/cloudflare/workers-sdk/issues/new/choose
-			📣 To give feedback, visit https://discord.cloudflare.com/
-			--------------------"
+			      --json           Return output as JSON  [boolean] [default: false]
+			      --deprecated-v1  Fetch a deprecated V1 Vectorize index. This must be enabled if the index was created with V1 option.  [boolean] [default: false]"
 		`);
 	});
 
-	it("should show help when the query command is passed without an argument", async () => {
+	it("should show help when the query command is passed without an argument", async ({
+		expect,
+	}) => {
 		await expect(() => runWrangler("vectorize query")).rejects.toThrow(
 			"Not enough non-option arguments: got 0, need at least 1"
 		);
@@ -166,37 +154,27 @@ describe("vectorize help", () => {
 			  name  The name of the Vectorize index  [string] [required]
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
-			      --vector           Vector to query the Vectorize Index  [array]
+			      --vector           Vector to query the Vectorize Index  [number]
 			      --vector-id        Identifier for a vector in the index against which the index should be queried  [string]
 			      --top-k            The number of results (nearest neighbors) to return  [number] [default: 5]
 			      --return-values    Specify if the vector values should be included in the results  [boolean] [default: false]
-			      --return-metadata  Specify if the vector metadata should be included in the results  [string] [choices: \\"all\\", \\"indexed\\", \\"none\\"] [default: \\"none\\"]
+			      --return-metadata  Specify if the vector metadata should be included in the results  [string] [choices: "all", "indexed", "none"] [default: "none"]
 			      --namespace        Filter the query results based on this namespace  [string]
 			      --filter           Filter the query results based on this metadata filter.  [string]
 
 			EXAMPLES
-			  ❯❯ wrangler vectorize query --vector 1 2 3 0.5 1.25 6
-			     Query the Vectorize Index by vector. To read from a json file that contains data in the format [1, 2, 3], you could use a command like
-			     \`wrangler vectorize query --vector $(jq -r '.[]' data.json | xargs)\`
-
-			  ❯❯ wrangler vectorize query --filter '{ 'p1': 'abc', 'p2': { '$ne': true }, 'p3': 10, 'p4': false, 'nested.p5': 'abcd' }'
-			     Filter the query results.
-
-			--------------------
-			📣 Vectorize is now Generally Available.
-			📣 Please use the '--deprecated-v1' flag to create, get, list, delete and insert vectors into legacy Vectorize indexes
-			📣 Creation of legacy Vectorize indexes will be blocked by December 2024. Other operations will continue to function
-			📣 See the Vectorize docs to get started: https://developers.cloudflare.com/vectorize
-			📣 Please report any bugs to https://github.com/cloudflare/workers-sdk/issues/new/choose
-			📣 To give feedback, visit https://discord.cloudflare.com/
-			--------------------"
+			  wrangler vectorize query --vector 1 2 3 0.5 1.25 6                                                                      Query the Vectorize Index by vector
+			  wrangler vectorize query --vector $(jq -r '.[]' data.json | xargs)                                                      Query the Vectorize Index by vector from a json file that contains data in the format [1, 2, 3].
+			  wrangler vectorize query --filter '{ 'p1': 'abc', 'p2': { '$ne': true }, 'p3': 10, 'p4': false, 'nested.p5': 'abcd' }'  Filter the query results."
 		`);
 	});
 });
@@ -212,6 +190,7 @@ describe("vectorize commands", () => {
 	beforeEach(() => {
 		// @ts-expect-error we're using a very simple setTimeout mock here
 		vi.spyOn(global, "setTimeout").mockImplementation((fn, _period) => {
+			// eslint-disable-next-line @typescript-eslint/no-implied-eval -- fn is always a function in this mock
 			setImmediate(fn);
 		});
 		setIsTTY(true);
@@ -221,7 +200,7 @@ describe("vectorize commands", () => {
 		clearDialogs();
 	});
 
-	it("should handle creating a vectorize V1 index", async () => {
+	it("should handle creating a vectorize V1 index", async ({ expect }) => {
 		mockVectorizeRequest();
 		await runWrangler(
 			"vectorize create some-index --dimensions=768 --metric=cosine --deprecated-v1=true"
@@ -232,65 +211,73 @@ describe("vectorize commands", () => {
 "
 		`);
 		expect(std.out).toMatchInlineSnapshot(`
-			"🚧 Creating index: 'some-index'
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			🚧 Creating index: 'some-index'
 			✅ Successfully created a new Vectorize index: 'test-index'
-			📋 To start querying from a Worker, add the following binding configuration to your Wrangler configuration file:
-
+			To access your new Vectorize Index in your Worker, add the following snippet to your configuration file:
 			{
-			  \\"vectorize\\": [
+			  "vectorize": [
 			    {
-			      \\"binding\\": \\"VECTORIZE_INDEX\\",
-			      \\"index_name\\": \\"test-index\\"
+			      "binding": "VECTORIZE_INDEX",
+			      "index_name": "test-index"
 			    }
 			  ]
 			}"
 		`);
 	});
 
-	it("should handle creating a vectorize index", async () => {
+	it("should handle creating a vectorize index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler(
 			"vectorize create test-index --dimensions=1536 --metric=euclidean"
 		);
 		expect(std.out).toMatchInlineSnapshot(`
-			"🚧 Creating index: 'test-index'
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			🚧 Creating index: 'test-index'
 			✅ Successfully created a new Vectorize index: 'test-index'
-			📋 To start querying from a Worker, add the following binding configuration to your Wrangler configuration file:
-
+			To access your new Vectorize Index in your Worker, add the following snippet to your configuration file:
 			{
-			  \\"vectorize\\": [
+			  "vectorize": [
 			    {
-			      \\"binding\\": \\"VECTORIZE\\",
-			      \\"index_name\\": \\"test-index\\"
+			      "binding": "VECTORIZE",
+			      "index_name": "test-index"
 			    }
 			  ]
 			}"
 		`);
 	});
 
-	it("should handle creating a vectorize index with preset", async () => {
+	it("should handle creating a vectorize index with preset", async ({
+		expect,
+	}) => {
 		mockVectorizeV2Request();
 		await runWrangler(
 			"vectorize create test-index --preset=openai/text-embedding-ada-002"
 		);
 		expect(std.out).toMatchInlineSnapshot(`
-			"Configuring index based for the embedding model openai/text-embedding-ada-002.
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Configuring index based for the embedding model openai/text-embedding-ada-002.
 			🚧 Creating index: 'test-index'
 			✅ Successfully created a new Vectorize index: 'test-index'
-			📋 To start querying from a Worker, add the following binding configuration to your Wrangler configuration file:
-
+			To access your new Vectorize Index in your Worker, add the following snippet to your configuration file:
 			{
-			  \\"vectorize\\": [
+			  "vectorize": [
 			    {
-			      \\"binding\\": \\"VECTORIZE\\",
-			      \\"index_name\\": \\"test-index\\"
+			      "binding": "VECTORIZE",
+			      "index_name": "test-index"
 			    }
 			  ]
 			}"
 		`);
 	});
 
-	it("should fail index creation with invalid metric", async () => {
+	it("should fail index creation with invalid metric", async ({ expect }) => {
 		mockVectorizeV2Request();
 
 		await expect(() =>
@@ -303,15 +290,15 @@ describe("vectorize commands", () => {
 		);
 
 		expect(std.err).toMatchInlineSnapshot(`
-				"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mInvalid values:[0m
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mInvalid values:[0m
 
-				    Argument: metric, Given: \\"pythagorian\\", Choices: \\"euclidean\\", \\"cosine\\", \\"dot-product\\"
+			    Argument: metric, Given: "pythagorian", Choices: "euclidean", "cosine", "dot-product"
 
-				"
-			`);
+			"
+		`);
 	});
 
-	it("should fail index creation with invalid preset", async () => {
+	it("should fail index creation with invalid preset", async ({ expect }) => {
 		mockVectorizeV2Request();
 
 		await expect(() =>
@@ -324,105 +311,220 @@ describe("vectorize commands", () => {
 		);
 
 		expect(std.err).toMatchInlineSnapshot(`
-				"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mInvalid values:[0m
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mInvalid values:[0m
 
-    Argument: preset, Given: \\"openai/gpt-400-pro-max-ultra\\", Choices: \\"@cf/baai/bge-small-en-v1.5\\",
-  \\"@cf/baai/bge-base-en-v1.5\\", \\"@cf/baai/bge-large-en-v1.5\\", \\"openai/text-embedding-ada-002\\",
-  \\"cohere/embed-multilingual-v2.0\\"
+			    Argument: preset, Given: "openai/gpt-400-pro-max-ultra", Choices: "@cf/baai/bge-small-en-v1.5",
+			  "@cf/baai/bge-base-en-v1.5", "@cf/baai/bge-large-en-v1.5", "openai/text-embedding-ada-002",
+			  "cohere/embed-multilingual-v2.0"
 
-"
-			`);
+			"
+		`);
 	});
 
-	it("should fail index creation with invalid config", async () => {
+	it("should fail index creation with invalid config", async ({ expect }) => {
 		mockVectorizeV2Request();
 
 		await expect(
 			runWrangler("vectorize create test-index --dimensions=1536")
-		).resolves.toBeUndefined();
-
-		expect(std.err).toMatchInlineSnapshot(`
-				"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mYou must provide both dimensions and a metric, or a known model preset when creating an index.[0m
-
-"
-			`);
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`[Error: 🚨 You must provide both dimensions and a metric, or a known model preset when creating an index.]`
+		);
 	});
 
-	it("should handle listing vectorize V1 indexes", async () => {
+	it("should handle listing vectorize V1 indexes", async ({ expect }) => {
 		mockVectorizeRequest();
 		await runWrangler("vectorize list --deprecated-v1=true");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Listing Vectorize indexes...
-			┌───────────────┬────────────┬───────────┬─────────────┬────────────────────────────┬────────────────────────────┐
-			│ name          │ dimensions │ metric    │ description │ created                    │ modified                   │
-			├───────────────┼────────────┼───────────┼─────────────┼────────────────────────────┼────────────────────────────┤
-			│ test-index    │ 768        │ cosine    │             │ 2023-09-25T13:02:18.00268Z │ 2023-09-25T13:02:18.00268Z │
-			├───────────────┼────────────┼───────────┼─────────────┼────────────────────────────┼────────────────────────────┤
-			│ another-index │ 3          │ euclidean │             │ 2023-09-25T13:02:18.00268Z │ 2023-09-25T13:02:18.00268Z │
-			└───────────────┴────────────┴───────────┴─────────────┴────────────────────────────┴────────────────────────────┘"
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Listing Vectorize indexes...
+			┌─┬─┬─┬─┬─┬─┐
+			│ name │ dimensions │ metric │ description │ created │ modified │
+			├─┼─┼─┼─┼─┼─┤
+			│ test-index │ 768 │ cosine │ │ 2023-09-25T13:02:18.00268Z │ 2023-09-25T13:02:18.00268Z │
+			├─┼─┼─┼─┼─┼─┤
+			│ another-index │ 3 │ euclidean │ │ 2023-09-25T13:02:18.00268Z │ 2023-09-25T13:02:18.00268Z │
+			└─┴─┴─┴─┴─┴─┘"
 		`);
 	});
 
-	it("should handle listing vectorize indexes", async () => {
+	it("should handle listing vectorize indexes", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler("vectorize list");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Listing Vectorize indexes...
-			┌───────────────┬────────────┬─────────────┬──────────────┬────────────────────────────┬────────────────────────────┐
-			│ name          │ dimensions │ metric      │ description  │ created                    │ modified                   │
-			├───────────────┼────────────┼─────────────┼──────────────┼────────────────────────────┼────────────────────────────┤
-			│ test-index    │ 1536       │ euclidean   │ test-desc    │ 2024-07-11T13:02:18.00268Z │ 2024-07-11T13:02:18.00268Z │
-			├───────────────┼────────────┼─────────────┼──────────────┼────────────────────────────┼────────────────────────────┤
-			│ another-index │ 32         │ dot-product │ another-desc │ 2024-07-11T13:02:18.00268Z │ 2024-07-11T13:02:18.00268Z │
-			└───────────────┴────────────┴─────────────┴──────────────┴────────────────────────────┴────────────────────────────┘"
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Listing Vectorize indexes...
+			┌─┬─┬─┬─┬─┬─┐
+			│ name │ dimensions │ metric │ description │ created │ modified │
+			├─┼─┼─┼─┼─┼─┤
+			│ test-index │ 1536 │ euclidean │ test-desc │ 2024-07-11T13:02:18.00268Z │ 2024-07-11T13:02:18.00268Z │
+			├─┼─┼─┼─┼─┼─┤
+			│ another-index │ 32 │ dot-product │ another-desc │ 2024-07-11T13:02:18.00268Z │ 2024-07-11T13:02:18.00268Z │
+			└─┴─┴─┴─┴─┴─┘"
 		`);
 	});
 
-	it("should warn when there are no vectorize indexes", async () => {
+	it("should warn when there are no vectorize indexes", async ({ expect }) => {
 		mockVectorizeV2RequestError();
 		await runWrangler("vectorize list");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Listing Vectorize indexes..."
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Listing Vectorize indexes..."
 		`);
 
 		expect(std.warn).toMatchInlineSnapshot(`
 			"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1m[0m
 
-  You haven't created any indexes on this account.
+			  You haven't created any indexes on this account.
 
-  Use 'wrangler vectorize create <name>' to create one, or visit
-  [4mhttps://developers.cloudflare.com/vectorize/[0m to get started.
+			  Use 'wrangler vectorize create <name>' to create one, or visit
+			  [4mhttps://developers.cloudflare.com/vectorize/[0m to get started.
 
 
-"
+			"
 		`);
 	});
 
-	it("should handle a get on a vectorize V1 index", async () => {
+	it("should return empty array JSON when there are no vectorize indexes with --json flag", async ({
+		expect,
+	}) => {
+		mockVectorizeV2RequestError();
+		await runWrangler("vectorize list --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`[]`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should handle listing vectorize indexes with valid JSON output", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			[
+			  {
+			    "config": {
+			      "dimensions": 1536,
+			      "metric": "euclidean",
+			    },
+			    "created_on": "2024-07-11T13:02:18.00268Z",
+			    "description": "test-desc",
+			    "modified_on": "2024-07-11T13:02:18.00268Z",
+			    "name": "test-index",
+			  },
+			  {
+			    "config": {
+			      "dimensions": 32,
+			      "metric": "dot-product",
+			    },
+			    "created_on": "2024-07-11T13:02:18.00268Z",
+			    "description": "another-desc",
+			    "modified_on": "2024-07-11T13:02:18.00268Z",
+			    "name": "another-index",
+			  },
+			]
+		`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should handle creating a vectorize index with valid JSON output", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler(
+			"vectorize create test-index --dimensions=1536 --metric=euclidean --json"
+		);
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			{
+			  "config": {
+			    "dimensions": 1536,
+			    "metric": "euclidean",
+			  },
+			  "created_on": "2024-07-11T13:02:18.00268Z",
+			  "description": "test-desc",
+			  "modified_on": "2024-07-11T13:02:18.00268Z",
+			  "name": "test-index",
+			}
+		`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should handle get on a vectorize index with valid JSON output", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize get test-index --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			{
+			  "config": {
+			    "dimensions": 1536,
+			    "metric": "euclidean",
+			  },
+			  "created_on": "2024-07-11T13:02:18.00268Z",
+			  "description": "test-desc",
+			  "modified_on": "2024-07-11T13:02:18.00268Z",
+			  "name": "test-index",
+			}
+		`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should handle info on a vectorize index with valid JSON output", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize info test-index --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			{
+			  "dimensions": 1024,
+			  "processedUpToDatetime": "2024-07-19T13:11:44.064Z",
+			  "processedUpToMutation": "7f11d6e5-d126-4f76-936e-fbfec079e0be",
+			  "vectorCount": 1000,
+			}
+		`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should handle a get on a vectorize V1 index", async ({ expect }) => {
 		mockVectorizeRequest();
 		await runWrangler("vectorize get test-index --deprecated-v1=true");
 		expect(std.out).toMatchInlineSnapshot(`
-			"┌────────────┬────────────┬────────┬─────────────┬────────────────────────────┬────────────────────────────┐
-			│ name       │ dimensions │ metric │ description │ created                    │ modified                   │
-			├────────────┼────────────┼────────┼─────────────┼────────────────────────────┼────────────────────────────┤
-			│ test-index │ 768        │ cosine │             │ 2023-09-25T13:02:18.00268Z │ 2023-09-25T13:02:18.00268Z │
-			└────────────┴────────────┴────────┴─────────────┴────────────────────────────┴────────────────────────────┘"
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			┌─┬─┬─┬─┬─┬─┐
+			│ name │ dimensions │ metric │ description │ created │ modified │
+			├─┼─┼─┼─┼─┼─┤
+			│ test-index │ 768 │ cosine │ │ 2023-09-25T13:02:18.00268Z │ 2023-09-25T13:02:18.00268Z │
+			└─┴─┴─┴─┴─┴─┘"
 		`);
 	});
 
-	it("should handle a get on a vectorize index", async () => {
+	it("should handle a get on a vectorize index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler("vectorize get test-index");
 		expect(std.out).toMatchInlineSnapshot(`
-			"┌────────────┬────────────┬───────────┬─────────────┬────────────────────────────┬────────────────────────────┐
-			│ name       │ dimensions │ metric    │ description │ created                    │ modified                   │
-			├────────────┼────────────┼───────────┼─────────────┼────────────────────────────┼────────────────────────────┤
-			│ test-index │ 1536       │ euclidean │ test-desc   │ 2024-07-11T13:02:18.00268Z │ 2024-07-11T13:02:18.00268Z │
-			└────────────┴────────────┴───────────┴─────────────┴────────────────────────────┴────────────────────────────┘"
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			┌─┬─┬─┬─┬─┬─┐
+			│ name │ dimensions │ metric │ description │ created │ modified │
+			├─┼─┼─┼─┼─┼─┤
+			│ test-index │ 1536 │ euclidean │ test-desc │ 2024-07-11T13:02:18.00268Z │ 2024-07-11T13:02:18.00268Z │
+			└─┴─┴─┴─┴─┴─┘"
 		`);
 	});
 
-	it("should handle a delete on a vectorize V1 index", async () => {
+	it("should handle a delete on a vectorize V1 index", async ({ expect }) => {
 		mockVectorizeRequest();
 		mockConfirm({
 			text: "OK to delete the index 'test-index'?",
@@ -430,12 +532,15 @@ describe("vectorize commands", () => {
 		});
 		await runWrangler("vectorize delete test-index --deprecated-v1=true");
 		expect(std.out).toMatchInlineSnapshot(`
-		"Deleting Vectorize index test-index
-		✅ Deleted index test-index"
-	`);
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Deleting Vectorize index test-index
+			✅ Deleted index test-index"
+		`);
 	});
 
-	it("should handle a delete on a vectorize index", async () => {
+	it("should handle a delete on a vectorize index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		mockConfirm({
 			text: "OK to delete the index 'test-index'?",
@@ -443,53 +548,64 @@ describe("vectorize commands", () => {
 		});
 		await runWrangler("vectorize delete test-index");
 		expect(std.out).toMatchInlineSnapshot(`
-		"Deleting Vectorize index test-index
-		✅ Deleted index test-index"
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			Deleting Vectorize index test-index
+			✅ Deleted index test-index"
 		`);
 	});
 
-	it("should handle a getByIds on a vectorize index", async () => {
+	it("should handle a getByIds on a vectorize index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler("vectorize get-vectors test-index --ids a 'b'");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Fetching vectors...
-[
-  {
-    \\"id\\": \\"a\\",
-    \\"values\\": [
-      1,
-      2,
-      3,
-      4
-    ],
-    \\"namespace\\": \\"abcd\\",
-    \\"metadata\\": {
-      \\"a\\": true,
-      \\"b\\": 123
-    }
-  },
-  {
-    \\"id\\": \\"b\\",
-    \\"values\\": [
-      5,
-      6,
-      7,
-      8
-    ],
-    \\"metadata\\": {
-      \\"c\\": false,
-      \\"b\\": \\"123\\"
-    }
-  }
-]"
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Fetching vectors...
+			[
+			  {
+			    "id": "a",
+			    "values": [
+			      1,
+			      2,
+			      3,
+			      4
+			    ],
+			    "namespace": "abcd",
+			    "metadata": {
+			      "a": true,
+			      "b": 123
+			    }
+			  },
+			  {
+			    "id": "b",
+			    "values": [
+			      5,
+			      6,
+			      7,
+			      8
+			    ],
+			    "metadata": {
+			      "c": false,
+			      "b": "123"
+			    }
+			  }
+			]"
 		`);
 	});
 
-	it("should warn when there are no vectors matching the getByIds identifiers", async () => {
+	it("should warn when there are no vectors matching the getByIds identifiers", async ({
+		expect,
+	}) => {
 		mockVectorizeV2RequestError();
 		await runWrangler("vectorize get-vectors test-index --ids a 'b'");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Fetching vectors..."
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Fetching vectors..."
 		`);
 
 		expect(std.warn).toMatchInlineSnapshot(`
@@ -499,73 +615,238 @@ describe("vectorize commands", () => {
 		`);
 	});
 
-	it("should log error when getByIds does not receive ids", async () => {
+	it("should log error when getByIds does not receive ids", async ({
+		expect,
+	}) => {
 		mockVectorizeV2Request();
-		await runWrangler("vectorize get-vectors test-index --ids");
 
-		expect(std.err).toMatchInlineSnapshot(`
-			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1m🚨 Please provide valid vector identifiers.[0m
-
-"
-		`);
+		await expect(
+			runWrangler("vectorize get-vectors test-index --ids")
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`[Error: 🚨 Please provide valid vector identifiers.]`
+		);
 	});
 
-	it("should handle a deleteByIds on a vectorize index", async () => {
+	it("should handle a deleteByIds on a vectorize index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler("vectorize delete-vectors test-index --ids a 'b'");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Deleting vectors...
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Deleting vectors...
 			✅ Successfully enqueued 2 vectors into index 'test-index' for deletion. Mutation changeset identifier: xxxxxx-xxxx-xxxx-xxxx-xxxxxx."
 		`);
 	});
 
-	it("should log error when deleteByIds does not receive ids", async () => {
+	it("should log error when deleteByIds does not receive ids", async ({
+		expect,
+	}) => {
 		mockVectorizeV2Request();
-		await runWrangler("vectorize delete-vectors test-index --ids");
 
-		expect(std.err).toMatchInlineSnapshot(`
-			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1m🚨 Please provide valid vector identifiers for deletion.[0m
-
-"
-		`);
+		await expect(
+			runWrangler("vectorize delete-vectors test-index --ids")
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`[Error: 🚨 Please provide valid vector identifiers for deletion.]`
+		);
 	});
 
-	it("should handle a query on a vectorize index", async () => {
+	it("should handle a query on a vectorize index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		// Parses the vector as [1, 2, 3, 4, 1.5, 2.6, 7, 8]
 		await runWrangler(
 			"vectorize query test-index --vector 1 2 3 '4' 1.5 '2.6' a 'b' null 7 abc 8 undefined"
 		);
-		expect(std.out).toMatchInlineSnapshot(querySnapshot);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Searching for relevant vectors...
+			{
+			  "count": 2,
+			  "matches": [
+			    {
+			      "id": "a",
+			      "score": 0.5,
+			      "values": [
+			        1,
+			        2,
+			        3,
+			        4
+			      ],
+			      "namespace": "abcd",
+			      "metadata": {
+			        "a": true,
+			        "b": 123
+			      }
+			    },
+			    {
+			      "id": "b",
+			      "score": 0.75,
+			      "values": [
+			        5,
+			        6,
+			        7,
+			        8
+			      ],
+			      "metadata": {
+			        "c": false,
+			        "b": "123"
+			      }
+			    }
+			  ]
+			}"
+		`);
 	});
 
-	it("should handle a query with a vector-id", async () => {
+	it("should handle a query with a vector-id", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler("vectorize query test-index --vector-id some-vector-id");
-		expect(std.out).toMatchInlineSnapshot(querySnapshot);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Searching for relevant vectors...
+			{
+			  "count": 2,
+			  "matches": [
+			    {
+			      "id": "a",
+			      "score": 0.5,
+			      "values": [
+			        1,
+			        2,
+			        3,
+			        4
+			      ],
+			      "namespace": "abcd",
+			      "metadata": {
+			        "a": true,
+			        "b": 123
+			      }
+			    },
+			    {
+			      "id": "b",
+			      "score": 0.75,
+			      "values": [
+			        5,
+			        6,
+			        7,
+			        8
+			      ],
+			      "metadata": {
+			        "c": false,
+			        "b": "123"
+			      }
+			    }
+			  ]
+			}"
+		`);
 
 		// No warning or error
 		expect(std.warn).toMatchInlineSnapshot(`""`);
 		expect(std.err).toMatchInlineSnapshot(`""`);
 	});
 
-	it("should handle a query on a vectorize index with all options", async () => {
+	it("should handle a query on a vectorize index with all options", async ({
+		expect,
+	}) => {
 		mockVectorizeV2Request();
 		await runWrangler(
 			`vectorize query test-index --vector 1 2 3 '4' --top-k=2 --return-values=true --return-metadata=indexed --namespace=abc --filter '{ "p1": "abc", "p2": { "$ne": true }, "p3": 10, "p4": false, "nested.p5": "abcd" }'`
 		);
-		expect(std.out).toMatchInlineSnapshot(querySnapshot);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Searching for relevant vectors...
+			{
+			  "count": 2,
+			  "matches": [
+			    {
+			      "id": "a",
+			      "score": 0.5,
+			      "values": [
+			        1,
+			        2,
+			        3,
+			        4
+			      ],
+			      "namespace": "abcd",
+			      "metadata": {
+			        "a": true,
+			        "b": 123
+			      }
+			    },
+			    {
+			      "id": "b",
+			      "score": 0.75,
+			      "values": [
+			        5,
+			        6,
+			        7,
+			        8
+			      ],
+			      "metadata": {
+			        "c": false,
+			        "b": "123"
+			      }
+			    }
+			  ]
+			}"
+		`);
 
 		// No warning > Valid filter
 		expect(std.warn).toMatchInlineSnapshot(`""`);
 	});
 
-	it("should proceed with querying and log warning if the filter is invalid", async () => {
+	it("should proceed with querying and log warning if the filter is invalid", async ({
+		expect,
+	}) => {
 		mockVectorizeV2Request();
 		await runWrangler(
 			"vectorize query test-index --vector 1 2 3 '4' --filter='{ 'p1': [1,2,3] }'"
 		);
-		expect(std.out).toMatchInlineSnapshot(querySnapshot);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Searching for relevant vectors...
+			{
+			  "count": 2,
+			  "matches": [
+			    {
+			      "id": "a",
+			      "score": 0.5,
+			      "values": [
+			        1,
+			        2,
+			        3,
+			        4
+			      ],
+			      "namespace": "abcd",
+			      "metadata": {
+			        "a": true,
+			        "b": 123
+			      }
+			    },
+			    {
+			      "id": "b",
+			      "score": 0.75,
+			      "values": [
+			        5,
+			        6,
+			        7,
+			        8
+			      ],
+			      "metadata": {
+			        "c": false,
+			        "b": "123"
+			      }
+			    }
+			  ]
+			}"
+		`);
 
 		expect(std.warn).toMatchInlineSnapshot(`
 		"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1m🚨 Invalid query filter. Please use the recommended format.[0m
@@ -574,11 +855,14 @@ describe("vectorize commands", () => {
 		`);
 	});
 
-	it("should warn when query returns no vectors", async () => {
+	it("should warn when query returns no vectors", async ({ expect }) => {
 		mockVectorizeV2RequestError();
 		await runWrangler("vectorize query test-index --vector 1 2 3 '4'");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Searching for relevant vectors..."
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Searching for relevant vectors..."
 		`);
 
 		expect(std.warn).toMatchInlineSnapshot(`
@@ -588,35 +872,33 @@ describe("vectorize commands", () => {
 		`);
 	});
 
-	it("should fail query when neither vector nor vector-id is provided", async () => {
+	it("should fail query when neither vector nor vector-id is provided", async ({
+		expect,
+	}) => {
 		mockVectorizeV2RequestError();
-		await runWrangler(
-			"vectorize query test-index --top-k=2 --return-values=true"
+		await expect(
+			runWrangler("vectorize query test-index --top-k=2 --return-values=true")
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`[Error: 🚨 Either vector or vector-id parameter must be provided, but not both.]`
 		);
-		expect(std.out).toMatchInlineSnapshot(`""`);
-
-		expect(std.err).toMatchInlineSnapshot(`
-			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1m🚨 Either vector or vector-id parameter must be provided, but not both.[0m
-
-"
-		`);
 	});
 
-	it("should fail query when both vector and vector-id are provided", async () => {
+	it("should fail query when both vector and vector-id are provided", async ({
+		expect,
+	}) => {
 		mockVectorizeV2RequestError();
-		await runWrangler(
-			"vectorize query test-index --vector 1 2 3 '4' --vector-id some-vector-id"
+		await expect(
+			runWrangler(
+				"vectorize query test-index --vector 1 2 3 '4' --vector-id some-vector-id"
+			)
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`[Error: 🚨 Either vector or vector-id parameter must be provided, but not both.]`
 		);
-		expect(std.out).toMatchInlineSnapshot(`""`);
-
-		expect(std.err).toMatchInlineSnapshot(`
-			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1m🚨 Either vector or vector-id parameter must be provided, but not both.[0m
-
-"
-		`);
 	});
 
-	it("should fail query with invalid return-metadata flag", async () => {
+	it("should fail query with invalid return-metadata flag", async ({
+		expect,
+	}) => {
 		mockVectorizeV2Request();
 
 		await expect(() =>
@@ -629,39 +911,47 @@ describe("vectorize commands", () => {
 		);
 
 		expect(std.err).toMatchInlineSnapshot(`
-				"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mInvalid values:[0m
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mInvalid values:[0m
 
-				    Argument: return-metadata, Given: \\"truncated\\", Choices: \\"all\\", \\"indexed\\", \\"none\\"
+			    Argument: return-metadata, Given: "truncated", Choices: "all", "indexed", "none"
 
-				"
-			`);
-	});
-
-	it("should handle info on a vectorize index", async () => {
-		mockVectorizeV2Request();
-		await runWrangler("vectorize info test-index");
-		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Fetching index info...
-┌────────────┬─────────────┬──────────────────────────────────────┬──────────────────────────┐
-│ dimensions │ vectorCount │ processedUpToMutation                │ processedUpToDatetime    │
-├────────────┼─────────────┼──────────────────────────────────────┼──────────────────────────┤
-│ 1024       │ 1000        │ 7f11d6e5-d126-4f76-936e-fbfec079e0be │ 2024-07-19T13:11:44.064Z │
-└────────────┴─────────────┴──────────────────────────────────────┴──────────────────────────┘"
+			"
 		`);
 	});
 
-	it("should handle create metadata index", async () => {
+	it("should handle info on a vectorize index", async ({ expect }) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize info test-index");
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Fetching index info...
+			┌─┬─┬─┬─┐
+			│ dimensions │ vectorCount │ processedUpToMutation │ processedUpToDatetime │
+			├─┼─┼─┼─┤
+			│ 1024 │ 1000 │ 7f11d6e5-d126-4f76-936e-fbfec079e0be │ 2024-07-19T13:11:44.064Z │
+			└─┴─┴─┴─┘"
+		`);
+	});
+
+	it("should handle create metadata index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler(
 			`vectorize create-metadata-index test-index --property-name='some-prop' --type='string'`
 		);
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Creating metadata index...
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Creating metadata index...
 			✅ Successfully enqueued metadata index creation request. Mutation changeset identifier: xxxxxx-xxxx-xxxx-xxxx-xxxxxx."
 		`);
 	});
 
-	it("should error if create metadata index type is invalid", async () => {
+	it("should error if create metadata index type is invalid", async ({
+		expect,
+	}) => {
 		mockVectorizeV2Request();
 		await expect(() =>
 			runWrangler(
@@ -673,69 +963,296 @@ describe("vectorize commands", () => {
 		expect(std.err).toMatchInlineSnapshot(`
 			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mInvalid values:[0m
 
-			    Argument: type, Given: \\"array\\", Choices: \\"string\\", \\"number\\", \\"boolean\\"
+			    Argument: type, Given: "array", Choices: "string", "number", "boolean"
 
 			"
 		`);
 	});
 
-	it("should handle list metadata index", async () => {
+	it("should handle list metadata index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler(`vectorize list-metadata-index test-index`);
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Fetching metadata indexes...
-┌──────────────┬─────────┐
-│ propertyName │ type    │
-├──────────────┼─────────┤
-│ string-prop  │ string  │
-├──────────────┼─────────┤
-│ num-prop     │ number  │
-├──────────────┼─────────┤
-│ bool-prop    │ boolean │
-└──────────────┴─────────┘"
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Fetching metadata indexes...
+			┌─┬─┐
+			│ propertyName │ type │
+			├─┼─┤
+			│ string-prop │ string │
+			├─┼─┤
+			│ num-prop │ number │
+			├─┼─┤
+			│ bool-prop │ boolean │
+			└─┴─┘"
 		`);
 	});
 
-	it("should warn when list metadata indexes returns empty", async () => {
+	it("should warn when list metadata indexes returns empty", async ({
+		expect,
+	}) => {
 		mockVectorizeV2RequestError();
 		await runWrangler("vectorize list-metadata-index test-index");
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Fetching metadata indexes..."
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Fetching metadata indexes..."
 		`);
 
 		expect(std.warn).toMatchInlineSnapshot(`
 			"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1m[0m
 
-  You haven't created any metadata indexes on this account.
+			  You haven't created any metadata indexes on this account.
 
-  Use 'wrangler vectorize create-metadata-index <name>' to create one, or visit
-  [4mhttps://developers.cloudflare.com/vectorize/[0m to get started.
+			  Use 'wrangler vectorize create-metadata-index <name>' to create one, or visit
+			  [4mhttps://developers.cloudflare.com/vectorize/[0m to get started.
 
 
-"
+			"
 		`);
 	});
 
-	it("should handle delete metadata index", async () => {
+	it("should return empty array JSON when list metadata indexes returns empty with --json flag", async ({
+		expect,
+	}) => {
+		mockVectorizeV2RequestError();
+		await runWrangler("vectorize list-metadata-index test-index --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`[]`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should handle list-metadata-index with valid JSON output", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list-metadata-index test-index --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			[
+			  {
+			    "indexType": "string",
+			    "propertyName": "string-prop",
+			  },
+			  {
+			    "indexType": "number",
+			    "propertyName": "num-prop",
+			  },
+			  {
+			    "indexType": "boolean",
+			    "propertyName": "bool-prop",
+			  },
+			]
+		`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should handle delete metadata index", async ({ expect }) => {
 		mockVectorizeV2Request();
 		await runWrangler(
 			`vectorize delete-metadata-index test-index --property-name='some-prop'`
 		);
 		expect(std.out).toMatchInlineSnapshot(`
-			"📋 Deleting metadata index...
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Deleting metadata index...
 			✅ Successfully enqueued metadata index deletion request. Mutation changeset identifier: xxxxxx-xxxx-xxxx-xxxx-xxxxxx."
 		`);
+	});
+
+	it("should show help when the list-vectors command is passed without an index", async ({
+		expect,
+	}) => {
+		await expect(() => runWrangler("vectorize list-vectors")).rejects.toThrow(
+			"Not enough non-option arguments: got 0, need at least 1"
+		);
+
+		expect(std.err).toMatchInlineSnapshot(`
+			"[31mX [41;31m[[41;97mERROR[41;31m][0m [1mNot enough non-option arguments: got 0, need at least 1[0m
+
+			"
+		`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			wrangler vectorize list-vectors <name>
+
+			List vector identifiers in a Vectorize index
+
+			POSITIONALS
+			  name  The name of the Vectorize index  [string] [required]
+
+			GLOBAL FLAGS
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
+
+			OPTIONS
+			      --count   Maximum number of vectors to return (1-1000)  [number]
+			      --cursor  Cursor for pagination to get the next page of results  [string]
+			      --json    Return output as JSON  [boolean] [default: false]
+
+			EXAMPLES
+			  wrangler vectorize list-vectors my-index                  List vector identifiers in the index 'my-index'
+			  wrangler vectorize list-vectors my-index --count 50       List up to 50 vector identifiers
+			  wrangler vectorize list-vectors my-index --cursor abc123  Continue listing from a specific cursor position"
+		`);
+	});
+
+	it("should handle list-vectors on a vectorize index", async ({ expect }) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list-vectors test-index");
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Listing vectors in index 'test-index'...
+			┌─┬─┐
+			│ # │ Vector ID │
+			├─┼─┤
+			│ 1 │ vector-1 │
+			├─┼─┤
+			│ 2 │ vector-2 │
+			├─┼─┤
+			│ 3 │ vector-3 │
+			└─┴─┘
+
+			Showing 3 of 5 total vectors
+
+			💡 To get the next page, run:
+			   wrangler vectorize list-vectors test-index --cursor next-page-cursor"
+		`);
+	});
+
+	it("should handle list-vectors with custom count parameter", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list-vectors test-index --count 2");
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Listing vectors in index 'test-index'...
+			┌─┬─┐
+			│ # │ Vector ID │
+			├─┼─┤
+			│ 1 │ vector-1 │
+			├─┼─┤
+			│ 2 │ vector-2 │
+			└─┴─┘
+
+			Showing 2 of 5 total vectors
+
+			💡 To get the next page, run:
+			   wrangler vectorize list-vectors test-index --cursor next-page-cursor"
+		`);
+	});
+
+	it("should handle list-vectors with cursor pagination", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler(
+			"vectorize list-vectors test-index --cursor next-page-cursor"
+		);
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Listing vectors in index 'test-index'...
+			┌─┬─┐
+			│ # │ Vector ID │
+			├─┼─┤
+			│ 1 │ vector-4 │
+			├─┼─┤
+			│ 2 │ vector-5 │
+			└─┴─┘
+
+			Showing 2 of 5 total vectors"
+		`);
+	});
+
+	it("should handle list-vectors with valid JSON output", async ({
+		expect,
+	}) => {
+		mockVectorizeV2Request();
+		await runWrangler("vectorize list-vectors test-index --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			{
+			  "count": 3,
+			  "cursorExpirationTimestamp": "2025-08-13T20:32:52.469144957+00:00",
+			  "isTruncated": true,
+			  "nextCursor": "next-page-cursor",
+			  "totalCount": 5,
+			  "vectors": [
+			    {
+			      "id": "vector-1",
+			    },
+			    {
+			      "id": "vector-2",
+			    },
+			    {
+			      "id": "vector-3",
+			    },
+			  ],
+			}
+		`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
+	});
+
+	it("should warn when list-vectors returns no vectors", async ({ expect }) => {
+		mockVectorizeV2RequestError();
+		await runWrangler("vectorize list-vectors test-index");
+		expect(std.out).toMatchInlineSnapshot(`
+			"
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			📋 Listing vectors in index 'test-index'..."
+		`);
+
+		expect(std.warn).toMatchInlineSnapshot(`
+			"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNo vectors found in this index.[0m
+
+			"
+		`);
+	});
+
+	it("should return valid JSON when list-vectors returns no vectors with --json flag", async ({
+		expect,
+	}) => {
+		mockVectorizeV2RequestError();
+		await runWrangler("vectorize list-vectors test-index --json");
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			{
+			  "count": 0,
+			  "cursorExpirationTimestamp": null,
+			  "isTruncated": false,
+			  "nextCursor": null,
+			  "totalCount": 0,
+			  "vectors": [],
+			}
+		`);
+		expect(std.warn).toBe("");
+		expect(std.err).toBe("");
 	});
 });
 
 describe("vectorize query filter", () => {
-	it("should parse correctly", async () => {
+	it("should parse correctly", async ({ expect }) => {
 		let jsonString =
 			'{ "p1": "abc", "p2": { "$ne": true }, "p3": 10, "p4": false, "nested.p5": "abcd", "p6": { "$in": ["a", 3, 4] }, "p7": {"$gt": 4, "$lte": "aaa"} }'; // Successful parse
 		expect(
 			JSON.stringify(validateQueryFilter(JSON.parse(jsonString)))
 		).toMatchInlineSnapshot(
-			`"{\\"p1\\":\\"abc\\",\\"p2\\":{\\"$ne\\":true},\\"p3\\":10,\\"p4\\":false,\\"nested.p5\\":\\"abcd\\",\\"p6\\":{\\"$in\\":[\\"a\\",3,4]},\\"p7\\":{\\"$gt\\":4,\\"$lte\\":\\"aaa\\"}}"`
+			`"{"p1":"abc","p2":{"$ne":true},"p3":10,"p4":false,"nested.p5":"abcd","p6":{"$in":["a",3,4]},"p7":{"$gt":4,"$lte":"aaa"}}"`
 		);
 
 		jsonString =
@@ -743,13 +1260,13 @@ describe("vectorize query filter", () => {
 		expect(
 			JSON.stringify(validateQueryFilter(JSON.parse(jsonString)))
 		).toMatchInlineSnapshot(
-			`"{\\"streaming_platform\\":\\"netflix\\",\\"has_viewed\\":{\\"$ne\\":true}}"`
+			`"{"streaming_platform":"netflix","has_viewed":{"$ne":true}}"`
 		);
 
 		jsonString = '{ "prop_5": "" }'; // Successful parse
 		expect(
 			JSON.stringify(validateQueryFilter(JSON.parse(jsonString)))
-		).toMatchInlineSnapshot(`"{\\"prop_5\\":\\"\\"}"`);
+		).toMatchInlineSnapshot(`"{"prop_5":""}"`);
 
 		const jsonStrings = new Map<number, string>([
 			[0, ""], // Does not get parsed as JSON Object
@@ -784,7 +1301,7 @@ describe("vectorize query filter", () => {
 			try {
 				// This mimics the coerce behavior in the query options.
 				jsObj = JSON.parse(js);
-			} catch (_) {
+			} catch {
 				parseFailureCases.add(i);
 				continue;
 			}
@@ -808,43 +1325,6 @@ describe("vectorize query filter", () => {
 		]);
 	});
 });
-
-const querySnapshot = `
-			"📋 Searching for relevant vectors...
-{
-  \\"count\\": 2,
-  \\"matches\\": [
-    {
-      \\"id\\": \\"a\\",
-      \\"score\\": 0.5,
-      \\"values\\": [
-        1,
-        2,
-        3,
-        4
-      ],
-      \\"namespace\\": \\"abcd\\",
-      \\"metadata\\": {
-        \\"a\\": true,
-        \\"b\\": 123
-      }
-    },
-    {
-      \\"id\\": \\"b\\",
-      \\"score\\": 0.75,
-      \\"values\\": [
-        5,
-        6,
-        7,
-        8
-      ],
-      \\"metadata\\": {
-        \\"c\\": false,
-        \\"b\\": \\"123\\"
-      }
-    }
-  ]
-}"`;
 
 /** Create a mock handler for the Vectorize API */
 function mockVectorizeRequest() {
@@ -1169,6 +1649,58 @@ function mockVectorizeV2Request() {
 				);
 			},
 			{ once: true }
+		),
+		http.get(
+			"*/accounts/:accountId/vectorize/v2/indexes/test-index/list",
+			({ request }) => {
+				const url = new URL(request.url);
+				const count = url.searchParams.get("count");
+				const cursor = url.searchParams.get("cursor");
+
+				// Mock pagination logic
+				if (cursor === "next-page-cursor") {
+					const vectors = [{ id: "vector-4" }, { id: "vector-5" }];
+					return HttpResponse.json(
+						createFetchResult(
+							{
+								count: vectors.length,
+								totalCount: 5,
+								isTruncated: false,
+								nextCursor: null,
+								cursorExpirationTimestamp: null,
+								vectors,
+							},
+							true
+						)
+					);
+				}
+
+				// Default first page response
+				const pageSize = count ? parseInt(count) : 3;
+				const mockVectors = [
+					{ id: "vector-1" },
+					{ id: "vector-2" },
+					{ id: "vector-3" },
+				];
+
+				const returnedVectors = mockVectors.slice(0, pageSize);
+
+				return HttpResponse.json(
+					createFetchResult(
+						{
+							count: returnedVectors.length,
+							totalCount: 5,
+							isTruncated: returnedVectors.length < 5,
+							nextCursor:
+								returnedVectors.length < 5 ? "next-page-cursor" : null,
+							cursorExpirationTimestamp: "2025-08-13T20:32:52.469144957+00:00",
+							vectors: returnedVectors,
+						},
+						true
+					)
+				);
+			},
+			{ once: true }
 		)
 	);
 }
@@ -1211,6 +1743,25 @@ function mockVectorizeV2RequestError() {
 					createFetchResult(
 						{
 							metadataIndexes: [],
+						},
+						true
+					)
+				);
+			},
+			{ once: true }
+		),
+		http.get(
+			"*/accounts/:accountId/vectorize/v2/indexes/test-index/list",
+			() => {
+				return HttpResponse.json(
+					createFetchResult(
+						{
+							count: 0,
+							totalCount: 0,
+							isTruncated: false,
+							nextCursor: null,
+							cursorExpirationTimestamp: null,
+							vectors: [],
 						},
 						true
 					)

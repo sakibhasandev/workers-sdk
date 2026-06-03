@@ -1,17 +1,16 @@
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { Request, Response } from "../../../http";
-import { Log } from "../../../shared";
+import { Response } from "../../../http";
+import { processStackTrace } from "../../../shared";
 import { maybeParseURL } from "../../shared";
-import {
-	contentsToString,
-	maybeGetStringScriptPathIndex,
-	SourceOptions,
-} from "../modules";
+import { contentsToString, maybeGetStringScriptPathIndex } from "../modules";
 import { getSourceMapper } from "./sourcemap";
-import type { UrlAndMap } from "@cspotcode/source-map-support";
+import type { Request } from "../../../http";
+import type { Log } from "../../../shared";
+import type { SourceOptions } from "../modules";
+import type { RawSourceMap, UrlAndMap } from "@cspotcode/source-map-support";
 
 // Subset of core worker options that define Worker source code.
 // These are the possible cases, and corresponding reported source files in
@@ -120,9 +119,30 @@ function maybeGetFile(
 	// Otherwise, something's gone wrong, so don't do any source mapping.
 }
 
+// Like Object.fromEntries(), but preserves all values per header (string or array)
+function getHeaders(request: Request) {
+	const headers: Record<string, string | string[]> = {};
+
+	for (const [key, value] of request.headers.entries()) {
+		if (headers[key] === undefined) {
+			headers[key] = value;
+		} else if (typeof headers[key] === "string") {
+			headers[key] = [headers[key], value];
+		} else {
+			headers[key].push(value);
+		}
+	}
+
+	return headers;
+}
+
 function getSourceMappedStack(
 	workerSrcOpts: NameSourceOptions[],
-	error: Error
+	error: Error,
+	onSourceMap?: (
+		sourcemap: RawSourceMap,
+		sourceMapPath: string
+	) => RawSourceMap | void
 ) {
 	// This function needs to match the signature of the `retrieveSourceMap`
 	// option from the "source-map-support" package.
@@ -142,6 +162,22 @@ function getSourceMappedStack(
 		const sourceMapPath = path.resolve(root, sourceMapMatch[1]);
 		const sourceMapFile = maybeGetDiskFile(sourceMapPath);
 		if (sourceMapFile === undefined) return null;
+
+		if (onSourceMap) {
+			try {
+				const sourcemap = JSON.parse(sourceMapFile.contents);
+				const result = onSourceMap(sourcemap, sourceMapFile.path);
+
+				if (result !== undefined) {
+					return {
+						map: JSON.stringify(result),
+						url: sourceMapFile.path,
+					};
+				}
+			} catch {
+				return null;
+			}
+		}
 
 		return { map: sourceMapFile.contents, url: sourceMapFile.path };
 	}
@@ -184,14 +220,18 @@ const ALLOWED_ERROR_SUBCLASS_CONSTRUCTORS: StandardErrorConstructor[] = [
 ];
 export function reviveError(
 	workerSrcOpts: NameSourceOptions[],
-	jsonError: JsonError
+	jsonError: JsonError,
+	onSourceMap?: (
+		sourcemap: RawSourceMap,
+		sourceMapPath: string
+	) => RawSourceMap | void
 ): Error {
 	// At a high level, this function takes a JSON-serialisable representation of
 	// an `Error`, and converts it to an `Error`. `Error`s may have `cause`s, so
 	// we need to do this recursively.
 	let cause: Error | undefined;
 	if (jsonError.cause !== undefined) {
-		cause = reviveError(workerSrcOpts, jsonError.cause);
+		cause = reviveError(workerSrcOpts, jsonError.cause, onSourceMap);
 	}
 
 	// If this is one of the built-in error types, construct an instance of that.
@@ -218,7 +258,14 @@ export function reviveError(
 	error.stack = jsonError.stack;
 
 	// Try to apply source-mapping to the stack trace
-	error.stack = getSourceMappedStack(workerSrcOpts, error);
+	error.stack = processStackTrace(
+		getSourceMappedStack(workerSrcOpts, error, onSourceMap),
+		(line, location) =>
+			!location.includes(".wrangler/tmp") &&
+			!location.includes("wrangler/templates/middleware")
+				? line
+				: null
+	);
 
 	return error;
 }
@@ -231,11 +278,28 @@ export async function handlePrettyErrorRequest(
 	// Parse and validate the error we've been given from user code
 	const caught = JsonErrorSchema.parse(await request.json());
 
-	// Convert the error into a regular `Error` object and try to source-map it.
-	// We need to give `name`, `message` and `stack` to Youch, but StackTracy,
-	// Youch's dependency for parsing `stack`s, will only extract `stack` from
-	// an object if it's an `instanceof Error`.
-	const error = reviveError(workerSrcOpts, caught);
+	// We might populate the source in Youch with the sources content from the sourcemap
+	// in case the source file does not exist on disk
+	const sourcesContentMap = new Map<string, string>();
+	const error = reviveError(
+		workerSrcOpts,
+		caught,
+		(sourceMap, sourceMapPath) => {
+			for (let i = 0; i < sourceMap.sources.length; i++) {
+				const source = sourceMap.sources[i];
+				const sourceContent = sourceMap.sourcesContent?.[i];
+
+				if (sourceContent) {
+					const fullSourcePath = path.resolve(
+						path.dirname(sourceMapPath),
+						sourceMap.sourceRoot ?? "",
+						source
+					);
+					sourcesContentMap.set(fullSourcePath, sourceContent);
+				}
+			}
+		}
+	);
 
 	// Log source-mapped error to console if logging enabled
 	log.error(error);
@@ -255,21 +319,71 @@ export async function handlePrettyErrorRequest(
 	}
 
 	// Lazily import `youch` when required
-	const Youch: typeof import("youch").default = require("youch");
-	// `cause` is usually more useful than the error itself, display that instead
-	// TODO(someday): would be nice if we could display both
-	const youch = new Youch(error.cause ?? error, {
-		url: request.cf?.prettyErrorOriginalUrl ?? request.url,
-		method: request.method,
-		headers: Object.fromEntries(request.headers),
+	// eslint-disable-next-line @typescript-eslint/no-require-imports -- lazy require to avoid loading youch until an error page is needed
+	const { Youch }: typeof import("youch") = require("youch");
+	const youch = new Youch();
+
+	youch.defineSourceLoader(async (stackFrame) => {
+		if (!stackFrame.fileName) {
+			return;
+		}
+
+		if (
+			stackFrame.type === "native" ||
+			stackFrame.fileName.startsWith("cloudflare:") ||
+			stackFrame.fileName.startsWith("node:")
+		) {
+			stackFrame.type = "native";
+			return;
+		}
+
+		if (!fs.existsSync(stackFrame.fileName)) {
+			// Mark the file type as undefined to skip the link to the source file
+			stackFrame.fileType = undefined;
+		}
+
+		// Check if it is an inline script, which are reported as "script-<workerIndex>"
+		const workerIndex = maybeGetStringScriptPathIndex(stackFrame.fileName);
+		if (workerIndex !== undefined) {
+			const srcOpts = workerSrcOpts[workerIndex];
+			if ("script" in srcOpts && srcOpts.script !== undefined) {
+				return { contents: srcOpts.script };
+			}
+		}
+
+		// Check if the source map has the source content for this file so we don't need to read it from disk
+		const sourcesContent = sourcesContentMap.get(stackFrame.fileName);
+		if (sourcesContent) {
+			return { contents: sourcesContent };
+		}
+
+		try {
+			const contents = fs.readFileSync(stackFrame.fileName, {
+				encoding: "utf8",
+			});
+
+			return { contents };
+		} catch {
+			// If we can't read the file, just return undefined
+			return;
+		}
 	});
-	youch.addLink(() => {
-		return [
-			'<a href="https://developers.cloudflare.com/workers/" target="_blank" style="text-decoration:none">📚 Workers Docs</a>',
-			'<a href="https://discord.cloudflare.com" target="_blank" style="text-decoration:none">💬 Workers Discord</a>',
+	youch.useTransformer((error) => {
+		error.hint = [
+			'<a href="https://developers.cloudflare.com/workers/" target="_blank" style="text-decoration:none;font-style:normal;padding:5px">📚 Workers Docs</a>',
+			'<a href="https://discord.cloudflare.com" target="_blank" style="text-decoration:none;font-style: normal;padding:5px">💬 Workers Discord</a>',
 		].join("");
 	});
-	return new Response(await youch.toHTML(), {
+
+	const html = await youch.toHTML(error, {
+		request: {
+			url: `${request.cf?.prettyErrorOriginalUrl ?? request.url}`,
+			method: request.method,
+			headers: getHeaders(request),
+		},
+	});
+
+	return new Response(html, {
 		status: 500,
 		headers: { "Content-Type": "text/html;charset=utf-8" },
 	});

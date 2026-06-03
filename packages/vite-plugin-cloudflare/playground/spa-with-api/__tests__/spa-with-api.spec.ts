@@ -1,61 +1,66 @@
-import { createConnection } from "node:net";
-import { expect, test } from "vitest";
-import { page } from "../../__test-utils__";
-import { viteTestUrl } from "../../vitest-setup";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { test } from "vitest";
+import {
+	getResponse,
+	getTextResponse,
+	isBuild,
+	page,
+	rootDir,
+	viteTestUrl,
+} from "../../__test-utils__";
+import "./base-tests";
 
-test("returns the correct home page", async () => {
-	const content = await page.textContent("h1");
-	expect(content).toBe("Vite + React");
+test("returns the home page directly without invoking the Worker", async ({
+	expect,
+}) => {
+	const response = await getResponse();
+	expect(await response.headerValue("content-type")).toContain("text/html");
+	expect(await response.headerValue("is-worker-response")).toBe(null);
 });
 
-test("returns the response from the API", async () => {
-	const button = page.getByRole("button", { name: "get-name" });
-	const contentBefore = await button.innerText();
-	expect(contentBefore).toBe("Name from API is: unknown");
-	const responsePromise = page.waitForResponse((response) =>
-		response.url().endsWith("/api/")
-	);
-	await button.click();
-	await responsePromise;
-	const contentAfter = await button.innerText();
-	expect(contentAfter).toBe("Name from API is: Cloudflare");
-});
-
-test("returns the home page even for 404-y pages", async () => {
-	await page.goto(`${viteTestUrl}/foo`);
-	const content = await page.textContent("h1");
-	expect(content).toBe("Vite + React");
-});
-
-test("returns the home page even for API-y pages", async () => {
+test("returns the home page for not found route on navigation request ('sec-fetch-mode: navigate' header included)", async ({
+	expect,
+}) => {
 	await page.goto(`${viteTestUrl}/api/`);
 	const content = await page.textContent("h1");
 	expect(content).toBe("Vite + React");
 });
 
-test("requests made with/without explicit 'sec-fetch-mode: navigate' header to delegate correctly", async () => {
-	const responseWithoutHeader = await fetch(`${viteTestUrl}/foo`);
-	expect(responseWithoutHeader.status).toBe(404);
-	expect(await responseWithoutHeader.text()).toEqual("nothing here");
-
-	// can't make `fetch`es with `sec-fetch-mode: navigate` header, so we're doing it raw
-	const { hostname, port } = new URL(viteTestUrl);
-	const socket = createConnection(parseInt(port), hostname, () => {
-		socket.write(
-			`GET /foo HTTP/1.1\r\nHost: ${hostname}\r\nSec-Fetch-Mode: navigate\r\n\r\n`
-		);
-	});
-
-	let responseWithoutHeaderContentBuffer = "";
-	socket.on("data", (data) => {
-		responseWithoutHeaderContentBuffer += data.toString();
-	});
-
-	const responseWithoutHeaderContent = await new Promise((resolve) =>
-		socket.on("close", () => {
-			resolve(responseWithoutHeaderContentBuffer);
-		})
-	);
-
-	expect(responseWithoutHeaderContent).toContain("Vite + React");
+test("returns the Worker API response for API route on non-navigation request ('sec-fetch-mode: navigate' header not included)", async ({
+	expect,
+}) => {
+	const response = await fetch(`${viteTestUrl}/api/`);
+	expect(response.status).toBe(200);
+	const json = await response.json();
+	expect(json).toEqual({ name: "Cloudflare" });
 });
+
+test("returns the Worker fallback response for not found route on non-navigation request ('sec-fetch-mode: navigate' header not included)", async ({
+	expect,
+}) => {
+	const response = await fetch(`${viteTestUrl}/foo`);
+	expect(response.status).toBe(200);
+	expect(response.headers.get("content-type")).toContain("text/html");
+	expect(response.headers.get("is-worker-response")).toBe("true");
+});
+
+test.runIf(!isBuild)(
+	"returns the file for API route when the route matches a file in dev",
+	async ({ expect }) => {
+		const text = await getTextResponse("/api/some-file.txt");
+		expect(text).toBe(`Some file content.\n`);
+	}
+);
+
+test.runIf(isBuild)(
+	"emits .assetsignore file in client output directory",
+	({ expect }) => {
+		expect(
+			fs.readFileSync(
+				path.join(rootDir, "dist", "client", ".assetsignore"),
+				"utf-8"
+			)
+		).toBe(`wrangler.json\n.dev.vars\n`);
+	}
+);

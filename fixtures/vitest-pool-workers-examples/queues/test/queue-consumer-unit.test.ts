@@ -2,13 +2,14 @@ import { randomBytes } from "node:crypto";
 import {
 	createExecutionContext,
 	createMessageBatch,
-	env,
 	getQueueResult,
 } from "cloudflare:test";
-import { expect, it } from "vitest";
+import { env } from "cloudflare:workers";
+import { it } from "vitest";
 import worker from "../src/index";
+import type { QueueJob } from "../src/index";
 
-it("consumes queue messages", async () => {
+it("consumes queue messages", async ({ expect }) => {
 	// Call `queue()` handler directly
 	const messages: ServiceBindingQueueMessage<QueueJob>[] = [
 		{

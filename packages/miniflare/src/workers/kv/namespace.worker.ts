@@ -4,13 +4,11 @@ import {
 	DELETE,
 	GET,
 	HttpError,
-	KeyValueEntry,
 	KeyValueStorage,
 	maybeApply,
 	MiniflareDurableObject,
 	POST,
 	PUT,
-	RouteHandler,
 } from "miniflare:shared";
 import { KVHeaders, KVLimits, KVParams, MAX_BULK_GET_KEYS } from "./constants";
 import {
@@ -21,6 +19,7 @@ import {
 	validateListOptions,
 	validatePutOptions,
 } from "./validator.worker";
+import type { KeyValueEntry, RouteHandler } from "miniflare:shared";
 
 interface KVParams {
 	key: string;
@@ -97,7 +96,7 @@ async function processKeyValue(
 			: type === "json"
 				? JSON.parse(decodedValue)
 				: decodedValue;
-	} catch (err: any) {
+	} catch {
 		throw new HttpError(
 			400,
 			`At least one of the requested keys corresponds to a non-${type} value`
@@ -136,13 +135,17 @@ export class KVNamespaceObject extends MiniflareDurableObject {
 			const keys: string[] = parsedBody.keys;
 			const type = parsedBody?.type;
 			if (type && type !== "text" && type !== "json") {
-				return new Response("Bad Request", { status: 400 });
+				const errorStr = `"${type}" is not a valid type. Use "json" or "text"`;
+				return new Response(errorStr, { status: 400, statusText: errorStr });
 			}
 			const obj: { [key: string]: any } = {};
 			if (keys.length > MAX_BULK_GET_KEYS) {
-				return new Response("Bad Request", {
-					status: 400,
-				});
+				const errorStr = `You can request a maximum of ${MAX_BULK_GET_KEYS} keys`;
+				return new Response(errorStr, { status: 400, statusText: errorStr });
+			}
+			if (keys.length < 1) {
+				const errorStr = "You must request a minimum of 1 key";
+				return new Response(errorStr, { status: 400, statusText: errorStr });
 			}
 			let totalBytes = 0;
 			for (const key of keys) {
@@ -157,8 +160,8 @@ export class KVNamespaceObject extends MiniflareDurableObject {
 				obj[key] = value;
 			}
 			const maxValueSize = this.beingTested
-				? KVLimits.MAX_VALUE_SIZE_TEST
-				: KVLimits.MAX_BULK_SIZE;
+				? KVLimits.MAX_VALUE_SIZE_TEST_BYTES
+				: KVLimits.MAX_BULK_SIZE_BYTES;
 			if (totalBytes > maxValueSize) {
 				throw new HttpError(
 					413,
@@ -213,9 +216,7 @@ export class KVNamespaceObject extends MiniflareDurableObject {
 		// through a transform stream to count it (trusting `workerd` to send
 		// correct value here).
 		let value = req.body;
-		// Safety of `!`: `parseInt(null)` is `NaN`
-		// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-		const contentLength = parseInt(req.headers.get("Content-Length")!);
+		const contentLength = parseInt(req.headers.get("Content-Length") ?? "NaN");
 		let valueLengthHint: number | undefined;
 		if (!Number.isNaN(contentLength)) valueLengthHint = contentLength;
 		else if (value === null) valueLengthHint = 0;
@@ -229,8 +230,8 @@ export class KVNamespaceObject extends MiniflareDurableObject {
 		});
 
 		const maxValueSize = this.beingTested
-			? KVLimits.MAX_VALUE_SIZE_TEST
-			: KVLimits.MAX_VALUE_SIZE;
+			? KVLimits.MAX_VALUE_SIZE_TEST_BYTES
+			: KVLimits.MAX_VALUE_SIZE_BYTES;
 		let maxLengthStream: MaxLengthStream | undefined;
 		if (valueLengthHint !== undefined && valueLengthHint > maxValueSize) {
 			// If we know the size of the value (i.e. from `Content-Length`) use that

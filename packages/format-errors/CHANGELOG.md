@@ -1,5 +1,39 @@
 # format-errors
 
+## 0.0.8
+
+### Patch Changes
+
+- [#12753](https://github.com/cloudflare/workers-sdk/pull/12753) [`ea8b1a4`](https://github.com/cloudflare/workers-sdk/commit/ea8b1a4619b663598f03d72760090f5e67827d05) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Replace deprecated `promjs` library with `MetricsRegistry` from `@cloudflare/workers-utils/prometheus-metrics`
+
+  The `promjs` library has been unmaintained since 2022 and has a broken `package.json` requiring workarounds. It has been replaced with a lightweight `MetricsRegistry` class in `@cloudflare/workers-utils/prometheus-metrics` that produces byte-identical Prometheus text exposition format output.
+
+## 0.0.7
+
+### Patch Changes
+
+- [#12756](https://github.com/cloudflare/workers-sdk/pull/12756) [`c7d0d18`](https://github.com/cloudflare/workers-sdk/commit/c7d0d189a40bea786e0425f25d9aa15686f40e92) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - Fix error formatting to reliably return fallback responses on failure
+
+  Previously, if something went wrong while formatting a pretty error page, the failure could go unhandled, resulting in no response being returned to the user. Now, errors during formatting are properly caught, ensuring users always receive a 500 JSON fallback response.
+
+## 0.0.6
+
+### Patch Changes
+
+- [#11217](https://github.com/cloudflare/workers-sdk/pull/11217) [`9ed1542`](https://github.com/cloudflare/workers-sdk/commit/9ed1542e854be65f7c03ed9596ec36767ce8aa36) Thanks [@penalosa](https://github.com/penalosa)! - Use toucan-js v4
+
+## 0.0.5
+
+### Patch Changes
+
+- [#9649](https://github.com/cloudflare/workers-sdk/pull/9649) [`ec9b417`](https://github.com/cloudflare/workers-sdk/commit/ec9b417f8ed711e7b5044410e83d781f123a6a62) Thanks [@petebacondarwin](https://github.com/petebacondarwin)! - patch release to trigger a test release
+
+## 0.0.4
+
+### Patch Changes
+
+- [#9033](https://github.com/cloudflare/workers-sdk/pull/9033) [`2c50115`](https://github.com/cloudflare/workers-sdk/commit/2c501151d3d1a563681cdb300a298b83862b60e2) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - chore: convert wrangler.toml files into wrangler.jsonc ones
+
 ## 0.0.3
 
 ### Patch Changes

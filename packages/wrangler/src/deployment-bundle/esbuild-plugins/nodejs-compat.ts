@@ -1,4 +1,4 @@
-import { relative } from "path";
+import { relative } from "node:path";
 import chalk from "chalk";
 import { logger } from "../../logger";
 import { dedent } from "../../utils/dedent";
@@ -79,7 +79,7 @@ export const nodejsCompatPlugin = (mode: NodeJSCompatMode): Plugin => ({
 								Your worker has no default export, which means it is assumed to be a Service Worker format Worker.
 								Did you mean to create a ES Module format Worker?
 								If so, try adding \`export default { ... }\` in your entry-point.
-								See https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/.
+								See https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/
 							`,
 						},
 					],

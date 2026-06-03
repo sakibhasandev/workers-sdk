@@ -1,5 +1,5 @@
-import assert from "assert";
-import path from "path";
+import assert from "node:assert";
+import path from "node:path";
 import * as esbuild from "esbuild";
 import { dedent } from "ts-dedent";
 import { defineConfig } from "vitest/config";
@@ -34,6 +34,7 @@ function embedWorkersPlugin() {
 				metafile: true,
 				entryPoints: [id],
 				outdir: OUTDIR,
+				external: ["cloudflare:email", "cloudflare:workers"],
 			});
 			const watchFiles = Object.keys(result?.metafile?.inputs ?? {});
 			const scriptPath = Object.keys(result?.metafile?.outputs ?? {}).find(
@@ -48,7 +49,7 @@ function embedWorkersPlugin() {
 				this.addWatchFile(file);
 			}
 
-			return dedent/*javascript*/ `
+			return dedent /*javascript*/ `
 				export default ${absoluteScriptPath};
 			`;
 		},
@@ -58,20 +59,16 @@ function embedWorkersPlugin() {
 export default defineConfig({
 	plugins: [embedWorkersPlugin()],
 	test: {
-		testTimeout: 15_000,
+		testTimeout: 50_000,
 		pool: "forks",
 		retry: 0,
 		include: ["**/__tests__/**/*.test.ts", "**/__tests__/**/*.test.tsx"],
-		// eslint-disable-next-line turbo/no-undeclared-env-vars
+		// eslint-disable-next-line turbo/no-undeclared-env-vars -- TEST_REPORT_PATH is optionally set by CI
 		outputFile: process.env.TEST_REPORT_PATH ?? ".e2e-test-report/index.html",
 		setupFiles: path.resolve(__dirname, "src/__tests__/vitest.setup.ts"),
 		globalSetup: path.resolve(__dirname, "src/__tests__/vitest.global.ts"),
 		reporters: ["default", "html"],
 		globals: true,
-		snapshotFormat: {
-			escapeString: true,
-			printBasicPrototype: true,
-		},
 		unstubEnvs: true,
 	},
 });

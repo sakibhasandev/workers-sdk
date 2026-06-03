@@ -1,6 +1,9 @@
-import { Data, List, Message, Struct } from "capnp-es";
-import { Config as CapnpConfig } from "./generated";
-import { Config, kVoid } from "./workerd";
+import { writeFileSync } from "node:fs";
+import { Message } from "capnp-es";
+import { Config as CapnpConfig } from "./generated/workerd";
+import { kVoid } from "./workerd";
+import type { Config } from "./workerd";
+import type { Data, List, Struct } from "capnp-es";
 
 function capitalize<S extends string>(str: S): Capitalize<S> {
 	return (
@@ -47,6 +50,10 @@ function encodeCapnpStruct(obj: any, struct: Struct) {
 }
 
 export function serializeConfig(config: Config): Buffer {
+	const debugPath = process.env.MINIFLARE_WORKERD_CONFIG_DEBUG;
+	if (debugPath) {
+		writeFileSync(debugPath, JSON.stringify(config, null, 2));
+	}
 	const message = new Message();
 	const struct = message.initRoot(CapnpConfig);
 	encodeCapnpStruct(config, struct);

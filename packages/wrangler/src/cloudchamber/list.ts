@@ -1,4 +1,4 @@
-import { logRaw, shapes, space } from "@cloudflare/cli";
+import { logRaw, shapes, space } from "@cloudflare/cli-shared-helpers";
 import {
 	bgCyan,
 	bgRed,
@@ -8,26 +8,39 @@ import {
 	green,
 	white,
 	yellow,
-} from "@cloudflare/cli/colors";
-import { inputPrompt, spinner } from "@cloudflare/cli/interactive";
-import isInteractive from "../is-interactive";
+} from "@cloudflare/cli-shared-helpers/colors";
+import {
+	inputPrompt,
+	spinner,
+} from "@cloudflare/cli-shared-helpers/interactive";
+import {
+	DeploymentsService,
+	PlacementsService,
+} from "@cloudflare/containers-shared";
+import { createCommand } from "../core/create-command";
+import { isNonInteractiveOrCI } from "../is-interactive";
+import { logger } from "../logger";
+import { capitalize } from "../utils/strings";
 import { listDeploymentsAndChoose, loadDeployments } from "./cli/deployments";
-import { capitalize, statusToColored } from "./cli/util";
-import { DeploymentsService, PlacementsService } from "./client";
-import { loadAccountSpinner, promiseSpinner } from "./common";
-import type { Config } from "../config";
+import { statusToColored } from "./cli/util";
+import {
+	cloudchamberScope,
+	fillOpenAPIConfiguration,
+	promiseSpinner,
+} from "./common";
 import type {
-	CommonYargsArgvJSON,
-	StrictYargsOptionsToInterfaceJSON,
+	CommonYargsArgv,
+	StrictYargsOptionsToInterface,
 } from "../yargs-types";
+import type { EventName } from "./enums";
 import type {
 	DeploymentPlacementState,
 	PlacementEvent,
 	PlacementWithEvents,
-} from "./client";
-import type { EventName } from "./enums";
+} from "@cloudflare/containers-shared";
+import type { Config } from "@cloudflare/workers-utils";
 
-export function listDeploymentsYargs(args: CommonYargsArgvJSON) {
+export function listDeploymentsYargs(args: CommonYargsArgv) {
 	return args
 		.option("location", {
 			requiresArg: true,
@@ -68,14 +81,11 @@ export function listDeploymentsYargs(args: CommonYargsArgvJSON) {
 }
 
 export async function listCommand(
-	deploymentArgs: StrictYargsOptionsToInterfaceJSON<
-		typeof listDeploymentsYargs
-	>,
+	deploymentArgs: StrictYargsOptionsToInterface<typeof listDeploymentsYargs>,
 	config: Config
 ) {
-	await loadAccountSpinner(deploymentArgs);
 	const prefix = (deploymentArgs.deploymentIdPrefix ?? "") as string;
-	if (deploymentArgs.json || !isInteractive()) {
+	if (isNonInteractiveOrCI()) {
 		const deployments = (
 			await DeploymentsService.listDeploymentsV2(
 				undefined,
@@ -90,20 +100,14 @@ export async function listCommand(
 			const placements = await PlacementsService.listPlacements(
 				deployments[0].id
 			);
-			console.log(
-				JSON.stringify(
-					{
-						...deployments[0],
-						placements,
-					},
-					null,
-					4
-				)
-			);
+			logger.json({
+				...deployments[0],
+				placements,
+			});
 			return;
 		}
 
-		console.log(JSON.stringify(deployments, null, 4));
+		logger.json(deployments);
 		return;
 	}
 
@@ -135,7 +139,7 @@ function eventMessage(event: PlacementEvent, lastEvent: boolean): string {
 
 const listCommandHandle = async (
 	deploymentIdPrefix: string,
-	args: StrictYargsOptionsToInterfaceJSON<typeof listDeploymentsYargs>,
+	args: StrictYargsOptionsToInterface<typeof listDeploymentsYargs>,
 	_config: Config
 ) => {
 	const keepListIter = true;
@@ -191,3 +195,58 @@ const listCommandHandle = async (
 		stop();
 	}
 };
+
+export const cloudchamberListCommand = createCommand({
+	metadata: {
+		description: "List and view status of deployments",
+		status: "alpha",
+		owner: "Product: Cloudchamber",
+		hidden: false,
+	},
+	behaviour: {
+		printBanner: () => !isNonInteractiveOrCI(),
+	},
+	args: {
+		deploymentIdPrefix: {
+			describe:
+				"Optional deploymentId to filter deployments. This means that 'list' will only showcase deployments that contain this ID prefix",
+			type: "string",
+		},
+		location: {
+			requiresArg: true,
+			type: "string",
+			demandOption: false,
+			describe: "Filter deployments by location",
+		},
+		image: {
+			requiresArg: true,
+			type: "string",
+			demandOption: false,
+			describe: "Filter deployments by image",
+		},
+		state: {
+			requiresArg: true,
+			type: "string",
+			demandOption: false,
+			describe: "Filter deployments by deployment state",
+		},
+		ipv4: {
+			requiresArg: true,
+			type: "string",
+			demandOption: false,
+			describe: "Filter deployments by ipv4 address",
+		},
+		label: {
+			requiresArg: true,
+			type: "array",
+			demandOption: false,
+			describe: "Filter deployments by labels",
+			coerce: (arg: unknown[]) => arg.map((a) => a?.toString() ?? ""),
+		},
+	},
+	positionalArgs: ["deploymentIdPrefix"],
+	async handler(args, { config }) {
+		await fillOpenAPIConfiguration(config, cloudchamberScope);
+		await listCommand(args, config);
+	},
+});

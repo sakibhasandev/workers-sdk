@@ -1,12 +1,16 @@
+import {
+	mockCreateDate,
+	mockModifiedDate,
+	runInTempDir,
+} from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
-import { vi } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { endEventLoop } from "./helpers/end-event-loop";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { clearDialogs, mockConfirm, mockPrompt } from "./helpers/mock-dialogs";
 import { useMockIsTTY } from "./helpers/mock-istty";
 import { createFetchResult, msw } from "./helpers/msw";
-import { runInTempDir } from "./helpers/run-in-tmp";
 import { runWrangler } from "./helpers/run-wrangler";
 import type {
 	CreateSecret,
@@ -18,30 +22,32 @@ describe("secrets-store help", () => {
 	const std = mockConsoleMethods();
 	runInTempDir();
 
-	it("shows help text when no arguments are passed", async () => {
+	it("shows help text when no arguments are passed", async ({ expect }) => {
 		await runWrangler("secrets-store");
 		await endEventLoop();
 
 		expect(std.err).toMatchInlineSnapshot(`""`);
 		expect(std.out).toMatchInlineSnapshot(`
-		  "wrangler secrets-store
+			"wrangler secrets-store
 
-🔐 Manage the Secrets Store [alpha]
+			🔐 Manage the Secrets Store [open beta]
 
-COMMANDS
-  wrangler secrets-store store   🔐 Manage Stores within the Secrets Store [alpha]
-  wrangler secrets-store secret  🔐 Manage Secrets within the Secrets Store [alpha]
+			COMMANDS
+			  wrangler secrets-store store   🔐 Manage Stores within the Secrets Store [open beta]
+			  wrangler secrets-store secret  🔐 Manage Secrets within the Secrets Store [open beta]
 
-GLOBAL FLAGS
-  -c, --config   Path to Wrangler configuration file  [string]
-      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-  -h, --help     Show help  [boolean]
-  -v, --version  Show version number  [boolean]"
+			GLOBAL FLAGS
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("shows help when an invalid argument is passed", async () => {
+	it("shows help when an invalid argument is passed", async ({ expect }) => {
 		await expect(() => runWrangler("secrets-store qwer")).rejects.toThrow(
 			"Unknown argument: qwer"
 		);
@@ -52,21 +58,23 @@ GLOBAL FLAGS
 		"
 	`);
 		expect(std.out).toMatchInlineSnapshot(`
-		  "
-wrangler secrets-store
+			"
+			wrangler secrets-store
 
-🔐 Manage the Secrets Store [alpha]
+			🔐 Manage the Secrets Store [open beta]
 
-COMMANDS
-  wrangler secrets-store store   🔐 Manage Stores within the Secrets Store [alpha]
-  wrangler secrets-store secret  🔐 Manage Secrets within the Secrets Store [alpha]
+			COMMANDS
+			  wrangler secrets-store store   🔐 Manage Stores within the Secrets Store [open beta]
+			  wrangler secrets-store secret  🔐 Manage Secrets within the Secrets Store [open beta]
 
-GLOBAL FLAGS
-  -c, --config   Path to Wrangler configuration file  [string]
-      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-  -h, --help     Show help  [boolean]
-  -v, --version  Show version number  [boolean]"
+			GLOBAL FLAGS
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 });
@@ -92,23 +100,26 @@ describe("secrets-store store commands", () => {
 	});
 
 	describe("secrets-store store create", () => {
-		it("creates a store", async () => {
+		it("creates a store", async ({ expect }) => {
 			const reqProm = mockStoreCreate();
 			await runWrangler("secrets-store store create test-store --remote");
 
 			await expect(reqProm).resolves.toMatchInlineSnapshot(`
-        Object {
-          "name": "test-store",
-        }
-      `);
+				{
+				  "name": "test-store",
+				}
+			`);
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "🔐 Creating store... (Name: test-store)
-✅ Created store! (Name: test-store, ID: 8b9199cad1954bc39add51c948767679)"
-      `);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🔐 Creating store... (Name: test-store)
+				✅ Created store! (Name: test-store, ID: 8b9199cad1954bc39add51c948767679)"
+			`);
 		});
 
-		it("errors in creating a store when no name passed", async () => {
+		it("errors in creating a store when no name passed", async ({ expect }) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler("secrets-store store create --remote");
@@ -122,23 +133,26 @@ describe("secrets-store store commands", () => {
 	});
 
 	describe("secrets-store store list", () => {
-		it("lists stores", async () => {
+		it("lists stores", async ({ expect }) => {
 			mockStoreList();
 			await runWrangler("secrets-store store list --remote");
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "🔐 Listing stores...
-┌─────────────┬──────────────────────────────────┬──────────────────────────────────┬──────────────────────┬──────────────────────┐
-│ Name        │ ID                               │ AccountID                        │ Created              │ Modified             │
-├─────────────┼──────────────────────────────────┼──────────────────────────────────┼──────────────────────┼──────────────────────┤
-│ other-store │ 8686c49f762447988c02fd472f1fa82d │ 1b3ea6aa53af9903d51524c75900323a │ 3/4/2025, 8:10:35 PM │ 3/4/2025, 8:10:35 PM │
-├─────────────┼──────────────────────────────────┼──────────────────────────────────┼──────────────────────┼──────────────────────┤
-│ test-store  │ 8686c49f762447988c02fd472f1fa82c │ 1b3ea6aa53af9903d51524c75900323a │ 3/4/2025, 8:10:35 PM │ 3/4/2025, 8:10:35 PM │
-└─────────────┴──────────────────────────────────┴──────────────────────────────────┴──────────────────────┴──────────────────────┘"
-      `);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🔐 Listing stores...
+				┌─┬─┬─┬─┬─┐
+				│ Name │ ID │ AccountID │ Created │ Modified │
+				├─┼─┼─┼─┼─┤
+				│ other-store │ 8686c49f762447988c02fd472f1fa82d │ 1b3ea6aa53af9903d51524c75900323a │ [mock-create-date] │ [mock-modified-date] │
+				├─┼─┼─┼─┼─┤
+				│ test-store │ 8686c49f762447988c02fd472f1fa82c │ 1b3ea6aa53af9903d51524c75900323a │ [mock-create-date] │ [mock-modified-date] │
+				└─┴─┴─┴─┴─┘"
+			`);
 		});
 
-		it("handles an empty response of stores", async () => {
+		it("handles an empty response of stores", async ({ expect }) => {
 			mockStoreListEmpty();
 
 			let err: undefined | Error;
@@ -176,7 +190,7 @@ describe("secrets-store secret commands", () => {
 	});
 
 	describe("secrets-store secret create", () => {
-		it("creates a secret", async () => {
+		it("creates a secret", async ({ expect }) => {
 			const reqProm = mockSecretCreate();
 
 			mockPrompt({
@@ -195,31 +209,36 @@ describe("secrets-store secret commands", () => {
 			);
 
 			await expect(reqProm).resolves.toMatchInlineSnapshot(`
-        Array [
-          Object {
-            "comment": "wrangler secret",
-            "name": "TEST_SECRET",
-            "scopes": Array [
-              "workers",
-            ],
-            "value": "shhhhhhh!",
-          },
-        ]
-      `);
+				[
+				  {
+				    "comment": "wrangler secret",
+				    "name": "TEST_SECRET",
+				    "scopes": [
+				      "workers",
+				    ],
+				    "value": "shhhhhhh!",
+				  },
+				]
+			`);
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "
-🔐 Creating secret... (Name: TEST_SECRET, Value: REDACTED, Scopes: workers, Comment: wrangler secret)
-✅ Created secret! (ID: 36dabbe4d01c49de82847b9a22673cbd)
-┌─────────────┬──────────────────────────────────┬──────────────────────────────────┬─────────────────┬─────────┬─────────┬──────────────────────┬──────────────────────┐
-│ Name        │ ID                               │ StoreID                          │ Comment         │ Scopes  │ Status  │ Created              │ Modified             │
-├─────────────┼──────────────────────────────────┼──────────────────────────────────┼─────────────────┼─────────┼─────────┼──────────────────────┼──────────────────────┤
-│ TEST_SECRET │ 36dabbe4d01c49de82847b9a22673cbd │ 850e0805c1084551bb46d150b5dfe414 │ wrangler secret │ workers │ pending │ 3/5/2025, 9:56:40 PM │ 3/5/2025, 9:56:40 PM │
-└─────────────┴──────────────────────────────────┴──────────────────────────────────┴─────────────────┴─────────┴─────────┴──────────────────────┴──────────────────────┘"
-      `);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+
+				🔐 Creating secret... (Name: TEST_SECRET, Value: REDACTED, Scopes: workers, Comment: wrangler secret)
+				✅ Created secret! (ID: 36dabbe4d01c49de82847b9a22673cbd)
+				┌─┬─┬─┬─┬─┬─┬─┬─┐
+				│ Name │ ID │ StoreID │ Comment │ Scopes │ Status │ Created │ Modified │
+				├─┼─┼─┼─┼─┼─┼─┼─┤
+				│ TEST_SECRET │ 36dabbe4d01c49de82847b9a22673cbd │ 850e0805c1084551bb46d150b5dfe414 │ wrangler secret │ workers │ pending │ [mock-create-date] │ [mock-modified-date] │
+				└─┴─┴─┴─┴─┴─┴─┴─┘"
+			`);
 		});
 
-		it("errors in creating a secret when no store-id passed", async () => {
+		it("errors in creating a secret when no store-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -238,7 +257,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in creating a secret when no name passed", async () => {
+		it("errors in creating a secret when no name passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -257,7 +278,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in creating a secret when no value passed", async () => {
+		it("errors in creating a secret when no value passed", async ({
+			expect,
+		}) => {
 			mockPrompt({
 				text: "Enter a secret value:",
 				options: { isSecret: true },
@@ -282,7 +305,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in creating a secret when no scopes passed", async () => {
+		it("errors in creating a secret when no scopes passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -300,29 +325,56 @@ describe("secrets-store secret commands", () => {
 				"Missing required argument: scopes"
 			`);
 		});
+
+		it("errors in creating a secret when value is larger than 64 KiB", async ({
+			expect,
+		}) => {
+			const longValue = "a".repeat(65537);
+			let err: undefined | Error;
+			try {
+				await runWrangler(
+					"secrets-store secret create " +
+						"850e0805c1084551bb46d150b5dfe414 " +
+						"--name TEST_SECRET " +
+						`--value '${longValue}' ` +
+						"--scopes 'workers' " +
+						"--comment 'wrangler secret' " +
+						"--remote"
+				);
+			} catch (e) {
+				err = e as Error;
+			}
+			expect(err?.message).toMatchInlineSnapshot(
+				`"Secret value cannot exceed 65536 bytes (got 65537). The Cloudflare API rejects longer values, and a binding to such a secret will fail at deploy time."`
+			);
+		});
 	});
 
 	describe("secrets-store secret list", () => {
-		it("lists secrets", async () => {
+		it("lists secrets", async ({ expect }) => {
 			mockSecretList();
 			await runWrangler(
 				"secrets-store secret list 850e0805c1084551bb46d150b5dfe414 --remote"
 			);
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "🔐 Listing secrets... (store-id: 850e0805c1084551bb46d150b5dfe414, page: 1, per-page: 10)
-┌────────────┬──────────────────────────────────┬─────────────────────────────────┬─────────┬─────────┬───────────────────────┬───────────────────────┐
-│ Name       │ ID                               │ Comment                         │ Scopes  │ Status  │ Created               │ Modified              │
-├────────────┼──────────────────────────────────┼─────────────────────────────────┼─────────┼─────────┼───────────────────────┼───────────────────────┤
-│ SECRET_KEY │ 8b108ac1cf244f91a17964f585ffa707 │ Key for Algolia search indexing │ workers │ active  │ 2/28/2025, 9:43:43 AM │ 2/28/2025, 9:43:45 AM │
-├────────────┼──────────────────────────────────┼─────────────────────────────────┼─────────┼─────────┼───────────────────────┼───────────────────────┤
-│ API_KEY    │ 2821af4e600a446f87af4e9944b693c3 │ Key for DigitalOcean droplets   │ workers │ active  │ 2/28/2025, 9:43:43 AM │ 2/28/2025, 9:43:44 AM │
-├────────────┼──────────────────────────────────┼─────────────────────────────────┼─────────┼─────────┼───────────────────────┼───────────────────────┤
-│ DB_KEY     │ df3f6eb1159a4f10ac5fe836e2b8169c │ Key for PostgreSQL database     │ workers │ active  │ 2/28/2025, 9:43:43 AM │ 2/28/2025, 9:43:45 AM │
-└────────────┴──────────────────────────────────┴─────────────────────────────────┴─────────┴─────────┴───────────────────────┴───────────────────────┘"`);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🔐 Listing secrets... (store-id: 850e0805c1084551bb46d150b5dfe414, page: 1, per-page: 10)
+				┌─┬─┬─┬─┬─┬─┬─┐
+				│ Name │ ID │ Comment │ Scopes │ Status │ Created │ Modified │
+				├─┼─┼─┼─┼─┼─┼─┤
+				│ SECRET_KEY │ 8b108ac1cf244f91a17964f585ffa707 │ Key for Algolia search indexing │ workers │ active │ [mock-create-date] │ [mock-modified-date] │
+				├─┼─┼─┼─┼─┼─┼─┤
+				│ API_KEY │ 2821af4e600a446f87af4e9944b693c3 │ Key for DigitalOcean droplets │ workers │ active │ [mock-create-date] │ [mock-modified-date] │
+				├─┼─┼─┼─┼─┼─┼─┤
+				│ DB_KEY │ df3f6eb1159a4f10ac5fe836e2b8169c │ Key for PostgreSQL database │ workers │ active │ [mock-create-date] │ [mock-modified-date] │
+				└─┴─┴─┴─┴─┴─┴─┘"
+			`);
 		});
 
-		it("handles empty response of secrets", async () => {
+		it("handles empty response of secrets", async ({ expect }) => {
 			mockSecretListEmpty();
 			let err: undefined | Error;
 			try {
@@ -338,7 +390,9 @@ describe("secrets-store secret commands", () => {
 			);
 		});
 
-		it("errors in listing secrets when no store-id passed", async () => {
+		it("errors in listing secrets when no store-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler("secrets-store secret list --remote");
@@ -352,22 +406,28 @@ describe("secrets-store secret commands", () => {
 	});
 
 	describe("secrets-store secret get", () => {
-		it("gets a secret", async () => {
+		it("gets a secret", async ({ expect }) => {
 			mockSecretGet();
 			await runWrangler(
 				"secrets-store secret get 850e0805c1084551bb46d150b5dfe414 --secret-id df3f6eb1159a4f10ac5fe836e2b8169c --remote"
 			);
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "🔐 Getting secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
-┌────────┬──────────────────────────────────┬──────────────────────────────────┬─────────────────────────────┬─────────┬─────────┬───────────────────────┬───────────────────────┐
-│ Name   │ ID                               │ StoreID                          │ Comment                     │ Scopes  │ Status  │ Created               │ Modified              │
-├────────┼──────────────────────────────────┼──────────────────────────────────┼─────────────────────────────┼─────────┼─────────┼───────────────────────┼───────────────────────┤
-│ DB_KEY │ df3f6eb1159a4f10ac5fe836e2b8169c │ 850e0805c1084551bb46d150b5dfe414 │ Key for PostgreSQL database │ workers │ active  │ 2/28/2025, 9:43:43 AM │ 2/28/2025, 9:43:45 AM │
-└────────┴──────────────────────────────────┴──────────────────────────────────┴─────────────────────────────┴─────────┴─────────┴───────────────────────┴───────────────────────┘"`);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🔐 Getting secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
+				┌─┬─┬─┬─┬─┬─┬─┬─┐
+				│ Name │ ID │ StoreID │ Comment │ Scopes │ Status │ Created │ Modified │
+				├─┼─┼─┼─┼─┼─┼─┼─┤
+				│ DB_KEY │ df3f6eb1159a4f10ac5fe836e2b8169c │ 850e0805c1084551bb46d150b5dfe414 │ Key for PostgreSQL database │ workers │ active │ [mock-create-date] │ [mock-modified-date] │
+				└─┴─┴─┴─┴─┴─┴─┴─┘"
+			`);
 		});
 
-		it("errors in getting a secret when no store-id passed", async () => {
+		it("errors in getting a secret when no store-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -381,7 +441,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in getting a secret when no secret-id passed", async () => {
+		it("errors in getting a secret when no secret-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -397,19 +459,24 @@ describe("secrets-store secret commands", () => {
 	});
 
 	describe("secrets-store secret delete", () => {
-		it("deletes a secret", async () => {
+		it("deletes a secret", async ({ expect }) => {
 			mockSecretDelete();
 			await runWrangler(
 				"secrets-store secret delete 850e0805c1084551bb46d150b5dfe414 --secret-id df3f6eb1159a4f10ac5fe836e2b8169c --remote"
 			);
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "🔐 Deleting secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
-✅ Deleted secret! (ID: df3f6eb1159a4f10ac5fe836e2b8169c)"
-      `);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🔐 Deleting secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
+				✅ Deleted secret! (ID: df3f6eb1159a4f10ac5fe836e2b8169c)"
+			`);
 		});
 
-		it("errors in deleting a secret when no store-id passed", async () => {
+		it("errors in deleting a secret when no store-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -423,7 +490,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in deleting a secret when no secret-id passed", async () => {
+		it("errors in deleting a secret when no secret-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -439,7 +508,7 @@ describe("secrets-store secret commands", () => {
 	});
 
 	describe("secrets-store secret update", () => {
-		it("updates a secret", async () => {
+		it("updates a secret", async ({ expect }) => {
 			mockConfirm({
 				text: "Do you want to update the secret value?",
 				result: true,
@@ -463,26 +532,32 @@ describe("secrets-store secret commands", () => {
 			);
 
 			await expect(reqProm).resolves.toMatchInlineSnapshot(`
-        Object {
-          "comment": "wrangler secret update",
-          "scopes": Array [
-            "workers",
-          ],
-          "value": "shhhhhhh!",
-        }
-      `);
+				{
+				  "comment": "wrangler secret update",
+				  "scopes": [
+				    "workers",
+				  ],
+				  "value": "shhhhhhh!",
+				}
+			`);
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "🔐 Updating secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
-✅ Updated secret! (ID: 36dabbe4d01c49de82847b9a22673cbd)
-┌────────┬──────────────────────────────────┬──────────────────────────────────┬────────────────────────┬─────────┬─────────┬──────────────────────┬──────────────────────┐
-│ Name   │ ID                               │ StoreID                          │ Comment                │ Scopes  │ Status  │ Created              │ Modified             │
-├────────┼──────────────────────────────────┼──────────────────────────────────┼────────────────────────┼─────────┼─────────┼──────────────────────┼──────────────────────┤
-│ DB_KEY │ 36dabbe4d01c49de82847b9a22673cbd │ 850e0805c1084551bb46d150b5dfe414 │ wrangler secret update │ workers │ pending │ 3/5/2025, 9:56:40 PM │ 3/5/2025, 9:56:40 PM │
-└────────┴──────────────────────────────────┴──────────────────────────────────┴────────────────────────┴─────────┴─────────┴──────────────────────┴──────────────────────┘"`);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🔐 Updating secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
+				✅ Updated secret! (ID: 36dabbe4d01c49de82847b9a22673cbd)
+				┌─┬─┬─┬─┬─┬─┬─┬─┐
+				│ Name │ ID │ StoreID │ Comment │ Scopes │ Status │ Created │ Modified │
+				├─┼─┼─┼─┼─┼─┼─┼─┤
+				│ DB_KEY │ 36dabbe4d01c49de82847b9a22673cbd │ 850e0805c1084551bb46d150b5dfe414 │ wrangler secret update │ workers │ pending │ [mock-create-date] │ [mock-modified-date] │
+				└─┴─┴─┴─┴─┴─┴─┴─┘"
+			`);
 		});
 
-		it("errors in updating a secret when no store-id passed", async () => {
+		it("errors in updating a secret when no store-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -501,7 +576,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in updating a secret when no secret-id passed", async () => {
+		it("errors in updating a secret when no secret-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -520,7 +597,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in updating a secret when no params to update are passed", async () => {
+		it("errors in updating a secret when no params to update are passed", async ({
+			expect,
+		}) => {
 			mockConfirm({
 				text: "Do you want to update the secret value?",
 				result: true,
@@ -551,7 +630,7 @@ describe("secrets-store secret commands", () => {
 	});
 
 	describe("secrets-store secret duplicate", () => {
-		it("duplicates a secret", async () => {
+		it("duplicates a secret", async ({ expect }) => {
 			const reqProm = mockSecretDuplicate();
 			await runWrangler(
 				"secrets-store secret duplicate " +
@@ -564,27 +643,32 @@ describe("secrets-store secret commands", () => {
 			);
 
 			await expect(reqProm).resolves.toMatchInlineSnapshot(`
-        Object {
-          "comment": "wrangler secret update",
-          "name": "DUPLICATE_KEY",
-          "scopes": Array [
-            "workers",
-          ],
-        }
-      `);
+				{
+				  "comment": "wrangler secret update",
+				  "name": "DUPLICATE_KEY",
+				  "scopes": [
+				    "workers",
+				  ],
+				}
+			`);
 
 			expect(std.out).toMatchInlineSnapshot(`
-        "🔐 Duplicating secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
-✅ Duplicated secret! (ID: 36dabbe4d01c49de82847b9a22673cbd)
-┌────────┬──────────────────────────────────┬──────────────────────────────────┬────────────────────────┬─────────┬─────────┬──────────────────────┬──────────────────────┐
-│ Name   │ ID                               │ StoreID                          │ Comment                │ Scopes  │ Status  │ Created              │ Modified             │
-├────────┼──────────────────────────────────┼──────────────────────────────────┼────────────────────────┼─────────┼─────────┼──────────────────────┼──────────────────────┤
-│ DB_KEY │ 36dabbe4d01c49de82847b9a22673cbd │ 850e0805c1084551bb46d150b5dfe414 │ wrangler secret update │ workers │ pending │ 3/5/2025, 9:56:40 PM │ 3/5/2025, 9:56:40 PM │
-└────────┴──────────────────────────────────┴──────────────────────────────────┴────────────────────────┴─────────┴─────────┴──────────────────────┴──────────────────────┘"
-      `);
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				🔐 Duplicating secret... (ID: df3f6eb1159a4f10ac5fe836e2b8169c)
+				✅ Duplicated secret! (ID: 36dabbe4d01c49de82847b9a22673cbd)
+				┌─┬─┬─┬─┬─┬─┬─┬─┐
+				│ Name │ ID │ StoreID │ Comment │ Scopes │ Status │ Created │ Modified │
+				├─┼─┼─┼─┼─┼─┼─┼─┤
+				│ DB_KEY │ 36dabbe4d01c49de82847b9a22673cbd │ 850e0805c1084551bb46d150b5dfe414 │ wrangler secret update │ workers │ pending │ [mock-create-date] │ [mock-modified-date] │
+				└─┴─┴─┴─┴─┴─┴─┴─┘"
+			`);
 		});
 
-		it("errors in duplicating a secret when no store-id passed", async () => {
+		it("errors in duplicating a secret when no store-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -603,7 +687,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in duplicating a secret when no secret-id passed", async () => {
+		it("errors in duplicating a secret when no secret-id passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -622,7 +708,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in duplicating a secret when no name passed", async () => {
+		it("errors in duplicating a secret when no name passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -641,7 +729,9 @@ describe("secrets-store secret commands", () => {
 			`);
 		});
 
-		it("errors in duplicating a secret when no scopes passed", async () => {
+		it("errors in duplicating a secret when no scopes passed", async ({
+			expect,
+		}) => {
 			let err: undefined | Error;
 			try {
 				await runWrangler(
@@ -679,8 +769,8 @@ function mockStoreCreate(): Promise<CreateStore> {
 								id: "8b9199cad1954bc39add51c948767679",
 								account_id: "1b3ea6aa53af9903d51524c75900323a",
 								name: reqBody.name,
-								created: Date.now().toString(),
-								modified: Date.now().toString(),
+								created: mockCreateDate.toString(),
+								modified: mockModifiedDate.toString(),
 							},
 							true
 						)
@@ -705,15 +795,15 @@ function mockStoreList() {
 								id: "8686c49f762447988c02fd472f1fa82c",
 								account_id: "1b3ea6aa53af9903d51524c75900323a",
 								name: "test-store",
-								created: "2025-03-04T20:10:35.179029Z",
-								modified: "2025-03-04T20:10:35.179029Z",
+								created: mockCreateDate.toISOString(),
+								modified: mockModifiedDate.toISOString(),
 							},
 							{
 								id: "8686c49f762447988c02fd472f1fa82d",
 								account_id: "1b3ea6aa53af9903d51524c75900323a",
 								name: "other-store",
-								created: "2025-03-04T20:10:35.179029Z",
-								modified: "2025-03-04T20:10:35.179029Z",
+								created: mockCreateDate.toISOString(),
+								modified: mockModifiedDate.toISOString(),
 							},
 						],
 						true
@@ -757,8 +847,8 @@ function mockSecretCreate(): Promise<CreateSecret[]> {
 									name: reqBody[0].name,
 									comment: reqBody[0].comment,
 									scopes: reqBody[0].scopes,
-									created: "2025-03-05T21:56:40.768422Z",
-									modified: "2025-03-05T21:56:40.768422Z",
+									created: mockCreateDate.toISOString(),
+									modified: mockModifiedDate.toISOString(),
 									status: "pending",
 								},
 							],
@@ -787,8 +877,8 @@ function mockSecretList() {
 								name: "SECRET_KEY",
 								comment: "Key for Algolia search indexing",
 								scopes: ["workers"],
-								created: "2025-02-28T09:43:43.965906Z",
-								modified: "2025-02-28T09:43:45.256719Z",
+								created: mockCreateDate.toISOString(),
+								modified: mockModifiedDate.toISOString(),
 								status: "active",
 							},
 							{
@@ -797,8 +887,8 @@ function mockSecretList() {
 								name: "API_KEY",
 								comment: "Key for DigitalOcean droplets",
 								scopes: ["workers"],
-								created: "2025-02-28T09:43:43.965906Z",
-								modified: "2025-02-28T09:43:44.807687Z",
+								created: mockCreateDate.toISOString(),
+								modified: mockModifiedDate.toISOString(),
 								status: "active",
 							},
 							{
@@ -807,8 +897,8 @@ function mockSecretList() {
 								name: "DB_KEY",
 								comment: "Key for PostgreSQL database",
 								scopes: ["workers"],
-								created: "2025-02-28T09:43:43.965906Z",
-								modified: "2025-02-28T09:43:45.255575Z",
+								created: mockCreateDate.toISOString(),
+								modified: mockModifiedDate.toISOString(),
 								status: "active",
 							},
 						],
@@ -848,8 +938,8 @@ function mockSecretGet() {
 							name: "DB_KEY",
 							comment: "Key for PostgreSQL database",
 							scopes: ["workers"],
-							created: "2025-02-28T09:43:43.965906Z",
-							modified: "2025-02-28T09:43:45.255575Z",
+							created: mockCreateDate.toISOString(),
+							modified: mockModifiedDate.toISOString(),
 							status: "active",
 						},
 						true
@@ -892,8 +982,8 @@ function mockSecretUpdate(): Promise<UpdateSecret> {
 								name: "DB_KEY",
 								comment: reqBody.comment,
 								scopes: reqBody.scopes,
-								created: "2025-03-05T21:56:40.768422Z",
-								modified: "2025-03-05T21:56:40.768422Z",
+								created: mockCreateDate.toISOString(),
+								modified: mockModifiedDate.toISOString(),
 								status: "pending",
 							},
 							true
@@ -924,8 +1014,8 @@ function mockSecretDuplicate(): Promise<UpdateSecret> {
 								name: "DB_KEY",
 								comment: reqBody.comment,
 								scopes: reqBody.scopes,
-								created: "2025-03-05T21:56:40.768422Z",
-								modified: "2025-03-05T21:56:40.768422Z",
+								created: mockCreateDate.toISOString(),
+								modified: mockModifiedDate.toISOString(),
 								status: "pending",
 							},
 							true

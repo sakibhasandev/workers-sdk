@@ -1,8 +1,7 @@
-import fs, { existsSync, statSync } from "fs";
-import { join } from "path";
-import TOML from "@iarna/toml";
+import fs, { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { parse, stringify } from "comment-json";
-import type { JsonMap } from "@iarna/toml";
+import TOML from "smol-toml";
 import type { C3Context, PackageJson } from "types";
 
 export const copyFile = (path: string, dest: string) => {
@@ -47,12 +46,9 @@ export const removeFile = (path: string) => {
 
 export const directoryExists = (path: string): boolean => {
 	try {
-		const stat = statSync(path);
-		return stat.isDirectory();
+		const stat = statSync(path, { throwIfNoEntry: false });
+		return stat?.isDirectory() ?? false;
 	} catch (error) {
-		if ((error as { code: string }).code === "ENOENT") {
-			return false;
-		}
 		throw new Error(error as string);
 	}
 };
@@ -70,12 +66,12 @@ export const readToml = (path: string) => {
 export const writeJSON = (
 	path: string,
 	object: unknown,
-	stringifySpace = "\t",
+	stringifySpace = "\t"
 ) => {
 	writeFile(path, stringify(object, null, stringifySpace));
 };
 
-export const writeToml = (path: string, object: JsonMap) => {
+export const writeToml = (path: string, object: Record<string, unknown>) => {
 	writeFile(path, TOML.stringify(object));
 };
 

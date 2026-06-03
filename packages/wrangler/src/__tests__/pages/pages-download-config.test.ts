@@ -1,23 +1,29 @@
-/* eslint-disable turbo/no-undeclared-env-vars */
-import { randomUUID } from "crypto";
-import { readFile } from "fs/promises";
-import { supportedCompatibilityDate } from "miniflare";
+import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { getTodaysCompatDate } from "@cloudflare/workers-utils";
+import {
+	runInTempDir,
+	writeWranglerConfig,
+} from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { afterAll, beforeEach, describe, it, vi } from "vitest";
+import { saveToConfigCache } from "../../config-cache";
+import { PAGES_CONFIG_CACHE_FILENAME } from "../../pages/constants";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { clearDialogs, mockConfirm } from "../helpers/mock-dialogs";
 import { useMockIsTTY } from "../helpers/mock-istty";
 import { msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
-import { writeWranglerConfig } from "../helpers/write-wrangler-config";
+import type { PagesConfigCache } from "../../pages/types";
+import type { ExpectStatic } from "vitest";
 
 async function readNormalizedWranglerToml() {
 	return (await readFile("wrangler.toml", "utf8"))
 		.split("\n")
 		.slice(1)
 		.join("\n")
-		.replace(supportedCompatibilityDate, "LATEST-SUPPORTED");
+		.replace(getTodaysCompatDate(), "LATEST-SUPPORTED");
 }
 function makePagesProject(
 	previewOverride: Record<string, unknown> = {},
@@ -224,7 +230,10 @@ function makePagesProject(
 	};
 }
 
-function mockSupportingDashRequests(expectedAccountId: string) {
+function mockSupportingDashRequests(
+	expect: ExpectStatic,
+	expectedAccountId: string
+) {
 	msw.use(
 		http.get(
 			`*/accounts/:accountId/pages/projects/NOT_REAL`,
@@ -332,700 +341,731 @@ describe("pages download config", () => {
 	const MOCK_PROJECT_NAME = "MOCK_PROJECT_NAME";
 	mockAccountId({ accountId: MOCK_ACCOUNT_ID });
 
-	beforeEach(() => {
-		mockSupportingDashRequests(MOCK_ACCOUNT_ID);
+	beforeEach(({ expect }) => {
+		mockSupportingDashRequests(expect, MOCK_ACCOUNT_ID);
 		setIsTTY(true);
 	});
 	afterAll(() => {
 		clearDialogs();
 	});
 
-	it("should download full config correctly", async () => {
+	it("should download full config correctly", async ({ expect }) => {
 		await runWrangler(`pages download config ${MOCK_PROJECT_NAME}`);
 
 		await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
-		"name = \\"some-project\\"
-		pages_build_output_dir = \\"dist-test\\"
-		compatibility_date = \\"LATEST-SUPPORTED\\"
-
-		[placement]
-		mode = \\"smart\\"
-
-		[limits]
-		cpu_ms = 500
-
-		[vars]
-		TEST_JSON_PREVIEW = \\"\\"\\"
-		{
-		json: \\"value\\"
-		}\\"\\"\\"
-		TEST_PLAINTEXT_PREVIEW = \\"PLAINTEXT\\"
-
-		[[kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW\\"
-
-		[[kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW2\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW2\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW3\\"
-		class_name = \\"do-class\\"
-		script_name = \\"do-s\\"
-		environment = \\"do-e\\"
-
-		[[d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW\\"
-		database_name = \\"D1_PREVIEW\\"
-
-		[[d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW2\\"
-		database_name = \\"D1_PREVIEW2\\"
-
-		[[r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW\\"
-
-		[[r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW2\\"
-
-		[[services]]
-		binding = \\"SERVICE_PREVIEW\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[services]]
-		binding = \\"SERVICE_PREVIEW2\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[queues.producers]]
-		binding = \\"QUEUE_PREVIEW\\"
-		queue = \\"q-id\\"
-
-		[[queues.producers]]
-		binding = \\"QUEUE_PREVIEW2\\"
-		queue = \\"q-id\\"
-
-		[[analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW\\"
-		dataset = \\"data\\"
-
-		[[analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW2\\"
-		dataset = \\"data\\"
-
-		[ai]
-		binding = \\"AI_PREVIEW\\"
-
-		[env.production]
-		compatibility_date = \\"2024-02-14\\"
-
-		[env.production.placement]
-		mode = \\"off\\"
-
-		[env.production.limits]
-		cpu_ms = 50
-
-		[env.production.vars]
-		TEST_JSON = \\"\\"\\"
-		{
-		json: \\"value\\"
-		}\\"\\"\\"
-		TEST_PLAINTEXT = \\"PLAINTEXT\\"
-
-		[[env.production.kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV\\"
-
-		[[env.production.durable_objects.bindings]]
-		name = \\"DO\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[env.production.d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1\\"
-		database_name = \\"D1\\"
-
-		[[env.production.r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2\\"
-
-		[[env.production.services]]
-		binding = \\"SERVICE\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[env.production.queues.producers]]
-		binding = \\"QUEUE\\"
-		queue = \\"q-id\\"
-
-		[[env.production.analytics_engine_datasets]]
-		binding = \\"AE\\"
-		dataset = \\"data\\"
-
-		[env.production.ai]
-		binding = \\"AI\\"
-		"
-	`);
-	});
-	it("should generate preview override if preview has limits and production does not", async () => {
-		await runWrangler(`pages download config NO_PROD_LIMITS`);
-
-		await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
-		"name = \\"some-project\\"
-		pages_build_output_dir = \\"dist-test\\"
-		compatibility_date = \\"LATEST-SUPPORTED\\"
-
-		[placement]
-		mode = \\"smart\\"
-
-		[vars]
-		TEST_JSON_PREVIEW = \\"\\"\\"
-		{
-		json: \\"value\\"
-		}\\"\\"\\"
-		TEST_PLAINTEXT_PREVIEW = \\"PLAINTEXT\\"
-
-		[[kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW\\"
-
-		[[kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW2\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW2\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW3\\"
-		class_name = \\"do-class\\"
-		script_name = \\"do-s\\"
-		environment = \\"do-e\\"
-
-		[[d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW\\"
-		database_name = \\"D1_PREVIEW\\"
-
-		[[d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW2\\"
-		database_name = \\"D1_PREVIEW2\\"
-
-		[[r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW\\"
-
-		[[r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW2\\"
-
-		[[services]]
-		binding = \\"SERVICE_PREVIEW\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[services]]
-		binding = \\"SERVICE_PREVIEW2\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[queues.producers]]
-		binding = \\"QUEUE_PREVIEW\\"
-		queue = \\"q-id\\"
-
-		[[queues.producers]]
-		binding = \\"QUEUE_PREVIEW2\\"
-		queue = \\"q-id\\"
-
-		[[analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW\\"
-		dataset = \\"data\\"
-
-		[[analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW2\\"
-		dataset = \\"data\\"
-
-		[ai]
-		binding = \\"AI_PREVIEW\\"
-
-		[env.preview.placement]
-		mode = \\"smart\\"
-
-		[env.preview.limits]
-		cpu_ms = 500
-
-		[env.preview.vars]
-		TEST_JSON_PREVIEW = \\"\\"\\"
-		{
-		json: \\"value\\"
-		}\\"\\"\\"
-		TEST_PLAINTEXT_PREVIEW = \\"PLAINTEXT\\"
-
-		[[env.preview.kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW\\"
-
-		[[env.preview.kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW2\\"
-
-		[[env.preview.durable_objects.bindings]]
-		name = \\"DO_PREVIEW\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[env.preview.durable_objects.bindings]]
-		name = \\"DO_PREVIEW2\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[env.preview.durable_objects.bindings]]
-		name = \\"DO_PREVIEW3\\"
-		class_name = \\"do-class\\"
-		script_name = \\"do-s\\"
-		environment = \\"do-e\\"
-
-		[[env.preview.d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW\\"
-		database_name = \\"D1_PREVIEW\\"
-
-		[[env.preview.d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW2\\"
-		database_name = \\"D1_PREVIEW2\\"
-
-		[[env.preview.r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW\\"
-
-		[[env.preview.r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW2\\"
-
-		[[env.preview.services]]
-		binding = \\"SERVICE_PREVIEW\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[env.preview.services]]
-		binding = \\"SERVICE_PREVIEW2\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[env.preview.queues.producers]]
-		binding = \\"QUEUE_PREVIEW\\"
-		queue = \\"q-id\\"
-
-		[[env.preview.queues.producers]]
-		binding = \\"QUEUE_PREVIEW2\\"
-		queue = \\"q-id\\"
-
-		[[env.preview.analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW\\"
-		dataset = \\"data\\"
-
-		[[env.preview.analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW2\\"
-		dataset = \\"data\\"
-
-		[env.preview.ai]
-		binding = \\"AI_PREVIEW\\"
-
-		[env.production]
-		compatibility_date = \\"2024-02-14\\"
-
-		[env.production.placement]
-		mode = \\"off\\"
-
-		[env.production.vars]
-		TEST_JSON = \\"\\"\\"
-		{
-		json: \\"value\\"
-		}\\"\\"\\"
-		TEST_PLAINTEXT = \\"PLAINTEXT\\"
-
-		[[env.production.kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV\\"
-
-		[[env.production.durable_objects.bindings]]
-		name = \\"DO\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[env.production.d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1\\"
-		database_name = \\"D1\\"
-
-		[[env.production.r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2\\"
-
-		[[env.production.services]]
-		binding = \\"SERVICE\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[env.production.queues.producers]]
-		binding = \\"QUEUE\\"
-		queue = \\"q-id\\"
-
-		[[env.production.analytics_engine_datasets]]
-		binding = \\"AE\\"
-		dataset = \\"data\\"
-
-		[env.production.ai]
-		binding = \\"AI\\"
-		"
-	`);
-	});
-	it("should not duplicate inheritable properties if they're equal", async () => {
-		await runWrangler(`pages download config INHERIT`);
-
-		await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
-		"name = \\"some-project\\"
-		pages_build_output_dir = \\"dist-test\\"
-		compatibility_date = \\"2023-02-14\\"
-		compatibility_flags = [ \\"some-flag\\" ]
-
-		[limits]
-		cpu_ms = 500
-
-		[vars]
-		TEST_JSON_PREVIEW = \\"\\"\\"
-		{
-		json: \\"value\\"
-		}\\"\\"\\"
-		TEST_PLAINTEXT_PREVIEW = \\"PLAINTEXT\\"
-
-		[[kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW\\"
-
-		[[kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV_PREVIEW2\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW2\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[durable_objects.bindings]]
-		name = \\"DO_PREVIEW3\\"
-		class_name = \\"do-class\\"
-		script_name = \\"do-s\\"
-		environment = \\"do-e\\"
-
-		[[d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW\\"
-		database_name = \\"D1_PREVIEW\\"
-
-		[[d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1_PREVIEW2\\"
-		database_name = \\"D1_PREVIEW2\\"
-
-		[[r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW\\"
-
-		[[r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2_PREVIEW2\\"
-
-		[[services]]
-		binding = \\"SERVICE_PREVIEW\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[services]]
-		binding = \\"SERVICE_PREVIEW2\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[queues.producers]]
-		binding = \\"QUEUE_PREVIEW\\"
-		queue = \\"q-id\\"
-
-		[[queues.producers]]
-		binding = \\"QUEUE_PREVIEW2\\"
-		queue = \\"q-id\\"
-
-		[[analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW\\"
-		dataset = \\"data\\"
-
-		[[analytics_engine_datasets]]
-		binding = \\"AE_PREVIEW2\\"
-		dataset = \\"data\\"
-
-		[ai]
-		binding = \\"AI_PREVIEW\\"
-
-		[env.production.vars]
-		TEST_JSON = \\"\\"\\"
-		{
-		json: \\"value\\"
-		}\\"\\"\\"
-		TEST_PLAINTEXT = \\"PLAINTEXT\\"
-
-		[[env.production.kv_namespaces]]
-		id = \\"kv-id\\"
-		binding = \\"KV\\"
-
-		[[env.production.durable_objects.bindings]]
-		name = \\"DO\\"
-		class_name = \\"some-class-do-id\\"
-		script_name = \\"some-script-do-id\\"
-		environment = \\"some-environment-do-id\\"
-
-		[[env.production.d1_databases]]
-		database_id = \\"d1-id\\"
-		binding = \\"D1\\"
-		database_name = \\"D1\\"
-
-		[[env.production.r2_buckets]]
-		bucket_name = \\"r2-name\\"
-		binding = \\"R2\\"
-
-		[[env.production.services]]
-		binding = \\"SERVICE\\"
-		service = \\"service\\"
-		environment = \\"production\\"
-
-		[[env.production.queues.producers]]
-		binding = \\"QUEUE\\"
-		queue = \\"q-id\\"
-
-		[[env.production.analytics_engine_datasets]]
-		binding = \\"AE\\"
-		dataset = \\"data\\"
-
-		[env.production.ai]
-		binding = \\"AI\\"
-		"
-	`);
-	});
-	it("should fail if not given a project name", async () => {
-		await expect(
-			runWrangler(`pages download config`)
-		).rejects.toThrowErrorMatchingInlineSnapshot(
-			`[Error: Must specify a project name.]`
-		);
-	});
-	it("should fail if project does not exist", async () => {
-		await expect(
-			runWrangler(`pages download config NOT_REAL`)
-		).rejects.toThrowErrorMatchingInlineSnapshot(
-			`[APIError: A request to the Cloudflare API (/accounts/MOCK_ACCOUNT_ID/pages/projects/NOT_REAL) failed.]`
-		);
-		expect(std.out).toMatchInlineSnapshot(`
-		"
-		[31mX [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/accounts/MOCK_ACCOUNT_ID/pages/projects/NOT_REAL) failed.[0m
-
-		  Project not found. The specified project name does not match any of your existing projects. [code:
-		  8000007]
-
-		  If you think this is a bug, please open an issue at:
-		  [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
-
-		"
-	`);
-	});
-	describe("overwrite existing file", () => {
-		it("should overwrite existing file w/ --force", async () => {
-			await writeWranglerConfig({ name: "some-project" });
-			await runWrangler(`pages download config ${MOCK_PROJECT_NAME} --force`);
-
-			await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
-			"name = \\"some-project\\"
-			pages_build_output_dir = \\"dist-test\\"
-			compatibility_date = \\"LATEST-SUPPORTED\\"
+			"name = "some-project"
+			pages_build_output_dir = "dist-test"
+			compatibility_date = "LATEST-SUPPORTED"
 
 			[placement]
-			mode = \\"smart\\"
+			mode = "smart"
 
 			[limits]
 			cpu_ms = 500
 
 			[vars]
-			TEST_JSON_PREVIEW = \\"\\"\\"
-			{
-			json: \\"value\\"
-			}\\"\\"\\"
-			TEST_PLAINTEXT_PREVIEW = \\"PLAINTEXT\\"
+			TEST_JSON_PREVIEW = "{\\njson: \\"value\\"\\n}"
+			TEST_PLAINTEXT_PREVIEW = "PLAINTEXT"
 
 			[[kv_namespaces]]
-			id = \\"kv-id\\"
-			binding = \\"KV_PREVIEW\\"
+			id = "kv-id"
+			binding = "KV_PREVIEW"
 
 			[[kv_namespaces]]
-			id = \\"kv-id\\"
-			binding = \\"KV_PREVIEW2\\"
+			id = "kv-id"
+			binding = "KV_PREVIEW2"
 
 			[[durable_objects.bindings]]
-			name = \\"DO_PREVIEW\\"
-			class_name = \\"some-class-do-id\\"
-			script_name = \\"some-script-do-id\\"
-			environment = \\"some-environment-do-id\\"
+			name = "DO_PREVIEW"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
 
 			[[durable_objects.bindings]]
-			name = \\"DO_PREVIEW2\\"
-			class_name = \\"some-class-do-id\\"
-			script_name = \\"some-script-do-id\\"
-			environment = \\"some-environment-do-id\\"
+			name = "DO_PREVIEW2"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
 
 			[[durable_objects.bindings]]
-			name = \\"DO_PREVIEW3\\"
-			class_name = \\"do-class\\"
-			script_name = \\"do-s\\"
-			environment = \\"do-e\\"
+			name = "DO_PREVIEW3"
+			class_name = "do-class"
+			script_name = "do-s"
+			environment = "do-e"
 
 			[[d1_databases]]
-			database_id = \\"d1-id\\"
-			binding = \\"D1_PREVIEW\\"
-			database_name = \\"D1_PREVIEW\\"
+			database_id = "d1-id"
+			binding = "D1_PREVIEW"
+			database_name = "D1_PREVIEW"
 
 			[[d1_databases]]
-			database_id = \\"d1-id\\"
-			binding = \\"D1_PREVIEW2\\"
-			database_name = \\"D1_PREVIEW2\\"
+			database_id = "d1-id"
+			binding = "D1_PREVIEW2"
+			database_name = "D1_PREVIEW2"
 
 			[[r2_buckets]]
-			bucket_name = \\"r2-name\\"
-			binding = \\"R2_PREVIEW\\"
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW"
 
 			[[r2_buckets]]
-			bucket_name = \\"r2-name\\"
-			binding = \\"R2_PREVIEW2\\"
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW2"
 
 			[[services]]
-			binding = \\"SERVICE_PREVIEW\\"
-			service = \\"service\\"
-			environment = \\"production\\"
+			binding = "SERVICE_PREVIEW"
+			service = "service"
+			environment = "production"
 
 			[[services]]
-			binding = \\"SERVICE_PREVIEW2\\"
-			service = \\"service\\"
-			environment = \\"production\\"
+			binding = "SERVICE_PREVIEW2"
+			service = "service"
+			environment = "production"
 
 			[[queues.producers]]
-			binding = \\"QUEUE_PREVIEW\\"
-			queue = \\"q-id\\"
+			binding = "QUEUE_PREVIEW"
+			queue = "q-id"
 
 			[[queues.producers]]
-			binding = \\"QUEUE_PREVIEW2\\"
-			queue = \\"q-id\\"
+			binding = "QUEUE_PREVIEW2"
+			queue = "q-id"
 
 			[[analytics_engine_datasets]]
-			binding = \\"AE_PREVIEW\\"
-			dataset = \\"data\\"
+			binding = "AE_PREVIEW"
+			dataset = "data"
 
 			[[analytics_engine_datasets]]
-			binding = \\"AE_PREVIEW2\\"
-			dataset = \\"data\\"
+			binding = "AE_PREVIEW2"
+			dataset = "data"
 
 			[ai]
-			binding = \\"AI_PREVIEW\\"
+			binding = "AI_PREVIEW"
 
 			[env.production]
-			compatibility_date = \\"2024-02-14\\"
+			compatibility_date = "2024-02-14"
 
 			[env.production.placement]
-			mode = \\"off\\"
+			mode = "off"
 
 			[env.production.limits]
 			cpu_ms = 50
 
 			[env.production.vars]
-			TEST_JSON = \\"\\"\\"
-			{
-			json: \\"value\\"
-			}\\"\\"\\"
-			TEST_PLAINTEXT = \\"PLAINTEXT\\"
+			TEST_JSON = "{\\njson: \\"value\\"\\n}"
+			TEST_PLAINTEXT = "PLAINTEXT"
 
 			[[env.production.kv_namespaces]]
-			id = \\"kv-id\\"
-			binding = \\"KV\\"
+			id = "kv-id"
+			binding = "KV"
 
 			[[env.production.durable_objects.bindings]]
-			name = \\"DO\\"
-			class_name = \\"some-class-do-id\\"
-			script_name = \\"some-script-do-id\\"
-			environment = \\"some-environment-do-id\\"
+			name = "DO"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
 
 			[[env.production.d1_databases]]
-			database_id = \\"d1-id\\"
-			binding = \\"D1\\"
-			database_name = \\"D1\\"
+			database_id = "d1-id"
+			binding = "D1"
+			database_name = "D1"
 
 			[[env.production.r2_buckets]]
-			bucket_name = \\"r2-name\\"
-			binding = \\"R2\\"
+			bucket_name = "r2-name"
+			binding = "R2"
 
 			[[env.production.services]]
-			binding = \\"SERVICE\\"
-			service = \\"service\\"
-			environment = \\"production\\"
+			binding = "SERVICE"
+			service = "service"
+			environment = "production"
 
 			[[env.production.queues.producers]]
-			binding = \\"QUEUE\\"
-			queue = \\"q-id\\"
+			binding = "QUEUE"
+			queue = "q-id"
 
 			[[env.production.analytics_engine_datasets]]
-			binding = \\"AE\\"
-			dataset = \\"data\\"
+			binding = "AE"
+			dataset = "data"
 
 			[env.production.ai]
-			binding = \\"AI\\"
+			binding = "AI"
 			"
 		`);
+	});
+	it("should generate preview override if preview has limits and production does not", async ({
+		expect,
+	}) => {
+		await runWrangler(`pages download config NO_PROD_LIMITS`);
+
+		await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
+			"name = "some-project"
+			pages_build_output_dir = "dist-test"
+			compatibility_date = "LATEST-SUPPORTED"
+
+			[placement]
+			mode = "smart"
+
+			[vars]
+			TEST_JSON_PREVIEW = "{\\njson: \\"value\\"\\n}"
+			TEST_PLAINTEXT_PREVIEW = "PLAINTEXT"
+
+			[[kv_namespaces]]
+			id = "kv-id"
+			binding = "KV_PREVIEW"
+
+			[[kv_namespaces]]
+			id = "kv-id"
+			binding = "KV_PREVIEW2"
+
+			[[durable_objects.bindings]]
+			name = "DO_PREVIEW"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[durable_objects.bindings]]
+			name = "DO_PREVIEW2"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[durable_objects.bindings]]
+			name = "DO_PREVIEW3"
+			class_name = "do-class"
+			script_name = "do-s"
+			environment = "do-e"
+
+			[[d1_databases]]
+			database_id = "d1-id"
+			binding = "D1_PREVIEW"
+			database_name = "D1_PREVIEW"
+
+			[[d1_databases]]
+			database_id = "d1-id"
+			binding = "D1_PREVIEW2"
+			database_name = "D1_PREVIEW2"
+
+			[[r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW"
+
+			[[r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW2"
+
+			[[services]]
+			binding = "SERVICE_PREVIEW"
+			service = "service"
+			environment = "production"
+
+			[[services]]
+			binding = "SERVICE_PREVIEW2"
+			service = "service"
+			environment = "production"
+
+			[[queues.producers]]
+			binding = "QUEUE_PREVIEW"
+			queue = "q-id"
+
+			[[queues.producers]]
+			binding = "QUEUE_PREVIEW2"
+			queue = "q-id"
+
+			[[analytics_engine_datasets]]
+			binding = "AE_PREVIEW"
+			dataset = "data"
+
+			[[analytics_engine_datasets]]
+			binding = "AE_PREVIEW2"
+			dataset = "data"
+
+			[ai]
+			binding = "AI_PREVIEW"
+
+			[env.preview.placement]
+			mode = "smart"
+
+			[env.preview.limits]
+			cpu_ms = 500
+
+			[env.preview.vars]
+			TEST_JSON_PREVIEW = "{\\njson: \\"value\\"\\n}"
+			TEST_PLAINTEXT_PREVIEW = "PLAINTEXT"
+
+			[[env.preview.kv_namespaces]]
+			id = "kv-id"
+			binding = "KV_PREVIEW"
+
+			[[env.preview.kv_namespaces]]
+			id = "kv-id"
+			binding = "KV_PREVIEW2"
+
+			[[env.preview.durable_objects.bindings]]
+			name = "DO_PREVIEW"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[env.preview.durable_objects.bindings]]
+			name = "DO_PREVIEW2"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[env.preview.durable_objects.bindings]]
+			name = "DO_PREVIEW3"
+			class_name = "do-class"
+			script_name = "do-s"
+			environment = "do-e"
+
+			[[env.preview.d1_databases]]
+			database_id = "d1-id"
+			binding = "D1_PREVIEW"
+			database_name = "D1_PREVIEW"
+
+			[[env.preview.d1_databases]]
+			database_id = "d1-id"
+			binding = "D1_PREVIEW2"
+			database_name = "D1_PREVIEW2"
+
+			[[env.preview.r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW"
+
+			[[env.preview.r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW2"
+
+			[[env.preview.services]]
+			binding = "SERVICE_PREVIEW"
+			service = "service"
+			environment = "production"
+
+			[[env.preview.services]]
+			binding = "SERVICE_PREVIEW2"
+			service = "service"
+			environment = "production"
+
+			[[env.preview.queues.producers]]
+			binding = "QUEUE_PREVIEW"
+			queue = "q-id"
+
+			[[env.preview.queues.producers]]
+			binding = "QUEUE_PREVIEW2"
+			queue = "q-id"
+
+			[[env.preview.analytics_engine_datasets]]
+			binding = "AE_PREVIEW"
+			dataset = "data"
+
+			[[env.preview.analytics_engine_datasets]]
+			binding = "AE_PREVIEW2"
+			dataset = "data"
+
+			[env.preview.ai]
+			binding = "AI_PREVIEW"
+
+			[env.production]
+			compatibility_date = "2024-02-14"
+
+			[env.production.placement]
+			mode = "off"
+
+			[env.production.vars]
+			TEST_JSON = "{\\njson: \\"value\\"\\n}"
+			TEST_PLAINTEXT = "PLAINTEXT"
+
+			[[env.production.kv_namespaces]]
+			id = "kv-id"
+			binding = "KV"
+
+			[[env.production.durable_objects.bindings]]
+			name = "DO"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[env.production.d1_databases]]
+			database_id = "d1-id"
+			binding = "D1"
+			database_name = "D1"
+
+			[[env.production.r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2"
+
+			[[env.production.services]]
+			binding = "SERVICE"
+			service = "service"
+			environment = "production"
+
+			[[env.production.queues.producers]]
+			binding = "QUEUE"
+			queue = "q-id"
+
+			[[env.production.analytics_engine_datasets]]
+			binding = "AE"
+			dataset = "data"
+
+			[env.production.ai]
+			binding = "AI"
+			"
+		`);
+	});
+	it("should not duplicate inheritable properties if they're equal", async ({
+		expect,
+	}) => {
+		await runWrangler(`pages download config INHERIT`);
+
+		await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
+			"name = "some-project"
+			pages_build_output_dir = "dist-test"
+			compatibility_date = "2023-02-14"
+			compatibility_flags = [ "some-flag" ]
+
+			[limits]
+			cpu_ms = 500
+
+			[vars]
+			TEST_JSON_PREVIEW = "{\\njson: \\"value\\"\\n}"
+			TEST_PLAINTEXT_PREVIEW = "PLAINTEXT"
+
+			[[kv_namespaces]]
+			id = "kv-id"
+			binding = "KV_PREVIEW"
+
+			[[kv_namespaces]]
+			id = "kv-id"
+			binding = "KV_PREVIEW2"
+
+			[[durable_objects.bindings]]
+			name = "DO_PREVIEW"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[durable_objects.bindings]]
+			name = "DO_PREVIEW2"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[durable_objects.bindings]]
+			name = "DO_PREVIEW3"
+			class_name = "do-class"
+			script_name = "do-s"
+			environment = "do-e"
+
+			[[d1_databases]]
+			database_id = "d1-id"
+			binding = "D1_PREVIEW"
+			database_name = "D1_PREVIEW"
+
+			[[d1_databases]]
+			database_id = "d1-id"
+			binding = "D1_PREVIEW2"
+			database_name = "D1_PREVIEW2"
+
+			[[r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW"
+
+			[[r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2_PREVIEW2"
+
+			[[services]]
+			binding = "SERVICE_PREVIEW"
+			service = "service"
+			environment = "production"
+
+			[[services]]
+			binding = "SERVICE_PREVIEW2"
+			service = "service"
+			environment = "production"
+
+			[[queues.producers]]
+			binding = "QUEUE_PREVIEW"
+			queue = "q-id"
+
+			[[queues.producers]]
+			binding = "QUEUE_PREVIEW2"
+			queue = "q-id"
+
+			[[analytics_engine_datasets]]
+			binding = "AE_PREVIEW"
+			dataset = "data"
+
+			[[analytics_engine_datasets]]
+			binding = "AE_PREVIEW2"
+			dataset = "data"
+
+			[ai]
+			binding = "AI_PREVIEW"
+
+			[env.production.vars]
+			TEST_JSON = "{\\njson: \\"value\\"\\n}"
+			TEST_PLAINTEXT = "PLAINTEXT"
+
+			[[env.production.kv_namespaces]]
+			id = "kv-id"
+			binding = "KV"
+
+			[[env.production.durable_objects.bindings]]
+			name = "DO"
+			class_name = "some-class-do-id"
+			script_name = "some-script-do-id"
+			environment = "some-environment-do-id"
+
+			[[env.production.d1_databases]]
+			database_id = "d1-id"
+			binding = "D1"
+			database_name = "D1"
+
+			[[env.production.r2_buckets]]
+			bucket_name = "r2-name"
+			binding = "R2"
+
+			[[env.production.services]]
+			binding = "SERVICE"
+			service = "service"
+			environment = "production"
+
+			[[env.production.queues.producers]]
+			binding = "QUEUE"
+			queue = "q-id"
+
+			[[env.production.analytics_engine_datasets]]
+			binding = "AE"
+			dataset = "data"
+
+			[env.production.ai]
+			binding = "AI"
+			"
+		`);
+	});
+	it("should prefer CLOUDFLARE_ACCOUNT_ID over cached account id", async ({
+		expect,
+	}) => {
+		vi.stubEnv("CLOUDFLARE_ACCOUNT_ID", "env-var-account-id");
+
+		saveToConfigCache<PagesConfigCache>(PAGES_CONFIG_CACHE_FILENAME, {
+			account_id: "stale-cached-account-id",
+			project_name: MOCK_PROJECT_NAME,
 		});
-		it("should not overwrite existing file w/o --force (non-interactive)", async () => {
+
+		msw.use(
+			http.get(
+				`*/accounts/:accountId/pages/projects/:projectName`,
+				({ params }) => {
+					expect(params.accountId).toEqual("env-var-account-id");
+					return HttpResponse.json(makePagesProject(), { status: 200 });
+				},
+				{ once: true }
+			),
+			http.get(
+				`*/accounts/:accountId/workers/durable_objects/namespaces/:doId`,
+				({ params }) => {
+					expect(params.accountId).toEqual("env-var-account-id");
+					return HttpResponse.json(
+						{
+							success: true,
+							errors: [],
+							result: {
+								script: `some-script-${params.doId}`,
+								class: `some-class-${params.doId}`,
+								environment: `some-environment-${params.doId}`,
+							},
+						},
+						{ status: 200 }
+					);
+				}
+			)
+		);
+
+		await runWrangler(`pages download config ${MOCK_PROJECT_NAME}`);
+	});
+
+	it("should fail if not given a project name", async ({ expect }) => {
+		await expect(
+			runWrangler(`pages download config`)
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`[Error: Missing Pages project name. Provide the project name as a positional argument: wrangler pages download config <name>.]`
+		);
+	});
+	it("should fail if project does not exist", async ({ expect }) => {
+		await expect(
+			runWrangler(`pages download config NOT_REAL`)
+		).rejects.toThrowErrorMatchingInlineSnapshot(
+			`[APIError: A request to the Cloudflare API (/accounts/MOCK_ACCOUNT_ID/pages/projects/NOT_REAL) failed.]`
+		);
+		expect(std).toMatchInlineSnapshot(`
+			{
+			  "debug": "",
+			  "err": "[31mX [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/accounts/MOCK_ACCOUNT_ID/pages/projects/NOT_REAL) failed.[0m
+
+			  Project not found. The specified project name does not match any of your existing projects. [code:
+			  8000007]
+
+			  If you think this is a bug, please open an issue at:
+			  [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
+
+			",
+			  "info": "",
+			  "out": "
+			 ⛅️ wrangler x.x.x
+			──────────────────
+			",
+			  "warn": "[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1m🚧 \`wrangler pages download config\` is an experimental command. Please report any issues to https://github.com/cloudflare/workers-sdk/issues/new/choose[0m
+
+			",
+			}
+		`);
+	});
+	describe("overwrite existing file", () => {
+		it("should overwrite existing file w/ --force", async ({ expect }) => {
+			await writeWranglerConfig({ name: "some-project" });
+			await runWrangler(`pages download config ${MOCK_PROJECT_NAME} --force`);
+
+			await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
+				"name = "some-project"
+				pages_build_output_dir = "dist-test"
+				compatibility_date = "LATEST-SUPPORTED"
+
+				[placement]
+				mode = "smart"
+
+				[limits]
+				cpu_ms = 500
+
+				[vars]
+				TEST_JSON_PREVIEW = "{\\njson: \\"value\\"\\n}"
+				TEST_PLAINTEXT_PREVIEW = "PLAINTEXT"
+
+				[[kv_namespaces]]
+				id = "kv-id"
+				binding = "KV_PREVIEW"
+
+				[[kv_namespaces]]
+				id = "kv-id"
+				binding = "KV_PREVIEW2"
+
+				[[durable_objects.bindings]]
+				name = "DO_PREVIEW"
+				class_name = "some-class-do-id"
+				script_name = "some-script-do-id"
+				environment = "some-environment-do-id"
+
+				[[durable_objects.bindings]]
+				name = "DO_PREVIEW2"
+				class_name = "some-class-do-id"
+				script_name = "some-script-do-id"
+				environment = "some-environment-do-id"
+
+				[[durable_objects.bindings]]
+				name = "DO_PREVIEW3"
+				class_name = "do-class"
+				script_name = "do-s"
+				environment = "do-e"
+
+				[[d1_databases]]
+				database_id = "d1-id"
+				binding = "D1_PREVIEW"
+				database_name = "D1_PREVIEW"
+
+				[[d1_databases]]
+				database_id = "d1-id"
+				binding = "D1_PREVIEW2"
+				database_name = "D1_PREVIEW2"
+
+				[[r2_buckets]]
+				bucket_name = "r2-name"
+				binding = "R2_PREVIEW"
+
+				[[r2_buckets]]
+				bucket_name = "r2-name"
+				binding = "R2_PREVIEW2"
+
+				[[services]]
+				binding = "SERVICE_PREVIEW"
+				service = "service"
+				environment = "production"
+
+				[[services]]
+				binding = "SERVICE_PREVIEW2"
+				service = "service"
+				environment = "production"
+
+				[[queues.producers]]
+				binding = "QUEUE_PREVIEW"
+				queue = "q-id"
+
+				[[queues.producers]]
+				binding = "QUEUE_PREVIEW2"
+				queue = "q-id"
+
+				[[analytics_engine_datasets]]
+				binding = "AE_PREVIEW"
+				dataset = "data"
+
+				[[analytics_engine_datasets]]
+				binding = "AE_PREVIEW2"
+				dataset = "data"
+
+				[ai]
+				binding = "AI_PREVIEW"
+
+				[env.production]
+				compatibility_date = "2024-02-14"
+
+				[env.production.placement]
+				mode = "off"
+
+				[env.production.limits]
+				cpu_ms = 50
+
+				[env.production.vars]
+				TEST_JSON = "{\\njson: \\"value\\"\\n}"
+				TEST_PLAINTEXT = "PLAINTEXT"
+
+				[[env.production.kv_namespaces]]
+				id = "kv-id"
+				binding = "KV"
+
+				[[env.production.durable_objects.bindings]]
+				name = "DO"
+				class_name = "some-class-do-id"
+				script_name = "some-script-do-id"
+				environment = "some-environment-do-id"
+
+				[[env.production.d1_databases]]
+				database_id = "d1-id"
+				binding = "D1"
+				database_name = "D1"
+
+				[[env.production.r2_buckets]]
+				bucket_name = "r2-name"
+				binding = "R2"
+
+				[[env.production.services]]
+				binding = "SERVICE"
+				service = "service"
+				environment = "production"
+
+				[[env.production.queues.producers]]
+				binding = "QUEUE"
+				queue = "q-id"
+
+				[[env.production.analytics_engine_datasets]]
+				binding = "AE"
+				dataset = "data"
+
+				[env.production.ai]
+				binding = "AI"
+				"
+			`);
+		});
+		it("should not overwrite existing file w/o --force (non-interactive)", async ({
+			expect,
+		}) => {
 			setIsTTY(false);
 			await writeWranglerConfig({ name: "some-project" });
 			await expect(
@@ -1034,17 +1074,22 @@ describe("pages download config", () => {
 				`[Error: Not overwriting existing Wrangler configuration file]`
 			);
 
-			await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
-			"name = \\"some-project\\"
-			"
-		`);
+			await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(
+				`
+				"name = "some-project"
+				"
+			`
+			);
 			expect(std.out).toMatchInlineSnapshot(`
-				"? Your existing Wrangler configuration file will be overwritten. Continue?
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				? Your existing Wrangler configuration file will be overwritten. Continue?
 				🤖 Using fallback value in non-interactive context: no
 				"
 			`);
 		});
-		it("should overwrite existing file w/ prompt", async () => {
+		it("should overwrite existing file w/ prompt", async ({ expect }) => {
 			await writeWranglerConfig({ name: "some-project" });
 			await mockConfirm({
 				text: "Your existing Wrangler configuration file will be overwritten. Continue?",
@@ -1053,150 +1098,144 @@ describe("pages download config", () => {
 			await runWrangler(`pages download config ${MOCK_PROJECT_NAME}`);
 
 			await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
-			"name = \\"some-project\\"
-			pages_build_output_dir = \\"dist-test\\"
-			compatibility_date = \\"LATEST-SUPPORTED\\"
+				"name = "some-project"
+				pages_build_output_dir = "dist-test"
+				compatibility_date = "LATEST-SUPPORTED"
 
-			[placement]
-			mode = \\"smart\\"
+				[placement]
+				mode = "smart"
 
-			[limits]
-			cpu_ms = 500
+				[limits]
+				cpu_ms = 500
 
-			[vars]
-			TEST_JSON_PREVIEW = \\"\\"\\"
-			{
-			json: \\"value\\"
-			}\\"\\"\\"
-			TEST_PLAINTEXT_PREVIEW = \\"PLAINTEXT\\"
+				[vars]
+				TEST_JSON_PREVIEW = "{\\njson: \\"value\\"\\n}"
+				TEST_PLAINTEXT_PREVIEW = "PLAINTEXT"
 
-			[[kv_namespaces]]
-			id = \\"kv-id\\"
-			binding = \\"KV_PREVIEW\\"
+				[[kv_namespaces]]
+				id = "kv-id"
+				binding = "KV_PREVIEW"
 
-			[[kv_namespaces]]
-			id = \\"kv-id\\"
-			binding = \\"KV_PREVIEW2\\"
+				[[kv_namespaces]]
+				id = "kv-id"
+				binding = "KV_PREVIEW2"
 
-			[[durable_objects.bindings]]
-			name = \\"DO_PREVIEW\\"
-			class_name = \\"some-class-do-id\\"
-			script_name = \\"some-script-do-id\\"
-			environment = \\"some-environment-do-id\\"
+				[[durable_objects.bindings]]
+				name = "DO_PREVIEW"
+				class_name = "some-class-do-id"
+				script_name = "some-script-do-id"
+				environment = "some-environment-do-id"
 
-			[[durable_objects.bindings]]
-			name = \\"DO_PREVIEW2\\"
-			class_name = \\"some-class-do-id\\"
-			script_name = \\"some-script-do-id\\"
-			environment = \\"some-environment-do-id\\"
+				[[durable_objects.bindings]]
+				name = "DO_PREVIEW2"
+				class_name = "some-class-do-id"
+				script_name = "some-script-do-id"
+				environment = "some-environment-do-id"
 
-			[[durable_objects.bindings]]
-			name = \\"DO_PREVIEW3\\"
-			class_name = \\"do-class\\"
-			script_name = \\"do-s\\"
-			environment = \\"do-e\\"
+				[[durable_objects.bindings]]
+				name = "DO_PREVIEW3"
+				class_name = "do-class"
+				script_name = "do-s"
+				environment = "do-e"
 
-			[[d1_databases]]
-			database_id = \\"d1-id\\"
-			binding = \\"D1_PREVIEW\\"
-			database_name = \\"D1_PREVIEW\\"
+				[[d1_databases]]
+				database_id = "d1-id"
+				binding = "D1_PREVIEW"
+				database_name = "D1_PREVIEW"
 
-			[[d1_databases]]
-			database_id = \\"d1-id\\"
-			binding = \\"D1_PREVIEW2\\"
-			database_name = \\"D1_PREVIEW2\\"
+				[[d1_databases]]
+				database_id = "d1-id"
+				binding = "D1_PREVIEW2"
+				database_name = "D1_PREVIEW2"
 
-			[[r2_buckets]]
-			bucket_name = \\"r2-name\\"
-			binding = \\"R2_PREVIEW\\"
+				[[r2_buckets]]
+				bucket_name = "r2-name"
+				binding = "R2_PREVIEW"
 
-			[[r2_buckets]]
-			bucket_name = \\"r2-name\\"
-			binding = \\"R2_PREVIEW2\\"
+				[[r2_buckets]]
+				bucket_name = "r2-name"
+				binding = "R2_PREVIEW2"
 
-			[[services]]
-			binding = \\"SERVICE_PREVIEW\\"
-			service = \\"service\\"
-			environment = \\"production\\"
+				[[services]]
+				binding = "SERVICE_PREVIEW"
+				service = "service"
+				environment = "production"
 
-			[[services]]
-			binding = \\"SERVICE_PREVIEW2\\"
-			service = \\"service\\"
-			environment = \\"production\\"
+				[[services]]
+				binding = "SERVICE_PREVIEW2"
+				service = "service"
+				environment = "production"
 
-			[[queues.producers]]
-			binding = \\"QUEUE_PREVIEW\\"
-			queue = \\"q-id\\"
+				[[queues.producers]]
+				binding = "QUEUE_PREVIEW"
+				queue = "q-id"
 
-			[[queues.producers]]
-			binding = \\"QUEUE_PREVIEW2\\"
-			queue = \\"q-id\\"
+				[[queues.producers]]
+				binding = "QUEUE_PREVIEW2"
+				queue = "q-id"
 
-			[[analytics_engine_datasets]]
-			binding = \\"AE_PREVIEW\\"
-			dataset = \\"data\\"
+				[[analytics_engine_datasets]]
+				binding = "AE_PREVIEW"
+				dataset = "data"
 
-			[[analytics_engine_datasets]]
-			binding = \\"AE_PREVIEW2\\"
-			dataset = \\"data\\"
+				[[analytics_engine_datasets]]
+				binding = "AE_PREVIEW2"
+				dataset = "data"
 
-			[ai]
-			binding = \\"AI_PREVIEW\\"
+				[ai]
+				binding = "AI_PREVIEW"
 
-			[env.production]
-			compatibility_date = \\"2024-02-14\\"
+				[env.production]
+				compatibility_date = "2024-02-14"
 
-			[env.production.placement]
-			mode = \\"off\\"
+				[env.production.placement]
+				mode = "off"
 
-			[env.production.limits]
-			cpu_ms = 50
+				[env.production.limits]
+				cpu_ms = 50
 
-			[env.production.vars]
-			TEST_JSON = \\"\\"\\"
-			{
-			json: \\"value\\"
-			}\\"\\"\\"
-			TEST_PLAINTEXT = \\"PLAINTEXT\\"
+				[env.production.vars]
+				TEST_JSON = "{\\njson: \\"value\\"\\n}"
+				TEST_PLAINTEXT = "PLAINTEXT"
 
-			[[env.production.kv_namespaces]]
-			id = \\"kv-id\\"
-			binding = \\"KV\\"
+				[[env.production.kv_namespaces]]
+				id = "kv-id"
+				binding = "KV"
 
-			[[env.production.durable_objects.bindings]]
-			name = \\"DO\\"
-			class_name = \\"some-class-do-id\\"
-			script_name = \\"some-script-do-id\\"
-			environment = \\"some-environment-do-id\\"
+				[[env.production.durable_objects.bindings]]
+				name = "DO"
+				class_name = "some-class-do-id"
+				script_name = "some-script-do-id"
+				environment = "some-environment-do-id"
 
-			[[env.production.d1_databases]]
-			database_id = \\"d1-id\\"
-			binding = \\"D1\\"
-			database_name = \\"D1\\"
+				[[env.production.d1_databases]]
+				database_id = "d1-id"
+				binding = "D1"
+				database_name = "D1"
 
-			[[env.production.r2_buckets]]
-			bucket_name = \\"r2-name\\"
-			binding = \\"R2\\"
+				[[env.production.r2_buckets]]
+				bucket_name = "r2-name"
+				binding = "R2"
 
-			[[env.production.services]]
-			binding = \\"SERVICE\\"
-			service = \\"service\\"
-			environment = \\"production\\"
+				[[env.production.services]]
+				binding = "SERVICE"
+				service = "service"
+				environment = "production"
 
-			[[env.production.queues.producers]]
-			binding = \\"QUEUE\\"
-			queue = \\"q-id\\"
+				[[env.production.queues.producers]]
+				binding = "QUEUE"
+				queue = "q-id"
 
-			[[env.production.analytics_engine_datasets]]
-			binding = \\"AE\\"
-			dataset = \\"data\\"
+				[[env.production.analytics_engine_datasets]]
+				binding = "AE"
+				dataset = "data"
 
-			[env.production.ai]
-			binding = \\"AI\\"
-			"
-		`);
+				[env.production.ai]
+				binding = "AI"
+				"
+			`);
 		});
-		it("should not overwrite existing file w/ prompt", async () => {
+		it("should not overwrite existing file w/ prompt", async ({ expect }) => {
 			await writeWranglerConfig({ name: "some-project" });
 			await mockConfirm({
 				text: "Your existing `wrangler.toml` file will be overwritten. Continue?",
@@ -1208,12 +1247,17 @@ describe("pages download config", () => {
 				`[AssertionError: expected { Object (type, name, ...) } to strictly equal { Object (type, name, ...) }]`
 			);
 
-			await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(`
-			"name = \\"some-project\\"
-			"
-		`);
+			await expect(await readNormalizedWranglerToml()).toMatchInlineSnapshot(
+				`
+				"name = "some-project"
+				"
+			`
+			);
 			expect(std.out).toMatchInlineSnapshot(`
 				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+
 				[32mIf you think this is a bug then please create an issue at https://github.com/cloudflare/workers-sdk/issues/new/choose[0m"
 			`);
 		});

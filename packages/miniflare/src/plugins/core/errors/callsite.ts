@@ -79,7 +79,7 @@ function parseCallSite(line: string): CallSite | undefined {
 		typeName,
 		functionName,
 		methodName,
-		fileName: lineMatch[2] || null,
+		fileName: lineMatch[2],
 		lineNumber: parseInt(lineMatch[3]) || null,
 		columnNumber: parseInt(lineMatch[4]) || null,
 		native: isNative,
@@ -90,7 +90,7 @@ export interface CallSiteOptions {
 	typeName: string | null;
 	functionName: string | null;
 	methodName: string | null;
-	fileName: string | null;
+	fileName: string;
 	lineNumber: number | null;
 	columnNumber: number | null;
 	native: boolean;
@@ -101,6 +101,18 @@ export interface CallSiteOptions {
 // https://github.com/felixge/node-stack-trace/blob/4c41a4526e74470179b3b6dd5d75191ca8c56c17/index.js
 export class CallSite implements NodeJS.CallSite {
 	constructor(private readonly opts: CallSiteOptions) {}
+	getScriptHash(): string {
+		throw new Error("Method not implemented.");
+	}
+	getEnclosingColumnNumber(): number {
+		throw new Error("Method not implemented.");
+	}
+	getEnclosingLineNumber(): number {
+		throw new Error("Method not implemented.");
+	}
+	getPosition(): number {
+		throw new Error("Method not implemented.");
+	}
 
 	getThis(): unknown {
 		return null;
@@ -108,8 +120,7 @@ export class CallSite implements NodeJS.CallSite {
 	getTypeName(): string | null {
 		return this.opts.typeName;
 	}
-	// eslint-disable-next-line @typescript-eslint/ban-types
-	getFunction(): Function | undefined {
+	getFunction(): ((...args: unknown[]) => unknown) | undefined {
 		return undefined;
 	}
 	getFunctionName(): string | null {
@@ -118,10 +129,10 @@ export class CallSite implements NodeJS.CallSite {
 	getMethodName(): string | null {
 		return this.opts.methodName;
 	}
-	getFileName(): string | undefined {
-		return this.opts.fileName ?? undefined;
+	getFileName(): string | null {
+		return this.opts.fileName ?? null;
 	}
-	getScriptNameOrSourceURL(): string | null {
+	getScriptNameOrSourceURL(): string {
 		return this.opts.fileName;
 	}
 	getLineNumber(): number | null {

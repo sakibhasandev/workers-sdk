@@ -1,66 +1,107 @@
 import fs from "node:fs";
-import path from "path";
-import { configFileName, withConfig } from "../../config";
+import { configFileName, UserError } from "@cloudflare/workers-utils";
+import dedent from "ts-dedent";
+import { createCommand } from "../../core/create-command";
 import { confirm } from "../../dialogs";
-import { UserError } from "../../errors";
 import { isNonInteractiveOrCI } from "../../is-interactive";
 import { logger } from "../../logger";
-import { printWranglerBanner } from "../../wrangler-banner";
-import { DEFAULT_MIGRATION_PATH, DEFAULT_MIGRATION_TABLE } from "../constants";
+import { isLocal } from "../../utils/is-local";
 import { executeSql } from "../execute";
 import { getDatabaseInfoFromConfig } from "../utils";
 import {
 	getMigrationsPath,
 	getUnappliedMigrations,
 	initMigrationsTable,
+	resolveMigrationsConfig,
 } from "./helpers";
-import { MigrationOptions } from "./options";
-import type { ParseError } from "../../parse";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../../yargs-types";
+import type { ParseError } from "@cloudflare/workers-utils";
 
-export function ApplyOptions(yargs: CommonYargsArgv) {
-	return MigrationOptions(yargs);
-}
+export const d1MigrationsApplyCommand = createCommand({
+	metadata: {
+		description: "Apply any unapplied D1 migrations",
+		epilogue: dedent`
+			This command will prompt you to confirm the migrations you are about to apply.
+			Confirm that you would like to proceed. After applying, a backup will be captured.
 
-type ApplyHandlerOptions = StrictYargsOptionsToInterface<typeof ApplyOptions>;
+			The progress of each migration will be printed in the console.
 
-export const ApplyHandler = withConfig<ApplyHandlerOptions>(
-	async ({
-		config,
-		database,
-		local,
-		remote,
-		persistTo,
-		preview,
-	}): Promise<void> => {
-		await printWranglerBanner();
-		const databaseInfo = getDatabaseInfoFromConfig(config, database);
+			When running the apply command in a CI/CD environment or another non-interactive
+			command line, the confirmation step will be skipped, but the backup will still be
+			captured.
 
-		if (!databaseInfo && remote) {
+			If applying a migration results in an error, this migration will be rolled back,
+			and the previous successful migration will remain applied.
+		`,
+		status: "stable",
+		owner: "Product: D1",
+	},
+	behaviour: {
+		printResourceLocation: true,
+	},
+	args: {
+		database: {
+			type: "string",
+			demandOption: true,
+			description: "The name or binding of the DB",
+		},
+		local: {
+			type: "boolean",
+			description:
+				"Execute commands/files against a local DB for use with wrangler dev",
+		},
+		remote: {
+			type: "boolean",
+			description:
+				"Execute commands/files against a remote DB for use with wrangler dev --remote",
+		},
+		preview: {
+			type: "boolean",
+			description: "Execute commands/files against a preview D1 DB",
+			default: false,
+		},
+		"persist-to": {
+			type: "string",
+			description:
+				"Specify directory to use for local persistence (you must use --local with this flag)",
+			requiresArg: true,
+		},
+	},
+	positionalArgs: ["database"],
+	async handler({ database, local, remote, persistTo, preview }, { config }) {
+		if (!config.configPath) {
 			throw new UserError(
-				`Couldn't find a D1 DB with the name or binding '${database}' in your ${configFileName(config.configPath)} file.`
+				"No configuration file found. Create a wrangler.jsonc file to define your D1 database.",
+				{ telemetryMessage: "d1 migrations apply missing config file" }
 			);
 		}
 
-		if (!config.configPath) {
-			return;
+		const databaseInfo = getDatabaseInfoFromConfig(config, database, {
+			requireDatabaseId: !isLocal({ local, remote }),
+		});
+
+		if (!databaseInfo && remote) {
+			throw new UserError(
+				`Couldn't find a D1 DB with the name or binding '${database}' in your ${configFileName(config.configPath)} file.`,
+				{
+					telemetryMessage: "d1 migrations apply database not found in config",
+				}
+			);
 		}
 
+		const migrationsConfig = resolveMigrationsConfig({
+			databaseInfo: databaseInfo ?? null,
+			configPath: config.configPath,
+		});
 		const migrationsPath = await getMigrationsPath({
-			projectPath: path.dirname(config.configPath),
-			migrationsFolderPath:
-				databaseInfo?.migrationsFolderPath ?? DEFAULT_MIGRATION_PATH,
+			projectPath: migrationsConfig.projectPath,
+			migrationsDir: migrationsConfig.migrationsDir,
+			migrationsDirRaw: migrationsConfig.migrationsDirRaw,
 			createIfMissing: false,
 			configPath: config.configPath,
 		});
 
-		const migrationsTableName =
-			databaseInfo?.migrationsTableName ?? DEFAULT_MIGRATION_TABLE;
 		await initMigrationsTable({
-			migrationsTableName,
+			migrationsTableName: migrationsConfig.migrationsTableName,
 			local,
 			remote,
 			config,
@@ -69,10 +110,14 @@ export const ApplyHandler = withConfig<ApplyHandlerOptions>(
 			preview,
 		});
 
+		// `getUnappliedMigrations` returns paths already sorted by
+		// `compareMigrationPaths` in helpers.ts: numeric order on the first
+		// path segment's leading integer (matching the comparator this code
+		// used to do inline), with a lex tiebreaker for files that share a
+		// numeric prefix or have none.
 		const unappliedMigrations = (
 			await getUnappliedMigrations({
-				migrationsTableName,
-				migrationsPath,
+				migrationsConfig,
 				local,
 				remote,
 				config,
@@ -80,26 +125,12 @@ export const ApplyHandler = withConfig<ApplyHandlerOptions>(
 				persistTo,
 				preview,
 			})
-		)
-			.map((migration) => {
-				return {
-					name: migration,
-					status: "🕒️",
-				};
-			})
-			.sort((a, b) => {
-				const migrationNumberA = parseInt(a.name.split("_")[0]);
-				const migrationNumberB = parseInt(b.name.split("_")[0]);
-				if (migrationNumberA < migrationNumberB) {
-					return -1;
-				}
-				if (migrationNumberA > migrationNumberB) {
-					return 1;
-				}
-
-				// numbers must be equal
-				return 0;
-			});
+		).map((migration) => {
+			return {
+				name: migration,
+				status: "🕒️",
+			};
+		});
 
 		if (unappliedMigrations.length === 0) {
 			logger.log("✅ No migrations to apply!");
@@ -122,7 +153,7 @@ Your database may not be available to serve requests during the migration, conti
 				"utf8"
 			);
 			query += `
-								INSERT INTO ${migrationsTableName} (name)
+								INSERT INTO ${migrationsConfig.migrationsTableName} (name)
 								values ('${migration.name}');
 						`;
 
@@ -143,8 +174,10 @@ Your database may not be available to serve requests during the migration, conti
 				});
 
 				if (response === null) {
-					// TODO:  return error
-					return;
+					throw new UserError(
+						`Migration "${migration.name}" was not applied — execution was cancelled.`,
+						{ telemetryMessage: "d1 migrations apply execution cancelled" }
+					);
 				}
 
 				for (const result of response) {
@@ -162,6 +195,9 @@ Your database may not be available to serve requests during the migration, conti
 					}
 				}
 			} catch (e) {
+				if (e instanceof UserError) {
+					throw e;
+				}
 				const err = e as ParseError;
 				const maybeCause = (err.cause ?? err) as Error;
 
@@ -188,9 +224,10 @@ Your database may not be available to serve requests during the migration, conti
 						.map((err) => {
 							return err;
 						})
-						.join("\n")
+						.join("\n"),
+					{ telemetryMessage: "d1 migrations apply migration failed" }
 				);
 			}
 		}
-	}
-);
+	},
+});

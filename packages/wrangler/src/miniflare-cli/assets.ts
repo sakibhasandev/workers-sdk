@@ -2,19 +2,19 @@ import assert from "node:assert";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createMetadataObject } from "@cloudflare/pages-shared/metadata-generator/createMetadataObject";
-import { parseHeaders } from "@cloudflare/workers-shared/utils/configuration/parseHeaders";
-import { parseRedirects } from "@cloudflare/workers-shared/utils/configuration/parseRedirects";
+import { parseHeaders, parseRedirects } from "@cloudflare/workers-shared";
 import { watch } from "chokidar";
 import { getType } from "mime";
 import { fetch, Request, Response } from "miniflare";
 import { Dispatcher, getGlobalDispatcher } from "undici";
+import { logger } from "../logger";
 import { hashFile } from "../pages/hash";
 import type { Logger } from "../logger";
 import type { Metadata } from "@cloudflare/pages-shared/asset-server/metadata";
 import type {
 	ParsedHeaders,
 	ParsedRedirects,
-} from "@cloudflare/workers-shared/utils/configuration/types";
+} from "@cloudflare/workers-shared";
 import type { Request as WorkersRequest } from "@cloudflare/workers-types/experimental";
 import type { RequestInit } from "miniflare";
 import type { IncomingHttpHeaders } from "undici/types/header";
@@ -23,12 +23,17 @@ export interface Options {
 	log: Logger;
 	proxyPort?: number;
 	directory?: string;
+	signal?: AbortSignal;
 }
 
 export default async function generateASSETSBinding(options: Options) {
 	const assetsFetch =
 		options.directory !== undefined
-			? await generateAssetsFetch(options.directory, options.log)
+			? await generateAssetsFetch(
+					options.directory,
+					options.log,
+					options.signal
+				)
 			: invalidAssetsFetch;
 
 	return async function (miniflareRequest: Request) {
@@ -128,7 +133,8 @@ class ProxyDispatcher extends Dispatcher {
 
 async function generateAssetsFetch(
 	directory: string,
-	log: Logger
+	log: Logger,
+	signal?: AbortSignal
 ): Promise<typeof fetch> {
 	directory = resolve(directory);
 	// Defer importing miniflare until we really need it
@@ -142,9 +148,8 @@ async function generateAssetsFetch(
 	).default;
 	await polyfill();
 
-	const { generateHandler, parseQualityWeightedList } = await import(
-		"@cloudflare/pages-shared/asset-server/handler"
-	);
+	const { generateHandler, parseQualityWeightedList } =
+		await import("@cloudflare/pages-shared/asset-server/handler");
 
 	const headersFile = join(directory, "_headers");
 	const redirectsFile = join(directory, "_redirects");
@@ -155,7 +160,9 @@ async function generateAssetsFetch(
 	let redirects: ParsedRedirects | undefined;
 	if (existsSync(redirectsFile)) {
 		const contents = readFileSync(redirectsFile, "utf-8");
-		redirects = parseRedirects(contents);
+		redirects = parseRedirects(contents, {
+			htmlHandling: undefined, // Pages dev server doesn't expose html_handling configuration in this context.
+		});
 	}
 
 	let headers: ParsedHeaders | undefined;
@@ -172,33 +179,46 @@ async function generateAssetsFetch(
 		logger: log,
 	});
 
-	watch([headersFile, redirectsFile], { persistent: true }).on(
-		"change",
-		(path) => {
-			switch (path) {
-				case headersFile: {
-					log.log("_headers modified. Re-evaluating...");
-					const contents = readFileSync(headersFile).toString();
-					headers = parseHeaders(contents);
-					break;
-				}
-				case redirectsFile: {
-					log.log("_redirects modified. Re-evaluating...");
-					const contents = readFileSync(redirectsFile).toString();
-					redirects = parseRedirects(contents);
-					break;
-				}
+	const watcher = watch([headersFile, redirectsFile], {
+		persistent: true,
+	}).on("change", (path) => {
+		switch (path) {
+			case headersFile: {
+				log.log("_headers modified. Re-evaluating...");
+				const contents = readFileSync(headersFile).toString();
+				headers = parseHeaders(contents);
+				break;
 			}
-
-			metadata = createMetadataObject({
-				redirects,
-				headers,
-				redirectsFile,
-				headersFile,
-				logger: log,
-			});
+			case redirectsFile: {
+				log.log("_redirects modified. Re-evaluating...");
+				const contents = readFileSync(redirectsFile).toString();
+				redirects = parseRedirects(contents, {
+					htmlHandling: undefined, // Pages dev server doesn't expose html_handling configuration in this context.
+				});
+				break;
+			}
 		}
-	);
+
+		metadata = createMetadataObject({
+			redirects,
+			headers,
+			redirectsFile,
+			headersFile,
+			logger: log,
+		});
+	});
+
+	if (signal) {
+		if (signal.aborted) {
+			void watcher.close().catch(() => {});
+		} else {
+			signal.addEventListener(
+				"abort",
+				() => void watcher.close().catch(() => {}),
+				{ once: true }
+			);
+		}
+	}
 
 	const generateResponse = async (request: Request) => {
 		const assetKeyEntryMap = new Map<string, string>();
@@ -207,7 +227,8 @@ async function generateAssetsFetch(
 			request: request as unknown as WorkersRequest,
 			metadata: metadata as Metadata,
 			xServerEnvHeader: "dev",
-			logError: console.error,
+			xWebAnalyticsHeader: false,
+			logError: logger.error,
 			findAssetEntryForPath: async (path) => {
 				const filepath = resolve(join(directory, path));
 				if (!filepath.startsWith(directory)) {
@@ -215,8 +236,7 @@ async function generateAssetsFetch(
 				}
 
 				if (
-					existsSync(filepath) &&
-					lstatSync(filepath).isFile() &&
+					lstatSync(filepath, { throwIfNoEntry: false })?.isFile() &&
 					!ignoredFiles.includes(filepath)
 				) {
 					const hash = hashFile(filepath);

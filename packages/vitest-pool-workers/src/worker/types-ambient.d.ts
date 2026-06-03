@@ -1,24 +1,27 @@
 interface UnsafeEval {
 	eval(code: string, name?: string): unknown;
-	// eslint-disable-next-line @typescript-eslint/ban-types
-	newFunction(script: string, name?: string, ...args: string[]): Function;
-	// eslint-disable-next-line @typescript-eslint/ban-types
-	newAsyncFunction(script: string, name?: string, ...args: string[]): Function;
+	newFunction(
+		script: string,
+		name?: string,
+		...args: string[]
+	): (...args: unknown[]) => unknown;
+	newAsyncFunction(
+		script: string,
+		name?: string,
+		...args: string[]
+	): (...args: unknown[]) => unknown;
 }
 
-// https://github.com/cloudflare/workerd/blob/v1.20240223.0/src/workerd/api/actor.h#L26
-interface EphemeralObjectNamespace<Id extends string = string> {
-	get(id: Id): Fetcher;
+namespace Cloudflare {
+	interface Env extends Record<string, unknown> {
+		__VITEST_POOL_WORKERS_LOOPBACK_SERVICE: Fetcher;
+		__VITEST_POOL_WORKERS_UNSAFE_EVAL: UnsafeEval;
+	}
+	interface GlobalProps {
+		mainModule: typeof import("./index");
+		durableNamespaces: "__VITEST_POOL_WORKERS_RUNNER_DURABLE_OBJECT__";
+	}
 }
-
-interface Env {
-	__VITEST_POOL_WORKERS_SELF_NAME: string;
-	__VITEST_POOL_WORKERS_SELF_SERVICE: Fetcher;
-	__VITEST_POOL_WORKERS_LOOPBACK_SERVICE: Fetcher;
-	__VITEST_POOL_WORKERS_RUNNER_OBJECT: EphemeralObjectNamespace<"singleton">;
-	__VITEST_POOL_WORKERS_UNSAFE_EVAL: UnsafeEval;
-}
-type InternalUserEnv = Env & Record<string, unknown>;
 
 interface DurableObjectDesignator {
 	className: string;
@@ -33,7 +36,7 @@ interface SerializedOptions {
 		string /* bound name */,
 		DurableObjectDesignator
 	>;
-	isolatedStorage?: boolean;
+	selfName?: string;
 }
 
 declare module "__VITEST_POOL_WORKERS_USER_OBJECT" {}
@@ -63,6 +66,7 @@ declare module "cloudflare:mock-agent" {
 
 declare module "workerd:unsafe" {
 	function abortAllDurableObjects(): Promise<void>;
+	function deleteAllDurableObjects(): Promise<void>;
 
-	export default { abortAllDurableObjects };
+	export default { abortAllDurableObjects, deleteAllDurableObjects };
 }

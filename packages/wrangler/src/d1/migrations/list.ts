@@ -1,66 +1,96 @@
-import path from "path";
-import { configFileName, withConfig } from "../../config";
-import { UserError } from "../../errors";
+import { configFileName, UserError } from "@cloudflare/workers-utils";
+import { createCommand } from "../../core/create-command";
 import { logger } from "../../logger";
 import { requireAuth } from "../../user";
-import { printWranglerBanner } from "../../wrangler-banner";
-import { DEFAULT_MIGRATION_PATH, DEFAULT_MIGRATION_TABLE } from "../constants";
+import { isLocal } from "../../utils/is-local";
 import { getDatabaseInfoFromConfig } from "../utils";
 import {
 	getMigrationsPath,
 	getUnappliedMigrations,
 	initMigrationsTable,
+	resolveMigrationsConfig,
 } from "./helpers";
-import { MigrationOptions } from "./options";
-import type {
-	CommonYargsArgv,
-	StrictYargsOptionsToInterface,
-} from "../../yargs-types";
 
-export function ListOptions(yargs: CommonYargsArgv) {
-	return MigrationOptions(yargs);
-}
-
-type ListHandlerOptions = StrictYargsOptionsToInterface<typeof ListOptions>;
-
-export const ListHandler = withConfig<ListHandlerOptions>(
-	async ({
-		config,
-		database,
-		local,
-		remote,
-		persistTo,
-		preview,
-	}): Promise<void> => {
-		await printWranglerBanner();
+export const d1MigrationsListCommand = createCommand({
+	metadata: {
+		description: "View a list of unapplied migration files",
+		status: "stable",
+		owner: "Product: D1",
+	},
+	behaviour: {
+		printResourceLocation: true,
+	},
+	args: {
+		database: {
+			type: "string",
+			demandOption: true,
+			description: "The name or binding of the DB",
+		},
+		local: {
+			type: "boolean",
+			description:
+				"Check migrations against a local DB for use with wrangler dev",
+		},
+		remote: {
+			type: "boolean",
+			description:
+				"Check migrations against a remote DB for use with wrangler dev --remote",
+		},
+		preview: {
+			type: "boolean",
+			description: "Check migrations against a preview D1 DB",
+			default: false,
+		},
+		"persist-to": {
+			type: "string",
+			description:
+				"Specify directory to use for local persistence (you must use --local with this flag)",
+			requiresArg: true,
+		},
+	},
+	positionalArgs: ["database"],
+	async handler({ database, local, remote, persistTo, preview }, { config }) {
 		if (remote) {
 			await requireAuth({});
 		}
 
-		const databaseInfo = getDatabaseInfoFromConfig(config, database);
-		if (!databaseInfo && remote) {
+		if (!config.configPath) {
 			throw new UserError(
-				`Couldn't find a D1 DB with the name or binding '${database}' in your ${configFileName(config.configPath)} file.`
+				"No configuration file found. Create a wrangler.jsonc file to define your D1 database.",
+				{ telemetryMessage: "d1 migrations list missing config file" }
 			);
 		}
 
-		if (!config.configPath) {
-			return;
+		const databaseInfo = getDatabaseInfoFromConfig(config, database, {
+			requireDatabaseId: !isLocal({ local, remote }), // Only require database_id for remote operations
+		});
+		if (!databaseInfo && remote) {
+			throw new UserError(
+				`Couldn't find a D1 DB with the name or binding '${database}' in your ${configFileName(config.configPath)} file.`,
+				{
+					telemetryMessage: "d1 migrations list database not found in config",
+				}
+			);
 		}
 
-		const migrationsPath = await getMigrationsPath({
-			projectPath: path.dirname(config.configPath),
-			migrationsFolderPath:
-				databaseInfo?.migrationsFolderPath ?? DEFAULT_MIGRATION_PATH,
+		const migrationsConfig = resolveMigrationsConfig({
+			databaseInfo: databaseInfo ?? null,
+			configPath: config.configPath,
+		});
+		// Side-effect only: confirm the migrations dir exists (or surface an
+		// actionable error). The returned absolute path is not used in `list`
+		// because `getUnappliedMigrations` resolves files itself from
+		// `projectPath` + `migrationsPattern`.
+		await getMigrationsPath({
+			projectPath: migrationsConfig.projectPath,
+			migrationsDir: migrationsConfig.migrationsDir,
+			migrationsDirRaw: migrationsConfig.migrationsDirRaw,
 			createIfMissing: false,
 			configPath: config.configPath,
 		});
 
-		const migrationsTableName =
-			databaseInfo?.migrationsTableName ?? DEFAULT_MIGRATION_TABLE;
-
 		await initMigrationsTable({
-			migrationsTableName,
+			migrationsTableName: migrationsConfig.migrationsTableName,
 			local,
 			remote,
 			config,
@@ -71,8 +101,7 @@ export const ListHandler = withConfig<ListHandlerOptions>(
 
 		const unappliedMigrations = (
 			await getUnappliedMigrations({
-				migrationsTableName,
-				migrationsPath,
+				migrationsConfig,
 				local,
 				remote,
 				config,
@@ -92,5 +121,5 @@ export const ListHandler = withConfig<ListHandlerOptions>(
 		}
 		logger.log("Migrations to be applied:");
 		logger.table(unappliedMigrations.map((m) => ({ Name: m.Name })));
-	}
-);
+	},
+});

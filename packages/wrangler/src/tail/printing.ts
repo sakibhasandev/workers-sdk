@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import chalk from "chalk";
 import { logger } from "../logger";
 import type {
@@ -13,6 +14,30 @@ import type {
 } from "./createTail";
 import type { Outcome } from "./filters";
 import type WebSocket from "ws";
+
+/**
+ * Pretty-Print a Tail message from a realish-preview attached tail worker
+ * This is a simplified version of `prettyPrintLogs` that:
+ *  - Only prints logs from HTTP triggers, since realish previews don't receive any other types of trigger.
+ *  - Doesn't print the request log line (e.g. GET https://example.com/ - Ok) since in the realish
+ *    context this is printed by Wrangler's proxy controller.
+ */
+export function realishPrintLogs(data: WebSocket.RawData): void {
+	const eventMessage: TailEventMessage = JSON.parse(data.toString());
+
+	if (eventMessage.logs.length > 0) {
+		eventMessage.logs.forEach(({ level, message }) => {
+			logger.console(level, ...message);
+		});
+	}
+
+	if (eventMessage.exceptions.length > 0) {
+		eventMessage.exceptions.forEach(({ name, message, stack }) => {
+			const errorLine = `${name}: ${typeof message === "string" ? message : inspect(message)}`;
+			logger.error(`${errorLine}${stack ? `\n${stack}` : ""}`);
+		});
+	}
+}
 
 export function prettyPrintLogs(data: WebSocket.RawData): void {
 	const eventMessage: TailEventMessage = JSON.parse(data.toString());
@@ -105,14 +130,15 @@ export function prettyPrintLogs(data: WebSocket.RawData): void {
 	}
 
 	if (eventMessage.exceptions.length > 0) {
-		eventMessage.exceptions.forEach(({ name, message }) => {
-			logger.error(`  ${name}:`, message);
+		eventMessage.exceptions.forEach((err) => {
+			const errorLine = `${err.name}: ${typeof err.message === "string" ? err.message : inspect(err.message)}`;
+			logger.error(`${errorLine}${err.stack ? `\n${err.stack}` : ""}`);
 		});
 	}
 }
 
 export function jsonPrintLogs(data: WebSocket.RawData): void {
-	console.log(JSON.stringify(JSON.parse(data.toString()), null, 2));
+	logger.json(JSON.parse(data.toString()));
 }
 
 function isRequestEvent(

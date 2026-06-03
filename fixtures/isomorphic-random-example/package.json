@@ -1,5 +1,5 @@
 {
-	"name": "isomorphic-random-example",
+	"name": "@fixture/isomorphic-random",
 	"private": true,
 	"description": "Isomorphic secure-random library, demonstrating `exports` use with Workers",
 	"exports": {
@@ -7,8 +7,5 @@
 		"node": "./src/node.js",
 		"workerd": "./src/workerd.mjs",
 		"default": "./src/default.js"
-	},
-	"volta": {
-		"extends": "../../package.json"
 	}
 }

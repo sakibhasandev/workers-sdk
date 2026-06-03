@@ -1,15 +1,12 @@
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { beforeEach, describe, it } from "vitest";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { useMockIsTTY } from "../helpers/mock-istty";
-import { mockGetMemberships } from "../helpers/mock-oauth-flow";
-import { msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
+import { getMswSuccessMembershipHandlers, msw } from "../helpers/msw";
 import { runWrangler } from "../helpers/run-wrangler";
 
-// we want to include the banner to make sure it doesn't show up in the output when
-// when --json=true
-vi.unmock("../../wrangler-banner");
 describe("list", () => {
 	mockAccountId({ accountId: null });
 	mockApiToken();
@@ -20,10 +17,8 @@ describe("list", () => {
 
 	beforeEach(() => {
 		setIsTTY(false);
-		mockGetMemberships([
-			{ id: "IG-88", account: { id: "1701", name: "enterprise" } },
-		]);
 		msw.use(
+			...getMswSuccessMembershipHandlers([{ id: "1701", name: "enterprise" }]),
 			http.get("*/accounts/:accountId/d1/database", async () => {
 				return HttpResponse.json(
 					{
@@ -48,38 +43,41 @@ describe("list", () => {
 			})
 		);
 	});
-	it("should print as json if `--json` flag is specified, without wrangler banner", async () => {
+	it("should print valid json if `--json` flag is specified, without wrangler banner", async ({
+		expect,
+	}) => {
 		await runWrangler("d1 list --json");
-		expect(std.out).toMatchInlineSnapshot(`
-			"[
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			[
 			  {
-			    \\"uuid\\": \\"1\\",
-			    \\"name\\": \\"a\\",
-			    \\"binding\\": \\"A\\"
+			    "binding": "A",
+			    "name": "a",
+			    "uuid": "1",
 			  },
 			  {
-			    \\"uuid\\": \\"2\\",
-			    \\"name\\": \\"b\\",
-			    \\"binding\\": \\"B\\"
-			  }
-			]"
+			    "binding": "B",
+			    "name": "b",
+			    "uuid": "2",
+			  },
+			]
 		`);
 	});
 
-	it("should pretty print by default, including the wrangler banner", async () => {
+	it("should pretty print by default, including the wrangler banner", async ({
+		expect,
+	}) => {
 		await runWrangler("d1 list");
 		expect(std.out).toMatchInlineSnapshot(`
 			"
 			 ⛅️ wrangler x.x.x
-			------------------
-
-			┌──────┬──────┬─────────┐
+			──────────────────
+			┌─┬─┬─┐
 			│ uuid │ name │ binding │
-			├──────┼──────┼─────────┤
-			│ 1    │ a    │ A       │
-			├──────┼──────┼─────────┤
-			│ 2    │ b    │ B       │
-			└──────┴──────┴─────────┘"
+			├─┼─┼─┤
+			│ 1 │ a │ A │
+			├─┼─┼─┤
+			│ 2 │ b │ B │
+			└─┴─┴─┘"
 		`);
 	});
 });

@@ -1,10 +1,11 @@
+import { getCloudflareContainerRegistry } from "@cloudflare/containers-shared";
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
-import patchConsole from "patch-console";
+import { afterEach, beforeEach, describe, it } from "vitest";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { useMockIsTTY } from "../helpers/mock-istty";
 import { msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
 import { mockAccount, setWranglerConfig } from "./utils";
 
@@ -17,37 +18,37 @@ describe("cloudchamber image", () => {
 	beforeEach(mockAccount);
 	runInTempDir();
 	afterEach(() => {
-		patchConsole(() => {});
 		msw.resetHandlers();
 	});
 
-	it("should help", async () => {
+	it("should help", async ({ expect }) => {
 		await runWrangler("cloudchamber registries --help");
 		expect(std.err).toMatchInlineSnapshot(`""`);
 		expect(std.out).toMatchInlineSnapshot(`
 			"wrangler cloudchamber registries
 
-			Configure registries via Cloudchamber
+			Configure registries via Cloudchamber [alpha]
 
 			COMMANDS
-			  wrangler cloudchamber registries configure             Configure Cloudchamber to pull from specific registries
-			  wrangler cloudchamber registries credentials [domain]  get a temporary password for a specific domain
-			  wrangler cloudchamber registries remove [domain]       removes the registry at the given domain
-			  wrangler cloudchamber registries list                  list registries configured for this account
+			  wrangler cloudchamber registries configure             Configure Cloudchamber to pull from specific registries [alpha]
+			  wrangler cloudchamber registries credentials <domain>  Get a temporary password for a specific domain [alpha]
+			  wrangler cloudchamber registries remove <domain>       Remove the registry at the given domain [alpha]
+			  wrangler cloudchamber registries list                  List registries configured for this account [alpha]
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
-
-			OPTIONS
-			      --json  Return output as clean JSON  [boolean] [default: false]"
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("should create an image registry (no interactivity)", async () => {
+	it("should create an image registry (no interactivity)", async ({
+		expect,
+	}) => {
 		setIsTTY(false);
 		setWranglerConfig({});
 		msw.use(
@@ -73,13 +74,15 @@ describe("cloudchamber image", () => {
 		// so testing the actual UI will be harder than expected
 		// TODO: think better on how to test UI actions
 		expect(std.out).toMatchInlineSnapshot(`
-		"{
-		    \\"domain\\": \\"docker.io\\"
-		}"
-	`);
+			"{
+			    "domain": "docker.io"
+			}"
+		`);
 	});
 
-	it("should create an image registry (no interactivity)", async () => {
+	it("should create an image registry (no interactivity)", async ({
+		expect,
+	}) => {
 		setIsTTY(false);
 		setWranglerConfig({});
 		msw.use(
@@ -103,15 +106,16 @@ describe("cloudchamber image", () => {
 		expect(std.out).toMatchInlineSnapshot(`"jwt"`);
 	});
 
-	it("should remove an image registry (no interactivity)", async () => {
+	it("should remove an image registry (no interactivity)", async ({
+		expect,
+	}) => {
 		setIsTTY(false);
 		setWranglerConfig({});
 		msw.use(
 			http.delete(
 				"*/registries/:domain",
 				async ({ params }) => {
-					const domain = String(params["domain"]);
-					expect(domain === "docker.io");
+					expect(params.domain).toEqual("docker.io");
 					return HttpResponse.json({});
 				},
 				{ once: true }
@@ -122,7 +126,7 @@ describe("cloudchamber image", () => {
 		expect(std.out).toMatchInlineSnapshot(`"{}"`);
 	});
 
-	it("should list registries (no interactivity)", async () => {
+	it("should list registries (no interactivity)", async ({ expect }) => {
 		setIsTTY(false);
 		setWranglerConfig({});
 		msw.use(
@@ -148,12 +152,12 @@ describe("cloudchamber image", () => {
 		expect(std.out).toMatchInlineSnapshot(`
 			"[
 			    {
-			        \\"public_key\\": \\"\\",
-			        \\"domain\\": \\"docker.io\\"
+			        "public_key": "",
+			        "domain": "docker.io"
 			    },
 			    {
-			        \\"public_key\\": \\"some_public_key\\",
-			        \\"domain\\": \\"docker.io2\\"
+			        "public_key": "some_public_key",
+			        "domain": "docker.io2"
 			    }
 			]"
 		`);
@@ -164,16 +168,17 @@ describe("cloudchamber image list", () => {
 	const std = mockConsoleMethods();
 	const { setIsTTY } = useMockIsTTY();
 
+	const REGISTRY = getCloudflareContainerRegistry();
+
 	mockAccountId();
 	mockApiToken();
 	beforeEach(mockAccount);
 	runInTempDir();
 	afterEach(() => {
-		patchConsole(() => {});
 		msw.resetHandlers();
 	});
 
-	it("should help", async () => {
+	it("should help", async ({ expect }) => {
 		setIsTTY(false);
 		setWranglerConfig({});
 		await runWrangler("cloudchamber images list --help");
@@ -181,370 +186,339 @@ describe("cloudchamber image list", () => {
 		expect(std.out).toMatchInlineSnapshot(`
 			"wrangler cloudchamber images list
 
-			perform operations on images in your Cloudflare managed registry
+			List images in the Cloudflare managed registry [alpha]
 
 			GLOBAL FLAGS
-			  -c, --config   Path to Wrangler configuration file  [string]
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -e, --env      Environment to use for operations, and for selecting .env and .dev.vars files  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
-			      --json    Return output as clean JSON  [boolean] [default: false]
-			      --filter  Regex to filter results  [string]"
+			      --filter  Regex to filter results  [string]
+			      --json    Format output as JSON  [boolean] [default: false]"
 		`);
 	});
-	it("should list images", async () => {
+
+	it("should list images", async ({ expect }) => {
 		setIsTTY(false);
 		setWranglerConfig({});
-		const tags: Map<string, string[]> = new Map([
-			["one", ["hundred", "ten", "sha256:239a0dfhasdfui235"]],
-			["two", ["thousand", "twenty", "sha256:badfga4mag0vhjakf"]],
-			["three", ["million", "thirty", "sha256:23f0adfgbja0f0jf0"]],
-		]);
+		const tags = {
+			one: ["hundred", "ten", "sha256:239a0dfhasdfui235"],
+			two: ["thousand", "twenty", "sha256:badfga4mag0vhjakf"],
+			three: ["million", "thirty", "sha256:23f0adfgbja0f0jf0"],
+		};
 
 		msw.use(
 			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				const domain = String(params["domain"]);
-				expect(domain === "docker.io");
+				expect(params.domain).toEqual(REGISTRY);
 				return HttpResponse.json({
 					account_id: "1234",
-					registry_host: "docker.io",
+					registry_host: REGISTRY,
 					username: "foo",
 					password: "bar",
 				});
 			}),
-			http.get("*/v2/_catalog", async () => {
-				return HttpResponse.json({ repositories: ["one", "two", "three"] });
-			}),
-			http.get("*/v2/:repo/tags/list", async ({ params }) => {
-				const repo = String(params["repo"]);
-				const t = tags.get(repo);
-				return HttpResponse.json({
-					name: `${repo}`,
-					tags: t,
-				});
+			http.get("*/v2/_catalog?tags=true", async () => {
+				return HttpResponse.json({ repositories: tags });
 			})
 		);
 		await runWrangler("cloudchamber images list");
 		expect(std.err).toMatchInlineSnapshot(`""`);
 		expect(std.out).toMatchInlineSnapshot(`
-			"┌────────────┬─────────────────┐
-			│ REPOSITORY │ TAG             │
-			├────────────┼─────────────────┤
-			│ one        │ hundred ten     │
-			├────────────┼─────────────────┤
-			│ two        │ thousand twenty │
-			├────────────┼─────────────────┤
-			│ three      │ million thirty  │
-			└────────────┴─────────────────┘"
+			"REPOSITORY  TAG
+			one         hundred
+			one         ten
+			two         thousand
+			two         twenty
+			three       million
+			three       thirty"
 		`);
 	});
-	it("should list images with a filter", async () => {
+
+	it("should list images with a filter", async ({ expect }) => {
 		setIsTTY(false);
 		setWranglerConfig({});
-		const tags: Map<string, string[]> = new Map([
-			["one", ["hundred", "ten", "sha256:239a0dfhasdfui235"]],
-			["two", ["thousand", "twenty", "sha256:badfga4mag0vhjakf"]],
-			["three", ["million", "thirty", "sha256:23f0adfgbja0f0jf0"]],
-		]);
+		const tags = {
+			one: ["hundred", "ten", "sha256:239a0dfhasdfui235"],
+			two: ["thousand", "twenty", "sha256:badfga4mag0vhjakf"],
+			three: ["million", "thirty", "sha256:23f0adfgbja0f0jf0"],
+		};
 
 		msw.use(
 			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				const domain = String(params["domain"]);
-				expect(domain === "docker.io");
+				expect(params.domain).toEqual(REGISTRY);
 				return HttpResponse.json({
 					account_id: "1234",
-					registry_host: "docker.io",
+					registry_host: REGISTRY,
 					username: "foo",
 					password: "bar",
 				});
 			}),
-			http.get("*/v2/_catalog", async () => {
-				return HttpResponse.json({ repositories: ["one", "two", "three"] });
-			}),
-			http.get("*/v2/:repo/tags/list", async ({ params }) => {
-				const repo = String(params["repo"]);
-				const t = tags.get(repo);
-				return HttpResponse.json({
-					name: `${repo}`,
-					tags: t,
-				});
+			http.get("*/v2/_catalog?tags=true", async () => {
+				return HttpResponse.json({ repositories: tags });
 			})
 		);
 		await runWrangler("cloudchamber images list --filter '^two$'");
 		expect(std.err).toMatchInlineSnapshot(`""`);
 		expect(std.out).toMatchInlineSnapshot(`
-			"┌────────────┬─────────────────┐
-			│ REPOSITORY │ TAG             │
-			├────────────┼─────────────────┤
-			│ two        │ thousand twenty │
-			└────────────┴─────────────────┘"
+			"REPOSITORY  TAG
+			two         thousand
+			two         twenty"
 		`);
 	});
-	it("should filter out repos with no non-sha tags", async () => {
+
+	it("should filter out repos with no non-sha tags", async ({ expect }) => {
 		setIsTTY(false);
 		setWranglerConfig({});
-		const tags: Map<string, string[]> = new Map([
-			["one", ["hundred", "ten", "sha256:239a0dfhasdfui235"]],
-			["two", ["thousand", "twenty", "sha256:badfga4mag0vhjakf"]],
-			["three", ["million", "thirty", "sha256:23f0adfgbja0f0jf0"]],
-			["empty", []],
-			["shaonly", ["sha256:23f0adfgbja0f0jf0"]],
-		]);
+		const tags = {
+			one: ["hundred", "ten", "sha256:239a0dfhasdfui235"],
+			two: ["thousand", "twenty", "sha256:badfga4mag0vhjakf"],
+			three: ["million", "thirty", "sha256:23f0adfgbja0f0jf0"],
+			empty: [],
+			shaonly: ["sha256:23f0adfgbja0f0jf0"],
+		};
 
 		msw.use(
 			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				const domain = String(params["domain"]);
-				expect(domain === "docker.io");
+				expect(params.domain).toEqual(REGISTRY);
 				return HttpResponse.json({
 					account_id: "1234",
-					registry_host: "docker.io",
+					registry_host: REGISTRY,
 					username: "foo",
 					password: "bar",
 				});
 			}),
-			http.get("*/v2/_catalog", async () => {
-				return HttpResponse.json({ repositories: ["one", "two", "three"] });
-			}),
-			http.get("*/v2/:repo/tags/list", async ({ params }) => {
-				const repo = String(params["repo"]);
-				const t = tags.get(repo);
-				return HttpResponse.json({
-					name: `${repo}`,
-					tags: t,
-				});
+			http.get("*/v2/_catalog?tags=true", async () => {
+				return HttpResponse.json({ repositories: tags });
 			})
 		);
 		await runWrangler("cloudchamber images list");
 		expect(std.err).toMatchInlineSnapshot(`""`);
 		expect(std.out).toMatchInlineSnapshot(`
-			"┌────────────┬─────────────────┐
-			│ REPOSITORY │ TAG             │
-			├────────────┼─────────────────┤
-			│ one        │ hundred ten     │
-			├────────────┼─────────────────┤
-			│ two        │ thousand twenty │
-			├────────────┼─────────────────┤
-			│ three      │ million thirty  │
-			└────────────┴─────────────────┘"
+			"REPOSITORY  TAG
+			one         hundred
+			one         ten
+			two         thousand
+			two         twenty
+			three       million
+			three       thirty"
 		`);
 	});
-	it("should list repos with json flag set", async () => {
+
+	it("should list repos as valid json with json flag set", async ({
+		expect,
+	}) => {
 		setIsTTY(false);
 		setWranglerConfig({});
-		const tags: Map<string, string[]> = new Map([
-			["one", ["hundred", "ten", "sha256:239a0dfhasdfui235"]],
-			["two", ["thousand", "twenty", "sha256:badfga4mag0vhjakf"]],
-			["three", ["million", "thirty", "sha256:23f0adfgbja0f0jf0"]],
-		]);
+		const tags = {
+			one: ["hundred", "ten", "sha256:239a0dfhasdfui235"],
+			two: ["thousand", "twenty", "sha256:badfga4mag0vhjakf"],
+			three: ["million", "thirty", "sha256:23f0adfgbja0f0jf0"],
+		};
 
 		msw.use(
 			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				const domain = String(params["domain"]);
-				expect(domain === "docker.io");
+				expect(params.domain).toEqual(REGISTRY);
 				return HttpResponse.json({
 					account_id: "1234",
-					registry_host: "docker.io",
+					registry_host: REGISTRY,
 					username: "foo",
 					password: "bar",
 				});
 			}),
-			http.get("*/v2/_catalog", async () => {
-				return HttpResponse.json({ repositories: ["one", "two", "three"] });
-			}),
-			http.get("*/v2/:repo/tags/list", async ({ params }) => {
-				const repo = String(params["repo"]);
-				const t = tags.get(repo);
-				return HttpResponse.json({
-					name: `${repo}`,
-					tags: t,
-				});
+			http.get("*/v2/_catalog?tags=true", async () => {
+				return HttpResponse.json({ repositories: tags });
 			})
 		);
 		await runWrangler("cloudchamber images list --json");
 		expect(std.err).toMatchInlineSnapshot(`""`);
-		expect(std.out).toMatchInlineSnapshot(`
-			"[
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			[
 			  {
-			    \\"name\\": \\"one\\",
-			    \\"tags\\": [
-			      \\"hundred\\",
-			      \\"ten\\"
-			    ]
+			    "name": "one",
+			    "tags": [
+			      "hundred",
+			      "ten",
+			    ],
 			  },
 			  {
-			    \\"name\\": \\"two\\",
-			    \\"tags\\": [
-			      \\"thousand\\",
-			      \\"twenty\\"
-			    ]
+			    "name": "two",
+			    "tags": [
+			      "thousand",
+			      "twenty",
+			    ],
 			  },
 			  {
-			    \\"name\\": \\"three\\",
-			    \\"tags\\": [
-			      \\"million\\",
-			      \\"thirty\\"
-			    ]
-			  }
-			]"
+			    "name": "three",
+			    "tags": [
+			      "million",
+			      "thirty",
+			    ],
+			  },
+			]
 		`);
 	});
-	it("should filter out repos with no non-sha tags in json output", async () => {
+
+	it("should filter out repos with no non-sha tags in valid json output", async ({
+		expect,
+	}) => {
 		setIsTTY(false);
 		setWranglerConfig({});
-		const tags: Map<string, string[]> = new Map([
-			["one", ["hundred", "ten", "sha256:239a0dfhasdfui235"]],
-			["two", ["thousand", "twenty", "sha256:badfga4mag0vhjakf"]],
-			["three", ["million", "thirty", "sha256:23f0adfgbja0f0jf0"]],
-			["empty", []],
-			["shaonly", ["sha256:23f0adfgbja0f0jf0"]],
-		]);
+		const tags = {
+			one: ["hundred", "ten", "sha256:239a0dfhasdfui235"],
+			two: ["thousand", "twenty", "sha256:badfga4mag0vhjakf"],
+			three: ["million", "thirty", "sha256:23f0adfgbja0f0jf0"],
+			empty: [],
+			shaonly: ["sha256:23f0adfgbja0f0jf0"],
+		};
 
 		msw.use(
 			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				const domain = String(params["domain"]);
-				expect(domain === "docker.io");
+				expect(params.domain).toEqual(REGISTRY);
 				return HttpResponse.json({
 					account_id: "1234",
-					registry_host: "docker.io",
+					registry_host: REGISTRY,
 					username: "foo",
 					password: "bar",
 				});
 			}),
-			http.get("*/v2/_catalog", async () => {
-				return HttpResponse.json({ repositories: ["one", "two", "three"] });
-			}),
-			http.get("*/v2/:repo/tags/list", async ({ params }) => {
-				const repo = String(params["repo"]);
-				const t = tags.get(repo);
-				return HttpResponse.json({
-					name: `${repo}`,
-					tags: t,
-				});
+			http.get("*/v2/_catalog?tags=true", async () => {
+				return HttpResponse.json({ repositories: tags });
 			})
 		);
 		await runWrangler("cloudchamber images list --json");
 		expect(std.err).toMatchInlineSnapshot(`""`);
-		expect(std.out).toMatchInlineSnapshot(`
-			"[
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			[
 			  {
-			    \\"name\\": \\"one\\",
-			    \\"tags\\": [
-			      \\"hundred\\",
-			      \\"ten\\"
-			    ]
+			    "name": "one",
+			    "tags": [
+			      "hundred",
+			      "ten",
+			    ],
 			  },
 			  {
-			    \\"name\\": \\"two\\",
-			    \\"tags\\": [
-			      \\"thousand\\",
-			      \\"twenty\\"
-			    ]
+			    "name": "two",
+			    "tags": [
+			      "thousand",
+			      "twenty",
+			    ],
 			  },
 			  {
-			    \\"name\\": \\"three\\",
-			    \\"tags\\": [
-			      \\"million\\",
-			      \\"thirty\\"
-			    ]
-			  }
-			]"
+			    "name": "three",
+			    "tags": [
+			      "million",
+			      "thirty",
+			    ],
+			  },
+			]
 		`);
 	});
-	it("should delete images", async () => {
+});
+
+describe("cloudchamber image delete", () => {
+	const std = mockConsoleMethods();
+	const { setIsTTY } = useMockIsTTY();
+
+	const REGISTRY = getCloudflareContainerRegistry();
+
+	mockAccountId();
+	mockApiToken();
+	beforeEach(mockAccount);
+	runInTempDir();
+	afterEach(() => {
+		msw.resetHandlers();
+	});
+
+	it("should help", async ({ expect }) => {
 		setIsTTY(false);
 		setWranglerConfig({});
-		const tags: Map<string, string[]> = new Map([
-			["one", ["hundred", "ten", "sha256:239a0dfhasdfui235"]],
-			["two", ["thousand", "twenty", "sha256:badfga4mag0vhjakf"]],
-			["three", ["million", "thirty", "sha256:23f0adfgbja0f0jf0"]],
-		]);
+		await runWrangler("cloudchamber images delete --help");
+		expect(std.err).toMatchInlineSnapshot(`""`);
+		expect(std.out).toMatchInlineSnapshot(`
+			"wrangler cloudchamber images delete <image>
+
+			Remove an image from the Cloudflare managed registry [alpha]
+
+			POSITIONALS
+			  image  Image and tag to delete, of the form IMAGE:TAG  [string] [required]
+
+			GLOBAL FLAGS
+			  -c, --config          Path to Wrangler configuration file  [string]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
+		`);
+	});
+
+	it("should delete images", async ({ expect }) => {
+		setIsTTY(false);
+		setWranglerConfig({});
 
 		msw.use(
 			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				const domain = String(params["domain"]);
-				expect(domain === "docker.io");
+				expect(params.domain).toEqual(REGISTRY);
 				return HttpResponse.json({
 					account_id: "1234",
-					registry_host: "docker.io",
+					registry_host: REGISTRY,
 					username: "foo",
 					password: "bar",
 				});
 			}),
-			http.get("*/v2/_catalog", async () => {
-				return HttpResponse.json({ repositories: ["one", "two", "three"] });
-			}),
-			http.get("*/v2/:repo/tags/list", async ({ params }) => {
-				const repo = String(params["repo"]);
-				const t = tags.get(repo);
-				return HttpResponse.json({
-					name: `${repo}`,
-					tags: t,
-				});
-			}),
-			http.head("*/v2/:image/manifests/:tag", async ({ params }) => {
-				const image = String(params["image"]);
-				expect(image === "one");
-				const tag = String(params["tag"]);
-				expect(tag === "hundred");
+			http.head("*/v2/:accountId/:image/manifests/:tag", async ({ params }) => {
+				expect(params.accountId).toEqual("some-account-id");
+				expect(params.image).toEqual("one");
+				expect(params.tag).toEqual("hundred");
 				return new HttpResponse("", {
 					status: 200,
 					headers: { "Docker-Content-Digest": "some-digest" },
 				});
 			}),
-			http.delete("*/v2/:image/manifests/:tag", async ({ params }) => {
-				const image = String(params["image"]);
-				expect(image === "one");
-				const tag = String(params["tag"]);
-				expect(tag === "hundred");
-				return new HttpResponse("", { status: 200 });
-			}),
+			http.delete(
+				"*/v2/:accountId/:image/manifests/:tag",
+				async ({ params }) => {
+					expect(params.accountId).toEqual("some-account-id");
+					expect(params.image).toEqual("one");
+					expect(params.tag).toEqual("hundred");
+					return new HttpResponse("", { status: 200 });
+				}
+			),
 			http.put("*/v2/gc/layers", async () => {
 				return new HttpResponse("", { status: 200 });
 			})
 		);
 		await runWrangler("cloudchamber images delete one:hundred");
 		expect(std.err).toMatchInlineSnapshot(`""`);
-		expect(std.out).toMatchInlineSnapshot(`"Deleted tag: one:hundred"`);
+		expect(std.out).toMatchInlineSnapshot(
+			`"Deleted one:hundred (some-digest)"`
+		);
 	});
-	it("should error when provided a repo without a tag", async () => {
+
+	it("should error when provided a repo without a tag", async ({ expect }) => {
 		setIsTTY(false);
 		setWranglerConfig({});
-		const tags: Map<string, string[]> = new Map([
-			["one", ["hundred", "ten", "sha256:239a0dfhasdfui235"]],
-			["two", ["thousand", "twenty", "sha256:badfga4mag0vhjakf"]],
-			["three", ["million", "thirty", "sha256:23f0adfgbja0f0jf0"]],
-		]);
 
 		msw.use(
 			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				const domain = String(params["domain"]);
-				expect(domain === "docker.io");
+				expect(params.domain).toEqual(REGISTRY);
 				return HttpResponse.json({
 					account_id: "1234",
-					registry_host: "docker.io",
+					registry_host: REGISTRY,
 					username: "foo",
 					password: "bar",
 				});
-			}),
-			http.get("*/v2/_catalog", async () => {
-				return HttpResponse.json({ repositories: ["one", "two", "three"] });
-			}),
-			http.get("*/v2/:repo/tags/list", async ({ params }) => {
-				const repo = String(params["repo"]);
-				const t = tags.get(repo);
-				return HttpResponse.json({
-					name: `${repo}`,
-					tags: t,
-				});
 			})
 		);
-		await runWrangler("cloudchamber images delete one");
-		expect(std.err).toMatchInlineSnapshot(`""`);
-		expect(std.out).toMatchInlineSnapshot(
-			`"Error when removing image: Error: Must provide a tag to delete"`
-		);
+		await expect(runWrangler("cloudchamber images delete one")).rejects
+			.toThrowErrorMatchingInlineSnapshot(`
+				[Error: Invalid image format. Expected IMAGE:TAG]
+			`);
 	});
 });

@@ -1,6 +1,6 @@
-declare module "cloudflare:test" {
-	interface ProvidedEnv {
-		ASSETS?: Fetcher;
+declare namespace Cloudflare {
+	interface Env {
+		ASSETS: Fetcher;
 		KV_NAMESPACE: KVNamespace;
 		OTHER_OBJECT: DurableObjectNamespace;
 	}

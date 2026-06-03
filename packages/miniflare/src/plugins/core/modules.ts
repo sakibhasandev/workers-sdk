@@ -1,18 +1,24 @@
-import assert from "assert";
-import { readFileSync } from "fs";
-import { builtinModules } from "module";
-import path from "path";
-import { pathToFileURL } from "url";
-import { TextDecoder, TextEncoder } from "util";
-import { parse } from "acorn";
+import assert from "node:assert";
+import { readFileSync } from "node:fs";
+import { builtinModules } from "node:module";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { TextDecoder, TextEncoder } from "node:util";
+import { Parser } from "acorn";
+import importPhases from "acorn-import-phases";
 import { simple } from "acorn-walk";
 import { dim } from "kleur/colors";
 import { z } from "zod";
-import { Worker_Module } from "../../runtime";
 import { globsToRegExps, MiniflareCoreError, PathSchema } from "../../shared";
-import { MatcherRegExps, testRegExps } from "../../workers";
-import { getNodeCompat, NodeJSCompatMode } from "./node-compat";
+import { testRegExps } from "../../workers";
+import { getNodeCompat } from "./node-compat";
+import type { Worker_Module } from "../../runtime";
+import type { MatcherRegExps } from "../../workers";
+import type { NodeJSCompatMode } from "./node-compat";
 import type estree from "estree";
+
+const ExtendedParser = Parser.extend(importPhases());
+const parse = ExtendedParser.parse.bind(ExtendedParser);
 
 const SUGGEST_BUNDLE =
 	"If you're trying to import an npm package, you'll need to bundle your Worker first.";
@@ -30,9 +36,9 @@ const builtinModulesWithPrefix = builtinModules.concat(
 
 // Module identifier used if script came from `script` option
 export function buildStringScriptPath(workerIndex: number) {
-	return `script:${workerIndex}`;
+	return `script-${workerIndex}`;
 }
-const stringScriptRegexp = /^script:(\d+)$/;
+const stringScriptRegexp = /^script-(\d+)$/;
 export function maybeGetStringScriptPathIndex(
 	scriptPath: string
 ): number | undefined {
@@ -122,7 +128,7 @@ export function compileModuleRules(rules: ModuleRule[]) {
 		if (finalisedTypes.has(rule.type)) continue;
 		compiledRules.push({
 			type: rule.type,
-			include: globsToRegExps(rule.include),
+			include: globsToRegExps(rule.include, { endAnchor: true }),
 		});
 		if (!rule.fallthrough) finalisedTypes.add(rule.type);
 	}

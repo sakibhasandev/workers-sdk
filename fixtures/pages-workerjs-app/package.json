@@ -1,10 +1,10 @@
 {
-	"name": "pages-workerjs-app",
+	"name": "@fixture/pages-workerjs",
 	"private": true,
 	"sideEffects": false,
 	"scripts": {
 		"check:type": "tsc",
-		"dev": "wrangler pages dev ./workerjs-test --port 8792",
+		"dev": "wrangler pages dev ./workerjs-test --port 8792 --compatibility-date=2025-07-15",
 		"test:ci": "vitest run",
 		"test:watch": "vitest",
 		"type:tests": "tsc -p ./tests/tsconfig.json"
@@ -15,11 +15,5 @@
 		"undici": "catalog:default",
 		"vitest": "catalog:default",
 		"wrangler": "workspace:*"
-	},
-	"engines": {
-		"node": ">=18.0.0"
-	},
-	"volta": {
-		"extends": "../../package.json"
 	}
 }

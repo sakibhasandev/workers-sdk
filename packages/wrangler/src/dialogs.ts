@@ -1,17 +1,20 @@
+import { UserError } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import prompts from "prompts";
-import { UserError } from "./errors";
 import { isNonInteractiveOrCI } from "./is-interactive";
 import { logger } from "./logger";
+import type { TelemetryMessage } from "@cloudflare/workers-utils";
 
 export class NoDefaultValueProvided extends UserError {
-	constructor() {
+	constructor(
+		options: TelemetryMessage = {
+			telemetryMessage: "dialogs non interactive default missing",
+		}
+	) {
 		// This is user-facing, so make the message something understandable
 		// It _should_ always be caught and replaced with a more descriptive error
 		// but this is fine as a fallback.
-		super("This command cannot be run in a non-interactive context", {
-			telemetryMessage: true,
-		});
+		super("This command cannot be run in a non-interactive context", options);
 		Object.setPrototypeOf(this, new.target.prototype);
 	}
 }
@@ -53,6 +56,7 @@ export async function confirm(
 interface PromptOptions {
 	defaultValue?: string;
 	isSecret?: boolean;
+	validate?: (value: string) => boolean | string | Promise<boolean | string>;
 }
 
 export async function prompt(
@@ -61,7 +65,9 @@ export async function prompt(
 ): Promise<string> {
 	if (isNonInteractiveOrCI()) {
 		if (options?.defaultValue === undefined) {
-			throw new NoDefaultValueProvided();
+			throw new NoDefaultValueProvided({
+				telemetryMessage: "dialogs prompt default missing",
+			});
 		}
 		logger.log(`? ${text}`);
 		logger.log(
@@ -77,6 +83,7 @@ export async function prompt(
 		message: text,
 		initial: options?.defaultValue,
 		style: options?.isSecret ? "password" : "default",
+		validate: options.validate,
 		onState: (state) => {
 			if (state.aborted) {
 				process.nextTick(() => {
@@ -91,6 +98,7 @@ export async function prompt(
 interface SelectOptions<Values> {
 	choices: SelectOption<Values>[];
 	defaultOption?: number;
+	fallbackOption?: number;
 }
 
 interface SelectOption<Values> {
@@ -104,16 +112,18 @@ export async function select<Values extends string>(
 	options: SelectOptions<Values>
 ): Promise<Values> {
 	if (isNonInteractiveOrCI()) {
-		if (options?.defaultOption === undefined) {
-			throw new NoDefaultValueProvided();
+		if (options.fallbackOption === undefined) {
+			throw new NoDefaultValueProvided({
+				telemetryMessage: "dialogs select fallback missing",
+			});
 		}
 		logger.log(`? ${text}`);
 		logger.log(
 			`🤖 ${chalk.dim(
-				"Using default value in non-interactive context:"
-			)} ${chalk.white.bold(options.choices[options.defaultOption].title)}`
+				"Using fallback value in non-interactive context:"
+			)} ${chalk.white.bold(options.choices[options.fallbackOption].title)}`
 		);
-		return options.choices[options.defaultOption].value;
+		return options.choices[options.fallbackOption].value;
 	}
 
 	const { value } = await prompts({
@@ -144,7 +154,9 @@ export async function multiselect<Values extends string>(
 ): Promise<Values[]> {
 	if (isNonInteractiveOrCI()) {
 		if (options?.defaultOptions === undefined) {
-			throw new NoDefaultValueProvided();
+			throw new NoDefaultValueProvided({
+				telemetryMessage: "dialogs multiselect defaults missing",
+			});
 		}
 
 		const defaultTitles = options.defaultOptions.map(

@@ -1,41 +1,31 @@
-import assert from "assert";
-import { readFileSync, realpathSync, writeFileSync } from "fs";
-import path from "path";
+import assert from "node:assert";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { getWranglerTmpDir } from "@cloudflare/workers-utils";
 import { watch } from "chokidar";
-import { noBundleWorker } from "../../deploy/deploy";
 import { bundleWorker, shouldCheckFetch } from "../../deployment-bundle/bundle";
 import { getBundleType } from "../../deployment-bundle/bundle-type";
 import {
 	createModuleCollector,
 	getWrangler1xLegacyModuleReferences,
 } from "../../deployment-bundle/module-collection";
+import { noBundleWorker } from "../../deployment-bundle/no-bundle-worker";
 import { runCustomBuild } from "../../deployment-bundle/run-custom-build";
 import { getAssetChangeMessage } from "../../dev";
 import { runBuild } from "../../dev/use-esbuild";
 import { logger } from "../../logger";
 import { isNavigatorDefined } from "../../navigator-user-agent";
-import { debounce } from "../../pages/utils";
-import { getWranglerTmpDir } from "../../paths";
+import { debounce } from "../../utils/debounce";
 import { Controller } from "./BaseController";
 import { castErrorCause } from "./events";
-import { convertBindingsToCfWorkerInitBindings } from "./utils";
+import { extractBindingsOfType } from "./utils";
 import type { BundleResult } from "../../deployment-bundle/bundle";
-import type { Entry } from "../../deployment-bundle/entry";
 import type { EsbuildBundle } from "../../dev/use-esbuild";
-import type { EphemeralDirectory } from "../../paths";
-import type { ControllerEventMap } from "./BaseController";
-import type {
-	BundleCompleteEvent,
-	BundleStartEvent,
-	ConfigUpdateEvent,
-} from "./events";
+import type { ConfigUpdateEvent } from "./events";
 import type { StartDevWorkerOptions } from "./types";
+import type { EphemeralDirectory, Entry } from "@cloudflare/workers-utils";
 
-type BundlerControllerEventMap = ControllerEventMap & {
-	bundleStart: [BundleStartEvent];
-	bundleComplete: [BundleCompleteEvent];
-};
-export class BundlerController extends Controller<BundlerControllerEventMap> {
+export class BundlerController extends Controller {
 	#currentBundle?: EsbuildBundle;
 
 	#customBuildWatcher?: ReturnType<typeof watch>;
@@ -62,7 +52,8 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 					cwd: config.build?.custom?.workingDirectory,
 					command: config.build?.custom?.command,
 				},
-				config.config
+				config.config,
+				"dev"
 			);
 			if (buildAborter.signal.aborted) {
 				return;
@@ -80,6 +71,7 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 			const entry: Entry = {
 				file: config.entrypoint,
 				projectRoot: config.projectRoot,
+				configPath: config.config,
 				format: config.build.format,
 				moduleRoot: config.build.moduleRoot,
 				exports: config.build.exports,
@@ -98,33 +90,40 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 				rules: config.build.moduleRules,
 			});
 
-			const bindings = (
-				await convertBindingsToCfWorkerInitBindings(config.bindings)
-			).bindings;
+			const doBindings = extractBindingsOfType(
+				"durable_object_namespace",
+				config.bindings
+			);
+			const workflowBindings = extractBindingsOfType(
+				"workflow",
+				config.bindings
+			);
 			const bundleResult: Omit<BundleResult, "stop"> = !config.build?.bundle
 				? await noBundleWorker(
 						entry,
 						config.build.moduleRules,
-						this.#tmpDir.path
+						this.#tmpDir.path,
+						config.pythonModules?.exclude ?? []
 					)
 				: await bundleWorker(entry, this.#tmpDir.path, {
 						bundle: true,
 						additionalModules: [],
 						moduleCollector,
-						workflowBindings: bindings?.workflows ?? [],
-						doBindings: bindings?.durable_objects?.bindings ?? [],
+						doBindings,
+						workflowBindings,
 						jsxFactory: config.build.jsxFactory,
 						jsxFragment: config.build.jsxFactory,
 						tsconfig: config.build.tsconfig,
 						minify: config.build.minify,
+						keepNames: config.build.keepNames ?? true,
 						nodejsCompatMode: config.build.nodejsCompatMode,
+						compatibilityDate: config.compatibilityDate,
+						compatibilityFlags: config.compatibilityFlags,
 						define: config.build.define,
 						checkFetch: shouldCheckFetch(
 							config.compatibilityDate,
 							config.compatibilityFlags
 						),
-						mockAnalyticsEngineDatasets:
-							bindings.analytics_engine_datasets ?? [],
 						alias: config.build.alias,
 						// We want to know if the build is for development or publishing
 						// This could potentially cause issues as we no longer have identical behaviour between dev and deploy?
@@ -149,6 +148,8 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 
 						// sourcemap defaults to true in dev
 						sourcemap: undefined,
+
+						metafile: undefined,
 					});
 			if (buildAborter.signal.aborted) {
 				return;
@@ -171,7 +172,6 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 				entrypointSource: readFileSync(entrypointPath, "utf8"),
 			});
 		} catch (err) {
-			logger.error("Custom build failed:", err);
 			this.emitErrorEvent({
 				type: "error",
 				reason: "Custom build failed",
@@ -197,7 +197,7 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 
 		this.#customBuildWatcher = watch(pathsToWatch, {
 			persistent: true,
-			// TODO: add comments re this ans ready
+			// The initial custom build is always done in getEntry()
 			ignoreInitial: true,
 		});
 		this.#customBuildWatcher.on("ready", () => {
@@ -229,14 +229,21 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 		const entry: Entry = {
 			file: config.entrypoint,
 			projectRoot: config.projectRoot,
+			configPath: config.config,
 			format: config.build.format,
 			moduleRoot: config.build.moduleRoot,
 			exports: config.build.exports,
 			name: config.name,
 		};
-		const { bindings } = await convertBindingsToCfWorkerInitBindings(
-			config.bindings
-		);
+
+		const durableObjects = {
+			bindings: extractBindingsOfType(
+				"durable_object_namespace",
+				config.bindings
+			),
+		};
+		const workflows = extractBindingsOfType("workflow", config.bindings);
+
 		this.#bundlerCleanup = runBuild(
 			{
 				entry,
@@ -248,14 +255,16 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 				rules: config.build.moduleRules,
 				tsconfig: config.build?.tsconfig,
 				minify: config.build?.minify,
+				keepNames: config.build?.keepNames ?? true,
 				nodejsCompatMode: config.build.nodejsCompatMode,
+				compatibilityDate: config.compatibilityDate,
+				compatibilityFlags: config.compatibilityFlags,
 				define: config.build.define,
 				alias: config.build.alias,
 				noBundle: !config.build?.bundle,
 				findAdditionalModules: config.build?.findAdditionalModules,
-				durableObjects: bindings?.durable_objects ?? { bindings: [] },
-				workflows: bindings?.workflows ?? [],
-				mockAnalyticsEngineDatasets: bindings.analytics_engine_datasets ?? [],
+				durableObjects,
+				workflows,
 				local: !config.dev?.remote,
 				// startDevWorker only applies to "dev"
 				targetConsumer: "dev",
@@ -272,6 +281,7 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 					config.compatibilityDate,
 					config.compatibilityFlags
 				),
+				pythonModulesExcludes: config.pythonModules?.exclude ?? [],
 			},
 			(cb) => {
 				const newBundle = cb(this.#currentBundle);
@@ -305,14 +315,38 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 		});
 
 		if (config.assets?.directory) {
-			this.#assetsWatcher = watch(config.assets.directory, {
+			const assetsDir = config.assets.directory;
+			const watcher = watch(assetsDir, {
 				persistent: true,
 				ignoreInitial: true,
-			}).on("all", async (eventName, filePath) => {
-				const message = getAssetChangeMessage(eventName, filePath);
-				logger.debug(`🌀 ${message}...`);
-				debouncedRefreshBundle();
-			});
+			})
+				.on("all", async (eventName, filePath) => {
+					const message = getAssetChangeMessage(eventName, filePath);
+					logger.debug(`🌀 ${message}...`);
+					debouncedRefreshBundle();
+				})
+				.on("error", (err) => {
+					const errnoError = err as NodeJS.ErrnoException;
+					if (errnoError.code === "EMFILE") {
+						logger.warn(
+							`Assets directory watcher hit a platform limit and has been disabled.\n` +
+								`Hot-reloading will not reflect changes to files in ${assetsDir}.\n` +
+								`This can occur when watching very large assets directory trees.\n` +
+								`To work around this, reduce the number of subdirectories under ${assetsDir} by flattening or restructuring the assets directory.`
+						);
+					} else {
+						logger.warn(
+							`Assets directory watcher encountered an error and has been disabled.\n` +
+								`Hot-reloading will not reflect changes to files in ${assetsDir}.\n` +
+								`Watcher error: ${err.message}`
+						);
+					}
+					void watcher.close();
+					if (this.#assetsWatcher === watcher) {
+						this.#assetsWatcher = undefined;
+					}
+				});
+			this.#assetsWatcher = watcher;
 		}
 	}
 
@@ -323,9 +357,6 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 		try {
 			this.#tmpDir = getWranglerTmpDir(event.config.projectRoot, "dev");
 		} catch (e) {
-			logger.error(
-				"Failed to create temporary directory to store built files."
-			);
 			this.emitErrorEvent({
 				type: "error",
 				reason: "Failed to create temporary directory to store built files.",
@@ -335,30 +366,68 @@ export class BundlerController extends Controller<BundlerControllerEventMap> {
 			});
 		}
 
-		void this.#startCustomBuild(event.config);
-		void this.#startBundle(event.config);
-		void this.#ensureWatchingAssets(event.config);
+		void this.#startCustomBuild(event.config).catch((err) => {
+			this.emitErrorEvent({
+				type: "error",
+				reason: "Failed to run custom build",
+				cause: castErrorCause(err),
+				source: "BundlerController",
+				data: { config: event.config },
+			});
+		});
+		void this.#startBundle(event.config).catch((err) => {
+			this.emitErrorEvent({
+				type: "error",
+				reason: "Failed to start bundler",
+				cause: castErrorCause(err),
+				source: "BundlerController",
+				data: { config: event.config },
+			});
+		});
+		void this.#ensureWatchingAssets(event.config).catch((err) => {
+			this.emitErrorEvent({
+				type: "error",
+				reason: "Failed to watch assets",
+				cause: castErrorCause(err),
+				source: "BundlerController",
+				data: { config: event.config },
+			});
+		});
 	}
 
-	async teardown() {
+	override async teardown() {
 		logger.debug("BundlerController teardown beginning...");
+		await super.teardown();
 		this.#customBuildAborter?.abort();
-		this.#tmpDir?.remove();
+		// Abort any in-flight esbuild build so that a finishing build doesn't
+		// emit `bundleComplete`/`bundleStart` into a torn-down event bus.
+		// `Controller.#tearingDown` already suppresses error events, but not
+		// the bundler success events, which go straight through `bus.dispatch`.
+		this.#bundleBuildAborter?.abort();
 		await Promise.all([
+			// Must run before `#tmpDir.remove()` so that the esbuild watcher
+			// can dispose cleanly. Removing the directory first would make
+			// esbuild's watcher fail a rebuild with "Could not resolve
+			// ...middleware-loader.entry.ts" during teardown.
 			this.#bundlerCleanup?.(),
 			this.#customBuildWatcher?.close(),
 			this.#assetsWatcher?.close(),
 		]);
+		// Defence-in-depth: `bundle.ts`'s `stop()` normally removes the tmp
+		// dir on our behalf, but it may have never been assigned (e.g. when
+		// running a custom build, or when the initial build threw). Remove
+		// after esbuild cleanup to avoid the race described above.
+		this.#tmpDir?.remove();
 		logger.debug("BundlerController teardown complete");
 	}
 
 	emitBundleStartEvent(config: StartDevWorkerOptions) {
-		this.emit("bundleStart", { type: "bundleStart", config });
+		this.bus.dispatch({ type: "bundleStart", config });
 	}
 	emitBundleCompleteEvent(
 		config: StartDevWorkerOptions,
 		bundle: EsbuildBundle
 	) {
-		this.emit("bundleComplete", { type: "bundleComplete", config, bundle });
+		this.bus.dispatch({ type: "bundleComplete", config, bundle });
 	}
 }

@@ -1,4 +1,9 @@
-export async function processJob(env: Env, job: QueueJob) {
+export interface QueueJob {
+	key: string;
+	value: string;
+}
+
+async function processJob(env: Env, job: QueueJob) {
 	const result = job.value.toUpperCase();
 	await env.QUEUE_RESULTS.put(job.key, result);
 }

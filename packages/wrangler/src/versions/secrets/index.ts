@@ -1,3 +1,4 @@
+import { FatalError, UserError } from "@cloudflare/workers-utils";
 import { fetchResult } from "../../cfetch";
 import { performApiFetch } from "../../cfetch/internal";
 import { createNamespace } from "../../core/create-command";
@@ -5,21 +6,21 @@ import {
 	createWorkerUploadForm,
 	fromMimeType,
 } from "../../deployment-bundle/create-worker-upload-form";
-import { FatalError, UserError } from "../../errors";
 import { getMetricsUsageHeaders } from "../../metrics";
-import type { Observability } from "../../config/environment";
-import type {
-	WorkerMetadata as CfWorkerMetadata,
-	WorkerMetadataBinding,
-} from "../../deployment-bundle/create-worker-upload-form";
+import type { StartDevWorkerOptions } from "../../api";
 import type {
 	CfModule,
+	CfPlacement,
 	CfTailConsumer,
 	CfUserLimits,
 	CfWorkerInit,
+	WorkerMetadata as CfWorkerMetadata,
 	CfWorkerSourceMap,
-} from "../../deployment-bundle/worker";
-import type { File, SpecIterableIterator } from "undici";
+	Config,
+	Observability,
+	WorkerMetadataBinding,
+} from "@cloudflare/workers-utils";
+import type { SpecIterableIterator } from "undici";
 
 export const versionsSecretNamespace = createNamespace({
 	metadata: {
@@ -61,6 +62,7 @@ export interface VersionDetails {
 			etag: string;
 			handlers: string[];
 			placement_mode?: "smart";
+			placement?: CfPlacement;
 			last_deployed_from: string;
 		};
 		script_runtime: {
@@ -70,6 +72,7 @@ export interface VersionDetails {
 			limits: CfUserLimits;
 		};
 	};
+	cache_options?: { enabled: boolean };
 }
 
 interface ScriptSettings {
@@ -81,6 +84,7 @@ interface ScriptSettings {
 type CfUnsafeMetadata = Record<string, unknown>;
 
 interface CopyLatestWorkerVersionArgs {
+	config: Config;
 	accountId: string;
 	scriptName: string;
 	versionId: string;
@@ -94,6 +98,7 @@ interface CopyLatestWorkerVersionArgs {
 
 // TODO: This is a naive implementation, replace later
 export async function copyWorkerVersionWithNewSecrets({
+	config,
 	accountId,
 	scriptName,
 	versionId,
@@ -106,11 +111,13 @@ export async function copyWorkerVersionWithNewSecrets({
 }: CopyLatestWorkerVersionArgs) {
 	// Grab the specific version info
 	const versionInfo = await fetchResult<VersionDetails>(
+		config,
 		`/accounts/${accountId}/workers/scripts/${scriptName}/versions/${versionId}`
 	);
 
 	// Naive implementation ahead, don't worry too much about it -- we will replace it
 	const { mainModule, modules, sourceMaps } = await parseModules(
+		config,
 		accountId,
 		scriptName,
 		versionId
@@ -118,33 +125,38 @@ export async function copyWorkerVersionWithNewSecrets({
 
 	// Grab the script settings
 	const scriptSettings = await fetchResult<ScriptSettings>(
+		config,
 		`/accounts/${accountId}/workers/scripts/${scriptName}/script-settings`
 	);
 
-	// Filter out secrets because we're gonna inherit them
-	const bindings: WorkerMetadataBinding[] = versionInfo.resources.bindings
-		.filter((binding) => binding.type !== "secret_text")
-		.map((binding) => {
-			// Inherit all of the existing bindings
-			return {
-				name: binding.name,
-				type: "inherit",
-			};
-		});
+	const bindings: StartDevWorkerOptions["bindings"] = Object.fromEntries(
+		versionInfo.resources.bindings
+			// Filter out secrets because they're handled separately
+			.filter((binding) => binding.type !== "secret_text")
+			.map((binding) => {
+				return [
+					binding.name,
+					{
+						// Inherit all of the existing bindings. This will be sent to the API as "type": "inherit"
+						// We inherit rather than just sending the actual bindings to reduce the risk of
+						// something going wrong in the round trip from the API to Wrangler and back
+						type: "inherit",
+					},
+				];
+			})
+	);
 
 	// Add the new secrets
 	for (const secret of secrets) {
 		if (secret.inherit) {
-			bindings.push({
+			bindings[secret.name] = {
 				type: "inherit",
-				name: secret.name,
-			});
+			};
 		} else {
-			bindings.push({
+			bindings[secret.name] = {
 				type: "secret_text",
-				name: secret.name,
-				text: secret.value,
-			});
+				value: secret.value,
+			};
 		}
 	}
 
@@ -155,14 +167,11 @@ export async function copyWorkerVersionWithNewSecrets({
 		keepBindings.push("secret_text");
 	}
 
-	const worker: CfWorkerInit = {
+	const worker: Omit<CfWorkerInit, "bindings"> = {
 		name: scriptName,
 		main: mainModule,
-		bindings: {
-			unsafe: { metadata: unsafeMetadata }, // pass along unsafe metadata
-		} as CfWorkerInit["bindings"], // handled in rawBindings
-		rawBindings: bindings,
 		modules,
+		containers: config.containers,
 		sourceMaps: sourceMaps,
 		migrations: undefined,
 		compatibility_date: versionInfo.resources.script_runtime.compatibility_date,
@@ -173,9 +182,10 @@ export async function copyWorkerVersionWithNewSecrets({
 		keepBindings,
 		logpush: scriptSettings.logpush,
 		placement:
-			versionInfo.resources.script.placement_mode === "smart"
+			versionInfo.resources.script.placement ??
+			(versionInfo.resources.script.placement_mode === "smart"
 				? { mode: "smart" }
-				: undefined,
+				: undefined),
 		tail_consumers: scriptSettings.tail_consumers ?? undefined,
 		limits: versionInfo.resources.script_runtime.limits,
 		annotations: {
@@ -185,15 +195,19 @@ export async function copyWorkerVersionWithNewSecrets({
 		keep_assets: true,
 		assets: undefined,
 		observability: scriptSettings.observability,
+		cache: versionInfo.cache_options,
 	};
 
-	const body = createWorkerUploadForm(worker);
+	const body = createWorkerUploadForm(worker, bindings, {
+		unsafe: { metadata: unsafeMetadata },
+	});
 	const result = await fetchResult<{
 		available_on_subdomain: boolean;
 		id: string | null;
 		etag: string | null;
 		deployment_id: string | null;
 	}>(
+		config,
 		`/accounts/${accountId}/workers/scripts/${scriptName}/versions`,
 		{
 			method: "POST",
@@ -212,6 +226,7 @@ export async function copyWorkerVersionWithNewSecrets({
 }
 
 async function parseModules(
+	config: Config,
 	accountId: string,
 	scriptName: string,
 	versionId: string
@@ -222,6 +237,7 @@ async function parseModules(
 }> {
 	// Pull the Worker content - https://developers.cloudflare.com/api/operations/worker-script-get-content
 	const contentRes = await performApiFetch(
+		config,
 		`/accounts/${accountId}/workers/scripts/${scriptName}/content/v2?version=${versionId}`
 	);
 	if (
@@ -232,19 +248,24 @@ async function parseModules(
 		// Workers Sites is not supported
 		if (formData.get("__STATIC_CONTENT_MANIFEST") !== null) {
 			throw new UserError(
-				"Workers Sites does not support updating secrets through `wrangler versions secret put`. You must use `wrangler secret put` instead."
+				"Workers Sites does not support updating secrets through `wrangler versions secret put`. You must use `wrangler secret put` instead.",
+				{ telemetryMessage: "versions secrets sites unsupported" }
 			);
 		}
 
 		// Load the main module and any additionals
 		const entrypoint = contentRes.headers.get("cf-entrypoint");
 		if (entrypoint === null) {
-			throw new FatalError("Got modules without cf-entrypoint header");
+			throw new FatalError("Got modules without cf-entrypoint header", {
+				telemetryMessage: "versions secrets modules missing entrypoint header",
+			});
 		}
 
 		const entrypointPart = formData.get(entrypoint) as File | null;
 		if (entrypointPart === null) {
-			throw new FatalError("Could not find entrypoint in form-data");
+			throw new FatalError("Could not find entrypoint in form-data", {
+				telemetryMessage: "versions secrets modules missing entrypoint part",
+			});
 		}
 
 		const mainModule: CfModule = {
@@ -290,7 +311,8 @@ async function parseModules(
 		const contentType = contentRes.headers.get("content-type");
 		if (contentType === null) {
 			throw new FatalError(
-				"No content-type header was provided for non-module Worker content"
+				"No content-type header was provided for non-module Worker content",
+				{ telemetryMessage: "versions secrets content missing content type" }
 			);
 		}
 

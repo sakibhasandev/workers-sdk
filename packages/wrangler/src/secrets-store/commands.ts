@@ -1,11 +1,12 @@
+import assert from "node:assert";
+import { FatalError, UserError } from "@cloudflare/workers-utils";
 import { Miniflare } from "miniflare";
 import { createCommand } from "../core/create-command";
 import { getLocalPersistencePath } from "../dev/get-local-persistence-path";
-import { buildPersistOptions } from "../dev/miniflare";
+import { getDefaultPersistRoot } from "../dev/miniflare";
 import { confirm, prompt } from "../dialogs";
-import { FatalError, UserError } from "../errors";
 import { logger } from "../logger";
-import { getAccountId } from "../user";
+import { getOrSelectAccountId } from "../user";
 import { readFromStdin, trimTrailingWhitespace } from "../utils/std";
 import {
 	createSecret,
@@ -18,8 +19,8 @@ import {
 	listStores,
 	updateSecret,
 } from "./client";
-import type { Config } from "../config";
 import type { Secret, Store } from "./client";
+import type { Config } from "@cloudflare/workers-utils";
 
 export async function usingLocalSecretsStoreSecretAPI<T>(
 	persistTo: string | undefined,
@@ -33,11 +34,11 @@ export async function usingLocalSecretsStoreSecretAPI<T>(
 	) => Promise<T>
 ): Promise<T> {
 	const persist = getLocalPersistencePath(persistTo, config);
-	const persistOptions = buildPersistOptions(persist);
+	const defaultPersistRoot = getDefaultPersistRoot(persist);
 	const mf = new Miniflare({
 		script:
 			'addEventListener("fetch", (e) => e.respondWith(new Response(null, { status: 404 })))',
-		...persistOptions,
+		defaultPersistRoot,
 		secretsStoreSecrets: {
 			SECRET: {
 				store_id: storeId,
@@ -56,8 +57,9 @@ export async function usingLocalSecretsStoreSecretAPI<T>(
 export const secretsStoreStoreCreateCommand = createCommand({
 	metadata: {
 		description: "Create a store within an account",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
+		category: "Storage & databases",
 	},
 	positionalArgs: ["name"],
 	args: {
@@ -77,12 +79,12 @@ export const secretsStoreStoreCreateCommand = createCommand({
 		let store: { id: string };
 		logger.log(`🔐 Creating store... (Name: ${args.name})`);
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			store = await createStore(accountId, { name: args.name });
+			const accountId = await getOrSelectAccountId(config);
+			store = await createStore(config, accountId, { name: args.name });
 		} else {
 			throw new UserError(
 				"Local secrets stores are automatically created for you on use. To create a Secrets Store on your account, use the --remote flag.",
-				{ telemetryMessage: true }
+				{ telemetryMessage: "secrets store create local unsupported" }
 			);
 		}
 		logger.log(`✅ Created store! (Name: ${args.name}, ID: ${store.id})`);
@@ -92,7 +94,7 @@ export const secretsStoreStoreCreateCommand = createCommand({
 export const secretsStoreStoreDeleteCommand = createCommand({
 	metadata: {
 		description: "Delete a store within an account",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	positionalArgs: ["store-id"],
@@ -112,12 +114,12 @@ export const secretsStoreStoreDeleteCommand = createCommand({
 	async handler(args, { config }) {
 		logger.log(`🔐 Deleting store... (Name: ${args.storeId})`);
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			await deleteStore(accountId, args.storeId);
+			const accountId = await getOrSelectAccountId(config);
+			await deleteStore(config, accountId, args.storeId);
 		} else {
 			throw new UserError(
 				"This command is not supported in local mode. Use `wrangler <cmd> --remote` to delete a Secrets Store from your account.",
-				{ telemetryMessage: true }
+				{ telemetryMessage: "secrets store delete local unsupported" }
 			);
 		}
 		logger.log(`✅ Deleted store! (ID: ${args.storeId})`);
@@ -127,7 +129,7 @@ export const secretsStoreStoreDeleteCommand = createCommand({
 export const secretsStoreStoreListCommand = createCommand({
 	metadata: {
 		description: "List stores within an account",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	args: {
@@ -158,18 +160,18 @@ export const secretsStoreStoreListCommand = createCommand({
 
 		let stores: Store[];
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			stores = await listStores(accountId, urlParams);
+			const accountId = await getOrSelectAccountId(config);
+			stores = await listStores(config, accountId, urlParams);
 		} else {
 			throw new UserError(
 				"This command is not supported in local mode. Use `wrangler <cmd> --remote` to list Secrets Stores on your account.",
-				{ telemetryMessage: true }
+				{ telemetryMessage: "secrets store list local unsupported" }
 			);
 		}
 
 		if (stores.length === 0) {
 			throw new UserError("List request returned no stores.", {
-				telemetryMessage: true,
+				telemetryMessage: "secrets store list no stores",
 			});
 		} else {
 			const prettierStores = stores
@@ -191,7 +193,7 @@ export const secretsStoreStoreListCommand = createCommand({
 export const secretsStoreSecretListCommand = createCommand({
 	metadata: {
 		description: "List secrets within a store",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	positionalArgs: ["store-id"],
@@ -235,8 +237,8 @@ export const secretsStoreSecretListCommand = createCommand({
 
 		let secrets: Secret[];
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			secrets = await listSecrets(accountId, args.storeId, urlParams);
+			const accountId = await getOrSelectAccountId(config);
+			secrets = await listSecrets(config, accountId, args.storeId, urlParams);
 		} else {
 			secrets = (
 				await usingLocalSecretsStoreSecretAPI(
@@ -246,22 +248,25 @@ export const secretsStoreSecretListCommand = createCommand({
 					"",
 					(api) => api.list()
 				)
-			).map((key) => ({
-				// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-				id: key.metadata!.uuid,
-				store_id: args.storeId,
-				name: key.name,
-				comment: "",
-				scopes: [],
-				created: new Date().toISOString(),
-				modified: new Date().toISOString(),
-				status: "active",
-			}));
+			).map((key) => {
+				assert(key.metadata, "metadata is always present in API list response");
+				return {
+					id: key.metadata.uuid,
+					store_id: args.storeId,
+					name: key.name,
+					comment: "",
+					scopes: [],
+					created: new Date().toISOString(),
+					modified: new Date().toISOString(),
+					status: "active",
+				};
+			});
 		}
 
 		if (secrets.length === 0) {
-			throw new FatalError("List request returned no secrets.", 1, {
-				telemetryMessage: true,
+			throw new FatalError("List request returned no secrets.", {
+				code: 1,
+				telemetryMessage: "secrets store secret list no secrets",
 			});
 		} else {
 			const prettierSecrets = secrets.map((secret) => ({
@@ -281,7 +286,7 @@ export const secretsStoreSecretListCommand = createCommand({
 export const secretsStoreSecretGetCommand = createCommand({
 	metadata: {
 		description: "Get a secret within a store",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	positionalArgs: ["store-id"],
@@ -313,8 +318,8 @@ export const secretsStoreSecretGetCommand = createCommand({
 
 		let secret: Secret;
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			secret = await getSecret(accountId, args.storeId, args.secretId);
+			const accountId = await getOrSelectAccountId(config);
+			secret = await getSecret(config, accountId, args.storeId, args.secretId);
 		} else {
 			const name = await usingLocalSecretsStoreSecretAPI(
 				args.persistTo,
@@ -354,7 +359,7 @@ export const secretsStoreSecretGetCommand = createCommand({
 export const secretsStoreSecretCreateCommand = createCommand({
 	metadata: {
 		description: "Create a secret within a store",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	positionalArgs: ["store-id"],
@@ -397,6 +402,9 @@ export const secretsStoreSecretCreateCommand = createCommand({
 			describe: "Directory for local persistence",
 		},
 	},
+	validateArgs(args) {
+		validateSecretName(args.name);
+	},
 	async handler(args, { config }) {
 		let secretValue = "";
 
@@ -412,8 +420,12 @@ export const secretsStoreSecretCreateCommand = createCommand({
 		}
 
 		if (!secretValue) {
-			throw new UserError("Need to pass in a value when creating a secret.");
+			throw new UserError("Need to pass in a value when creating a secret.", {
+				telemetryMessage: "secrets store secret create missing value",
+			});
 		}
+
+		validateSecretValue(secretValue);
 
 		logger.log(
 			`\n🔐 Creating secret... (Name: ${args.name}, Value: REDACTED, Scopes: ${args.scopes}, Comment: ${args.comment})`
@@ -421,8 +433,8 @@ export const secretsStoreSecretCreateCommand = createCommand({
 
 		let secrets: Secret[];
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			secrets = await createSecret(accountId, args.storeId, {
+			const accountId = await getOrSelectAccountId(config);
+			secrets = await createSecret(config, accountId, args.storeId, {
 				name: args.name,
 				value: secretValue,
 				scopes: args.scopes.split(","),
@@ -450,8 +462,9 @@ export const secretsStoreSecretCreateCommand = createCommand({
 		}
 
 		if (secrets.length === 0) {
-			throw new FatalError("Failed to create a secret.", 1, {
-				telemetryMessage: true,
+			throw new FatalError("Failed to create a secret.", {
+				code: 1,
+				telemetryMessage: "secrets store secret create failed",
 			});
 		}
 		const secret = secrets[0];
@@ -476,7 +489,7 @@ export const secretsStoreSecretCreateCommand = createCommand({
 export const secretsStoreSecretUpdateCommand = createCommand({
 	metadata: {
 		description: "Update a secret within a store",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	positionalArgs: ["store-id"],
@@ -540,20 +553,31 @@ export const secretsStoreSecretUpdateCommand = createCommand({
 
 		if (!secretValue && !args.scopes && !args.comment) {
 			throw new UserError(
-				"Need to pass in a new field using `--value`, `--scopes`, or `--comment` to update a secret."
+				"Need to pass in a new field using `--value`, `--scopes`, or `--comment` to update a secret.",
+				{ telemetryMessage: "secrets store secret update missing field" }
 			);
+		}
+
+		if (secretValue) {
+			validateSecretValue(secretValue);
 		}
 
 		logger.log(`🔐 Updating secret... (ID: ${args.secretId})`);
 
 		let secret: Secret;
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			secret = await updateSecret(accountId, args.storeId, args.secretId, {
-				...(secretValue && { value: secretValue }),
-				...(args.scopes && { scopes: args.scopes.split(",") }),
-				...(args.comment && { comment: args.comment }),
-			});
+			const accountId = await getOrSelectAccountId(config);
+			secret = await updateSecret(
+				config,
+				accountId,
+				args.storeId,
+				args.secretId,
+				{
+					...(secretValue && { value: secretValue }),
+					...(args.scopes && { scopes: args.scopes.split(",") }),
+					...(args.comment && { comment: args.comment }),
+				}
+			);
 		} else {
 			const name = await usingLocalSecretsStoreSecretAPI(
 				args.persistTo,
@@ -595,7 +619,7 @@ export const secretsStoreSecretUpdateCommand = createCommand({
 export const secretsStoreSecretDeleteCommand = createCommand({
 	metadata: {
 		description: "Delete a secret within a store",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	positionalArgs: ["store-id"],
@@ -626,8 +650,8 @@ export const secretsStoreSecretDeleteCommand = createCommand({
 		logger.log(`🔐 Deleting secret... (ID: ${args.secretId})`);
 
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
-			await deleteSecret(accountId, args.storeId, args.secretId);
+			const accountId = await getOrSelectAccountId(config);
+			await deleteSecret(config, accountId, args.storeId, args.secretId);
 		} else {
 			await usingLocalSecretsStoreSecretAPI(
 				args.persistTo,
@@ -644,7 +668,7 @@ export const secretsStoreSecretDeleteCommand = createCommand({
 export const secretsStoreSecretDuplicateCommand = createCommand({
 	metadata: {
 		description: "Duplicate a secret within a store",
-		status: "alpha",
+		status: "open beta",
 		owner: "Product: SSL",
 	},
 	positionalArgs: ["store-id"],
@@ -687,13 +711,17 @@ export const secretsStoreSecretDuplicateCommand = createCommand({
 			describe: "Directory for local persistence",
 		},
 	},
+	validateArgs(args) {
+		validateSecretName(args.name);
+	},
 	async handler(args, { config }) {
 		logger.log(`🔐 Duplicating secret... (ID: ${args.secretId})`);
 
 		let duplicatedSecret: Secret;
 		if (args.remote) {
-			const accountId = config.account_id || (await getAccountId());
+			const accountId = await getOrSelectAccountId(config);
 			duplicatedSecret = await duplicateSecret(
+				config,
 				accountId,
 				args.storeId,
 				args.secretId,
@@ -739,3 +767,25 @@ export const secretsStoreSecretDuplicateCommand = createCommand({
 		logger.table(prettierSecret);
 	},
 });
+
+export const validateSecretName = (name: string) => {
+	const validName = /^[A-z0-9-_]+$/;
+	if (!validName.test(name)) {
+		throw new UserError(
+			"Secret name may only contain alphanumeric characters, underscores, or dashes.",
+			{ telemetryMessage: "secrets store secret invalid name" }
+		);
+	}
+};
+
+export const MAX_SECRET_VALUE_BYTES = 64 * 1024;
+
+export const validateSecretValue = (value: string) => {
+	const byteLength = Buffer.byteLength(value, "utf8");
+	if (byteLength > MAX_SECRET_VALUE_BYTES) {
+		throw new UserError(
+			`Secret value cannot exceed ${MAX_SECRET_VALUE_BYTES} bytes (got ${byteLength}). The Cloudflare API rejects longer values, and a binding to such a secret will fail at deploy time.`,
+			{ telemetryMessage: "secrets store secret value too long" }
+		);
+	}
+};

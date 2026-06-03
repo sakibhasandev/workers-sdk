@@ -1,6 +1,6 @@
-import { ReadableStream } from "stream/web";
-import { DurableObjectStub } from "@cloudflare/workers-types/experimental";
-import { ReplaceWorkersTypes } from "miniflare";
+import type { DurableObjectStub } from "@cloudflare/workers-types/experimental";
+import type { ReplaceWorkersTypes } from "miniflare";
+import type { ReadableStream } from "node:stream/web";
 
 export class MiniflareDurableObjectControlStub {
 	constructor(private readonly stub: ReplaceWorkersTypes<DurableObjectStub>) {}

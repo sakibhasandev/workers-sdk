@@ -1,8 +1,9 @@
-import { existsSync } from "fs";
-import path from "path";
-import { brandColor, dim } from "@cloudflare/cli/colors";
+import { existsSync } from "node:fs";
+import nodePath from "node:path";
+import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
+import { runCommand } from "@cloudflare/cli-shared-helpers/command";
+import * as cliPackages from "@cloudflare/cli-shared-helpers/packages";
 import { fetch } from "undici";
-import { runCommand } from "./command";
 import { detectPackageManager } from "./packageManagers";
 import type { C3Context } from "types";
 
@@ -10,82 +11,48 @@ type InstallConfig = {
 	startText?: string;
 	doneText?: string;
 	dev?: boolean;
+	force?: boolean;
+	isWorkspaceRoot?: boolean;
 };
 
 /**
- * Install a list of packages to the local project directory and add it to `package.json`
- *
- * @param packages - An array of package specifiers to be installed
- * @param config.dev - Add packages as `devDependencies`
- * @param config.startText - Spinner start text
- * @param config.doneText - Spinner done text
+ * Install a list of packages to the local project directory.
+ * Automatically detects the package manager from the environment.
  */
 export const installPackages = async (
 	packages: string[],
-	config: InstallConfig = {},
+	config: InstallConfig = {}
 ) => {
 	const { npm } = detectPackageManager();
-
-	let saveFlag;
-	let cmd;
-	switch (npm) {
-		case "yarn":
-			cmd = "add";
-			saveFlag = config.dev ? "-D" : "";
-			break;
-		case "bun":
-			cmd = "add";
-			saveFlag = config.dev ? "-d" : "";
-			break;
-		case "npm":
-		case "pnpm":
-		default:
-			cmd = "install";
-			saveFlag = config.dev ? "--save-dev" : "";
-			break;
-	}
-
-	await runCommand(
-		[
-			npm,
-			cmd,
-			...(saveFlag ? [saveFlag] : []),
-			...packages,
-			// Add --legacy-peer-deps so that installing Wrangler v4 doesn't case issues with
-			// frameworks that haven't updated their peer dependency for Wrangler v4
-			// TODO: Remove this once Wrangler v4 has been released and framework templates are updated
-			...(npm === "npm" ? ["--legacy-peer-deps"] : []),
-		],
-		{
-			...config,
-			silent: true,
-		},
-	);
+	return cliPackages.installPackages(npm, packages, config);
 };
+
+/**
+ * Installs the latest version of wrangler in the project directory.
+ * Automatically detects the package manager from the environment.
+ */
+export async function installWrangler() {
+	const { npm } = detectPackageManager();
+	return cliPackages.installWrangler(npm, false);
+}
 
 /**
  * Install dependencies in the project directory via `npm install` or its equivalent.
  */
 export const npmInstall = async (ctx: C3Context) => {
 	// Skip this step if packages have already been installed
-	const nodeModulesPath = path.join(ctx.project.path, "node_modules");
+	const nodeModulesPath = nodePath.join(ctx.project.path, "node_modules");
 	if (existsSync(nodeModulesPath)) {
 		return;
 	}
 
 	const { npm } = detectPackageManager();
 
-	await runCommand(
-		// Add --legacy-peer-deps so that installing Wrangler v4 doesn't case issues with
-		// frameworks that haven't updated their peer dependency for Wrangler v4
-		// TODO: Remove this once Wrangler v4 has been released and framework templates are updated
-		[npm, "install", ...(npm === "npm" ? ["--legacy-peer-deps"] : [])],
-		{
-			silent: true,
-			startText: "Installing dependencies",
-			doneText: `${brandColor("installed")} ${dim(`via \`${npm} install\``)}`,
-		},
-	);
+	await runCommand([npm, "install"], {
+		silent: true,
+		startText: "Installing dependencies",
+		doneText: `${brandColor("installed")} ${dim(`via \`${npm} install\``)}`,
+	});
 };
 
 type NpmInfoResponse = {
@@ -100,21 +67,3 @@ export async function getLatestPackageVersion(packageSpecifier: string) {
 	const npmInfo = (await resp.json()) as NpmInfoResponse;
 	return npmInfo["dist-tags"].latest;
 }
-
-/**
- *  Installs the latest version of wrangler in the project directory if it isn't already.
- */
-export const installWrangler = async () => {
-	const { npm } = detectPackageManager();
-
-	// Even if Wrangler is already installed, make sure we install the latest version, as some framework CLIs are pinned to an older version
-	await installPackages([`wrangler@latest`], {
-		dev: true,
-		startText: `Installing wrangler ${dim(
-			"A command line tool for building Cloudflare Workers",
-		)}`,
-		doneText: `${brandColor("installed")} ${dim(
-			`via \`${npm} install wrangler --save-dev\``,
-		)}`,
-	});
-};

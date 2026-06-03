@@ -1,14 +1,17 @@
-import fs from "fs/promises";
+import fs from "node:fs/promises";
 import SCRIPT_WORKFLOWS_BINDING from "worker:workflows/binding";
+import SCRIPT_WORKFLOWS_WRAPPED_BINDING from "worker:workflows/wrapped-binding";
 import { z } from "zod";
-import { Service } from "../../runtime";
 import { getUserServiceName } from "../core";
 import {
 	getPersistPath,
+	getUserBindingServiceName,
 	PersistenceSchema,
-	Plugin,
 	ProxyNodeBinding,
+	SERVICE_DEV_REGISTRY_PROXY,
 } from "../shared";
+import type { Service } from "../../runtime";
+import type { Plugin, RemoteProxyConnectionString } from "../shared";
 
 export const WorkflowsOptionsSchema = z.object({
 	workflows: z
@@ -17,6 +20,18 @@ export const WorkflowsOptionsSchema = z.object({
 				name: z.string(),
 				className: z.string(),
 				scriptName: z.string().optional(),
+				// When set, the workflow's `scriptName` refers to a worker that lives
+				// outside this Miniflare instance (registered in the wrangler dev
+				// registry). The engine's USER_WORKFLOW binding is rerouted through
+				// the dev-registry-proxy so calls reach the external worker. Set by
+				// `getExternalServiceEntrypoints` in `src/index.ts`; not part of the
+				// public API.
+				external: z.boolean().optional(),
+				remoteProxyConnectionString: z
+					.custom<RemoteProxyConnectionString>()
+					.optional(),
+				stepLimit: z.number().int().min(1).optional(),
+				compatibilityFlags: z.string().array().optional(),
 			})
 		)
 		.optional(),
@@ -38,9 +53,21 @@ export const WORKFLOWS_PLUGIN: Plugin<
 		return Object.entries(options.workflows ?? {}).map(
 			([bindingName, workflow]) => ({
 				name: bindingName,
-				service: {
-					name: `${WORKFLOWS_PLUGIN_NAME}:${workflow.name}`,
-					entrypoint: "WorkflowBinding",
+				wrapped: {
+					moduleName: `${WORKFLOWS_PLUGIN_NAME}:local-wrapped-binding`,
+					innerBindings: [
+						{
+							name: "binding",
+							service: {
+								name: getUserBindingServiceName(
+									WORKFLOWS_PLUGIN_NAME,
+									workflow.name,
+									workflow.remoteProxyConnectionString
+								),
+								entrypoint: "WorkflowBinding",
+							},
+						},
+					],
 				},
 			})
 		);
@@ -55,10 +82,25 @@ export const WORKFLOWS_PLUGIN: Plugin<
 		);
 	},
 
-	async getServices({ options, sharedOptions, tmpPath }) {
+	getExtensions() {
+		return [
+			{
+				modules: [
+					{
+						name: `${WORKFLOWS_PLUGIN_NAME}:local-wrapped-binding`,
+						esModule: SCRIPT_WORKFLOWS_WRAPPED_BINDING(),
+						internal: true,
+					},
+				],
+			},
+		];
+	},
+
+	async getServices({ options, sharedOptions, tmpPath, defaultPersistRoot }) {
 		const persistPath = getPersistPath(
 			WORKFLOWS_PLUGIN_NAME,
 			tmpPath,
+			defaultPersistRoot,
 			sharedOptions.workflowsPersist
 		);
 		await fs.mkdir(persistPath, { recursive: true });
@@ -72,15 +114,22 @@ export const WORKFLOWS_PLUGIN: Plugin<
 
 		// this creates one miniflare service per workflow that the user's script has. we should dedupe engine definition later
 		const services = Object.entries(options.workflows ?? {}).map<Service>(
-			([_bindingName, workflow]) => {
+			([bindingName, workflow]) => {
 				// NOTE(lduarte): the engine unique namespace key must be unique per workflow definition
 				// otherwise workerd will crash because there's two equal DO namespaces
 				const uniqueKey = `miniflare-workflows-${workflow.name}`;
 
 				const workflowsBinding: Service = {
-					name: `${WORKFLOWS_PLUGIN_NAME}:${workflow.name}`,
+					name: getUserBindingServiceName(
+						WORKFLOWS_PLUGIN_NAME,
+						workflow.name,
+						workflow.remoteProxyConnectionString
+					),
 					worker: {
 						compatibilityDate: "2024-10-22",
+						compatibilityFlags: Array.from(
+							new Set(["experimental", ...(workflow.compatibilityFlags ?? [])])
+						),
 						modules: [
 							{
 								name: "workflows.mjs",
@@ -103,13 +152,43 @@ export const WORKFLOWS_PLUGIN: Plugin<
 								name: "ENGINE",
 								durableObjectNamespace: { className: "Engine" },
 							},
+							workflow.external && workflow.scriptName
+								? {
+										name: "USER_WORKFLOW",
+										service: {
+											name: getUserServiceName(SERVICE_DEV_REGISTRY_PROXY),
+											entrypoint: "ExternalServiceProxy",
+											props: {
+												json: JSON.stringify({
+													service: workflow.scriptName,
+													entrypoint: workflow.className,
+												}),
+											},
+										},
+									}
+								: {
+										name: "USER_WORKFLOW",
+										service: {
+											name: getUserServiceName(workflow.scriptName),
+											entrypoint: workflow.className,
+										},
+									},
 							{
-								name: "USER_WORKFLOW",
-								service: {
-									name: getUserServiceName(workflow.scriptName),
-									entrypoint: workflow.className,
-								},
+								name: "BINDING_NAME",
+								json: JSON.stringify(bindingName),
 							},
+							{
+								name: "WORKFLOW_NAME",
+								json: JSON.stringify(workflow.name),
+							},
+							...(workflow.stepLimit !== undefined
+								? [
+										{
+											name: "STEP_LIMIT",
+											json: JSON.stringify(workflow.stepLimit),
+										},
+									]
+								: []),
 						],
 					},
 				};
@@ -126,6 +205,11 @@ export const WORKFLOWS_PLUGIN: Plugin<
 	},
 
 	getPersistPath({ workflowsPersist }, tmpPath) {
-		return getPersistPath(WORKFLOWS_PLUGIN_NAME, tmpPath, workflowsPersist);
+		return getPersistPath(
+			WORKFLOWS_PLUGIN_NAME,
+			tmpPath,
+			undefined,
+			workflowsPersist
+		);
 	},
 };

@@ -1,10 +1,10 @@
-import { randomUUID } from "crypto";
-import { readFile } from "fs/promises";
+import { randomUUID } from "node:crypto";
 import events from "node:events";
-import { writeFile } from "node:fs/promises";
-import path from "path";
-import { log } from "@cloudflare/cli";
-import { spinnerWhile } from "@cloudflare/cli/interactive";
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { log } from "@cloudflare/cli-shared-helpers";
+import { spinnerWhile } from "@cloudflare/cli-shared-helpers/interactive";
+import { getWranglerTmpDir, UserError } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import { Miniflare } from "miniflare";
 import { WebSocket } from "ws";
@@ -15,10 +15,8 @@ import {
 	flipObject,
 	ModuleTypeToRuleType,
 } from "../deployment-bundle/module-collection";
-import { UserError } from "../errors";
 import { logger } from "../logger";
-import { getWranglerTmpDir } from "../paths";
-import type { Config } from "../config";
+import type { Config } from "@cloudflare/workers-utils";
 import type { ModuleDefinition } from "miniflare";
 import type { FormData, FormDataEntryValue } from "undici";
 
@@ -57,8 +55,8 @@ async function checkStartupHandler(
 		}
 
 		await spinnerWhile({
-			promise: async () =>
-				await createCLIParser(
+			promise: async () => {
+				const { wrangler } = createCLIParser(
 					config.pages_build_output_dir || pages
 						? [
 								"pages",
@@ -73,7 +71,9 @@ async function checkStartupHandler(
 								"--dry-run",
 								`--outfile=${workerBundle}`,
 							]
-				).parse(),
+				);
+				await wrangler.parse();
+			},
 			startMessage: "Building your Worker",
 			endMessage: chalk.green("Worker Built! 🎉"),
 		});
@@ -88,7 +88,13 @@ async function checkStartupHandler(
 	await writeFile(outfile, JSON.stringify(await cpuProfileResult));
 
 	log(
-		`CPU Profile written to ${outfile}. Load it into the Chrome DevTools profiler (or directly in VSCode) to view a flamegraph.`
+		[
+			`CPU Profile has been written to ${outfile}. Load it into the Chrome DevTools profiler (or directly in VSCode) to view a flamegraph.`,
+			"",
+			"Note that the CPU Profile was measured on your Worker running locally on your machine, which has a different CPU than when your Worker runs on Cloudflare.",
+			"",
+			"As such, CPU Profile can be used to understand where time is spent at startup, but the overall startup time in the profile should not be expected to exactly match what your Worker's startup time will be when deploying to Cloudflare.",
+		].join("\n")
 	);
 }
 
@@ -118,13 +124,15 @@ export const checkStartupCommand = createCommand({
 	validateArgs({ args, workerBundle }) {
 		if (workerBundle && args) {
 			throw new UserError(
-				"`--args` and `--worker` are mutually exclusive—please only specify one"
+				"`--args` and `--worker` are mutually exclusive—please only specify one",
+				{ telemetryMessage: "check startup args mutually exclusive" }
 			);
 		}
 
 		if (args?.includes("outfile") || args?.includes("outdir")) {
 			throw new UserError(
-				"`--args` should not contain `--outfile` or `--outdir`"
+				"`--args` should not contain `--outfile` or `--outdir`",
+				{ telemetryMessage: "check startup args output option disallowed" }
 			);
 		}
 	},
@@ -138,9 +146,9 @@ export const checkStartupCommand = createCommand({
 
 async function getEntryValue(
 	entry: FormDataEntryValue
-): Promise<Uint8Array<ArrayBuffer> | string> {
+): Promise<Uint8Array | string> {
 	if (entry instanceof Blob) {
-		return new Uint8Array(await entry.arrayBuffer());
+		return new Uint8Array((await entry.arrayBuffer()) as ArrayBuffer);
 	} else {
 		return entry as string;
 	}
@@ -166,11 +174,19 @@ async function convertWorkerBundleToModules(
 	workerBundle: FormData
 ): Promise<ModuleDefinition[]> {
 	return await Promise.all(
-		[...workerBundle.entries()].map(async (m) => ({
-			type: getModuleType(m[1]),
-			path: m[0],
-			contents: await getEntryValue(m[1]),
-		}))
+		[...workerBundle.entries()]
+			// Sourcemaps aren't "real" modules in the application and won't be imported by user code, so lets not load them when analyzing the bundle
+			.filter(
+				(m) => m[1] instanceof Blob && m[1].type !== "application/source-map"
+			)
+			.map(
+				async (m) =>
+					({
+						type: getModuleType(m[1]),
+						path: m[0],
+						contents: await getEntryValue(m[1]),
+					}) as ModuleDefinition
+			)
 	);
 }
 
@@ -198,7 +214,8 @@ export async function analyseBundle(
 
 	if (!("main_module" in metadata)) {
 		throw new UserError(
-			"`wrangler check startup` does not support service-worker format Workers. Refer to https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/ for migration guidance."
+			"`wrangler check startup` does not support service-worker format Workers. Refer to https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/ for migration guidance.",
+			{ telemetryMessage: "check startup service worker format unsupported" }
 		);
 	}
 	const mf = new Miniflare({

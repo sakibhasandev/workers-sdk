@@ -174,8 +174,7 @@ export type VectorizeIndexDetails = {
 	processedUpToMutation: string;
 };
 
-export interface VectorizeMetadataIndexProperty
-	extends VectorizeMetadataIndexPropertyName {
+export interface VectorizeMetadataIndexProperty extends VectorizeMetadataIndexPropertyName {
 	/** Specifies the type of metadata property to index. */
 	indexType: VectorizeVectorMetadataValueString;
 }
@@ -187,4 +186,30 @@ export type VectorizeMetadataIndexList = {
 export interface VectorizeMetadataIndexPropertyName {
 	/** Indexed metadata property. */
 	propertyName: string;
+}
+
+/**
+ * Represents a single vector item in a list response.
+ */
+export interface VectorizeListVectorItem {
+	/** The ID of the vector. */
+	id: string;
+}
+
+/**
+ * Response from listing vectors in an index.
+ */
+export interface VectorizeListVectorsResponse {
+	/** Number of vectors returned in this response */
+	count: number;
+	/** Total number of vectors in the index */
+	totalCount: number;
+	/** Whether there are more vectors available beyond this response */
+	isTruncated: boolean;
+	/** Cursor for the next page of results */
+	nextCursor?: string;
+	/** When the cursor expires as an ISO8601 string */
+	cursorExpirationTimestamp?: string;
+	/** Array of vector items */
+	vectors: VectorizeListVectorItem[];
 }

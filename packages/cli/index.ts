@@ -1,4 +1,4 @@
-import { exit } from "process";
+import { exit } from "node:process";
 import {
 	bgBlue,
 	bgGreen,
@@ -53,10 +53,38 @@ export const space = (n = 1) => {
 	return hidden("\u200A".repeat(n));
 };
 
+const LOGGER_LEVELS = {
+	none: -1,
+	error: 0,
+	warn: 1,
+	info: 2,
+	log: 3,
+	debug: 4,
+} as const;
+
+export type LoggerLevel = keyof typeof LOGGER_LEVELS;
+
+// Global log level that can be set by consuming packages
+let currentLogLevel: LoggerLevel = "log";
+
+export function setLogLevel(level: LoggerLevel) {
+	currentLogLevel = level;
+}
+
+export function getLogLevel(): LoggerLevel {
+	return currentLogLevel;
+}
+
 // Primitive for printing to stdout. Use this instead of
 // console.log or printing to stdout directly
 export const logRaw = (msg: string) => {
-	stdout.write(`${msg}\n`);
+	// treat all log calls as 'log' level logs
+	const currentLevel = getLogLevel();
+
+	// Only output if current log level allows 'log' level messages
+	if (LOGGER_LEVELS[currentLevel] >= LOGGER_LEVELS.log) {
+		stdout.write(`${msg}\n`);
+	}
 };
 
 // A simple stylized log for use within a prompt
@@ -218,7 +246,7 @@ export const stripAnsi = (str: string) => {
 // Regular Expression that matches a hyperlink
 // e.g. `\u001B]8;;http://example.com/\u001B\\This is a link\u001B]8;;\u001B\`
 export const linkRegex =
-	// eslint-disable-next-line no-control-regex
+	// eslint-disable-next-line no-control-regex -- regex intentionally matches ANSI escape sequences for hyperlink parsing
 	/\u001B\]8;;(?<url>.+)\u001B\\(?<label>.+)\u001B\]8;;\u001B\\/g;
 
 // Create a hyperlink in terminal
@@ -237,7 +265,9 @@ export const error = (
 	extra?: string,
 	corner = shapes.corners.bl
 ) => {
-	if (msg) {
+	// Only output if current log level allows 'error' level messages
+	const currentLevel = getLogLevel();
+	if (msg && LOGGER_LEVELS[currentLevel] >= LOGGER_LEVELS.error) {
 		stderr.write(
 			`${gray(corner)} ${status.error} ${dim(msg)}\n${
 				extra ? space() + extra + "\n" : ""
@@ -245,3 +275,6 @@ export const error = (
 		);
 	}
 };
+
+export { checkMacOSVersion } from "./check-macos-version";
+export { showCursor } from "./cursor";

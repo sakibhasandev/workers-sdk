@@ -1,9 +1,8 @@
 import path from "node:path";
+import { parseJSON, readFileSync, UserError } from "@cloudflare/workers-utils";
 import { createCommand, createNamespace } from "../core/create-command";
 import { confirm } from "../dialogs";
-import { UserError } from "../errors";
 import { logger } from "../logger";
-import { parseJSON, readFileSync } from "../parse";
 import { requireAuth } from "../user";
 import formatLabelledValues from "../utils/render-labelled-values";
 import {
@@ -11,8 +10,8 @@ import {
 	getCORSPolicy,
 	putCORSPolicy,
 	tableFromCORSPolicyResponse,
-} from "./helpers";
-import type { CORSRule } from "./helpers";
+} from "./helpers/bucket";
+import type { CORSRule } from "./helpers/bucket";
 
 export const r2BucketCORSNamespace = createNamespace({
 	metadata: {
@@ -46,7 +45,12 @@ export const r2BucketCORSListCommand = createCommand({
 		const accountId = await requireAuth(config);
 
 		logger.log(`Listing CORS rules for bucket '${bucket}'...`);
-		const corsPolicy = await getCORSPolicy(accountId, bucket, jurisdiction);
+		const corsPolicy = await getCORSPolicy(
+			config,
+			accountId,
+			bucket,
+			jurisdiction
+		);
 
 		if (corsPolicy.length === 0) {
 			logger.log(
@@ -96,14 +100,49 @@ export const r2BucketCORSSetCommand = createCommand({
 
 		const jsonFilePath = path.resolve(file);
 
-		const corsConfig = parseJSON(readFileSync(jsonFilePath), jsonFilePath) as {
-			rules: CORSRule[];
-		};
+		const corsConfig = parseJSON(
+			readFileSync(jsonFilePath),
+			jsonFilePath
+		) as Record<string, unknown>;
 
-		if (!corsConfig.rules || !Array.isArray(corsConfig.rules)) {
+		// Detect AWS S3 top-level format (CORSRules instead of rules)
+		if (corsConfig.CORSRules) {
 			throw new UserError(
-				`The CORS configuration file must contain a 'rules' array as expected by the request body of the CORS API: ` +
-					`https://developers.cloudflare.com/api/operations/r2-put-bucket-cors-policy`
+				"Wrangler detected an AWS S3 CORS configuration format.\n" +
+					"Cloudflare R2 expects a 'rules' array instead of 'CORSRules'.\n" +
+					"See: https://developers.cloudflare.com/r2/buckets/cors/#example",
+				{ telemetryMessage: "r2 cors set aws cors format unsupported" }
+			);
+		}
+
+		// Validate existence of rules array
+		const rules = corsConfig.rules;
+		if (!rules || !Array.isArray(rules)) {
+			throw new UserError(
+				`The CORS configuration file must contain a 'rules' array as expected by the R2 API: ` +
+					`https://developers.cloudflare.com/api/operations/r2-put-bucket-cors-policy`,
+				{ telemetryMessage: "r2 cors set missing rules array" }
+			);
+		}
+
+		// Detect AWS S3 individual rule format (AllowedOrigins, AllowedMethods, AllowedHeaders)
+		const hasS3Keys = (rules as Record<string, unknown>[]).some(
+			(rule) =>
+				rule &&
+				typeof rule === "object" &&
+				!Array.isArray(rule) &&
+				("AllowedOrigins" in rule ||
+					"AllowedMethods" in rule ||
+					"AllowedHeaders" in rule)
+		);
+
+		if (hasS3Keys) {
+			throw new UserError(
+				"Wrangler detected AWS S3 style keys (e.g. 'AllowedOrigins').\n" +
+					"Cloudflare R2 requires lowercase keys nested inside an 'allowed' object.\n" +
+					'Example: { "allowed": { "origins": ["*"], "methods": ["GET"] } }\n' +
+					"See: https://developers.cloudflare.com/r2/buckets/cors/#example",
+				{ telemetryMessage: "r2 cors set aws rule keys unsupported" }
 			);
 		}
 
@@ -118,9 +157,15 @@ export const r2BucketCORSSetCommand = createCommand({
 		}
 
 		logger.log(
-			`Setting CORS configuration (${corsConfig.rules.length} rules) for bucket '${bucket}'...`
+			`Setting CORS configuration (${rules.length} rules) for bucket '${bucket}'...`
 		);
-		await putCORSPolicy(accountId, bucket, corsConfig.rules, jurisdiction);
+		await putCORSPolicy(
+			config,
+			accountId,
+			bucket,
+			rules as CORSRule[],
+			jurisdiction
+		);
 		logger.log(`✨ Set CORS configuration for bucket '${bucket}'.`);
 	},
 });
@@ -166,7 +211,7 @@ export const r2BucketCORSDeleteCommand = createCommand({
 		}
 
 		logger.log(`Deleting the CORS configuration for bucket '${bucket}'...`);
-		await deleteCORSPolicy(accountId, bucket, jurisdiction);
+		await deleteCORSPolicy(config, accountId, bucket, jurisdiction);
 		logger.log(`CORS configuration deleted for bucket '${bucket}'.`);
 	},
 });

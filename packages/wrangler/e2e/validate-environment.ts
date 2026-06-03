@@ -1,23 +1,50 @@
-import assert from "node:assert";
+import { execSync } from "node:child_process";
 
-assert(
-	process.env.WRANGLER,
-	'You must provide a way to run Wrangler (WRANGLER="pnpm --silent dlx wrangler@beta" will run the latest beta)'
-);
+if (!process.env.WRANGLER) {
+	console.warn(
+		"No `WRANGLER` process environment variable provided - running local build of Wrangler"
+	);
+}
+if (!process.env.WRANGLER_IMPORT) {
+	console.warn(
+		"No `WRANGLER_IMPORT` process environment variable provided - importing from the local build of Wrangler"
+	);
+}
 
-assert(
-	process.env.CLOUDFLARE_ACCOUNT_ID,
-	"You must provide a CLOUDFLARE_ACCOUNT_ID as an environment variable"
-);
+if (!process.env.CLOUDFLARE_ACCOUNT_ID) {
+	console.warn(
+		"No `CLOUDFLARE_ACCOUNT_ID` variable provided, skipping API tests"
+	);
+}
 
-assert(
-	process.env.CLOUDFLARE_API_TOKEN,
-	"You must provide a CLOUDFLARE_API_TOKEN as an environment variable"
-);
+if (!process.env.CLOUDFLARE_API_TOKEN) {
+	console.warn(
+		"No `CLOUDFLARE_API_TOKEN` variable provided, skipping API tests"
+	);
+}
 
-assert(
-	process.env.CLOUDFLARE_ACCOUNT_ID === "8d783f274e1f82dc46744c297b015a2f",
-	"You must run Wrangler's e2e tests against DevProd Testing"
-);
+function isDockerRunning() {
+	try {
+		execSync("docker ps", { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+}
 
+/** Indicates whether the test is being run locally (not in CI) AND docker is currently not running on the system */
+const isLocalWithoutDockerRunning =
+	process.env.CI !== "true" && !isDockerRunning();
+
+if (isLocalWithoutDockerRunning) {
+	process.env.LOCAL_TESTS_WITHOUT_DOCKER = "true";
+}
+
+if (isLocalWithoutDockerRunning) {
+	console.warn(
+		"The tests are running locally but there is no docker instance running on the system, skipping containers tests"
+	);
+}
+
+// Exporting noop vitest setup function allows it to be loaded as a setup file.
 export const setup = () => {};

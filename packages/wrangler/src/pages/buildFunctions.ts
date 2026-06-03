@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { FatalError } from "../errors";
+import { FatalError } from "@cloudflare/workers-utils";
 import { toUrlPath } from "../paths";
 import { FunctionsNoRoutesError } from "./errors";
 import { buildPluginFromFunctions } from "./functions/buildPlugin";
@@ -10,7 +10,7 @@ import { writeRoutesModule } from "./functions/routes";
 import { convertRoutesToRoutesJSONSpec } from "./functions/routes-transformation";
 import { getPagesTmpDir, RUNNING_BUILDERS } from "./utils";
 import type { BundleResult } from "../deployment-bundle/bundle";
-import type { PagesBuildArgs } from "./build";
+import type { pagesFunctionsBuildCommand } from "./build";
 import type { Config } from "./functions/routes";
 import type { NodeJSCompatMode } from "miniflare";
 
@@ -41,9 +41,10 @@ export async function buildFunctions({
 	defineNavigatorUserAgent,
 	checkFetch,
 	external,
+	metafile,
 }: Partial<
 	Pick<
-		PagesBuildArgs,
+		typeof pagesFunctionsBuildCommand.args,
 		| "outfile"
 		| "outdir"
 		| "outputConfigPath"
@@ -58,7 +59,7 @@ export async function buildFunctions({
 > & {
 	functionsDirectory: string;
 	onEnd?: () => void;
-	routesOutputPath?: PagesBuildArgs["outputRoutesPath"];
+	routesOutputPath?: (typeof pagesFunctionsBuildCommand.args)["outputRoutesPath"];
 	local: boolean;
 	nodejsCompatMode?: NodeJSCompatMode;
 	// Allow `routesModule` to be fixed, so we don't create a new file in the
@@ -66,6 +67,7 @@ export async function buildFunctions({
 	routesModule?: string;
 	defineNavigatorUserAgent: boolean;
 	checkFetch: boolean;
+	metafile?: string | boolean;
 }) {
 	RUNNING_BUILDERS.forEach(
 		(runningBuilder) => runningBuilder.stop && runningBuilder.stop()
@@ -80,7 +82,8 @@ export async function buildFunctions({
 
 	if (!config.routes || config.routes.length === 0) {
 		throw new FunctionsNoRoutesError(
-			`Failed to find any routes while compiling Functions in: ${functionsDirectory}`
+			`Failed to find any routes while compiling Functions in: ${functionsDirectory}`,
+			{ telemetryMessage: "pages functions no routes" }
 		);
 	}
 
@@ -109,7 +112,11 @@ export async function buildFunctions({
 		if (outdir === undefined) {
 			throw new FatalError(
 				"Must specify an output directory when building a Plugin.",
-				1
+				{
+					code: 1,
+					telemetryMessage:
+						"pages functions build plugin missing output directory",
+				}
 			);
 		}
 
@@ -143,6 +150,7 @@ export async function buildFunctions({
 			defineNavigatorUserAgent,
 			checkFetch,
 			external,
+			metafile,
 		});
 	}
 

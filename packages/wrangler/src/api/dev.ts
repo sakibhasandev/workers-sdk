@@ -1,19 +1,19 @@
 import events from "node:events";
+import { getDockerPath } from "@cloudflare/workers-utils";
 import { fetch, Request } from "undici";
-import { startDev } from "../dev";
+import { startDev } from "../dev/start-dev";
 import { run } from "../experimental-flags";
 import { logger } from "../logger";
-import type { Environment } from "../config";
-import type { Rule } from "../config/environment";
-import type { CfModule } from "../deployment-bundle/worker";
 import type { StartDevOptions } from "../dev";
 import type { EnablePagesAssetsServiceBindingOptions } from "../miniflare-cli/types";
+import type { CfModule, Environment, Rule } from "@cloudflare/workers-utils";
 import type { Json } from "miniflare";
 import type { RequestInfo, RequestInit, Response } from "undici";
 
 export interface Unstable_DevOptions {
 	config?: string; // Path to .toml configuration file, relative to cwd
 	env?: string; // Environment to use for operations, and for selecting .env and .dev.vars files
+	envFiles?: string[]; // Paths to .env files to load, relative to cwd
 	ip?: string; // IP address to listen on
 	port?: number; // Port to listen on
 	bundle?: boolean; // Set to false to skip internal build steps and directly deploy script
@@ -34,6 +34,7 @@ export interface Unstable_DevOptions {
 		binding: string;
 		id?: string;
 		preview_id?: string;
+		remote?: boolean;
 	}[];
 	durableObjects?: {
 		name: string;
@@ -46,11 +47,13 @@ export interface Unstable_DevOptions {
 		service: string;
 		environment?: string | undefined;
 		entrypoint?: string | undefined;
+		remote?: boolean;
 	}[];
 	r2?: {
 		binding: string;
 		bucket_name?: string;
 		preview_bucket_name?: string;
+		remote?: boolean;
 	}[];
 	ai?: {
 		binding: string;
@@ -74,14 +77,13 @@ export interface Unstable_DevOptions {
 		forceLocal?: boolean;
 		liveReload?: boolean; // Auto reload HTML pages when change is detected in local mode
 		showInteractiveDevSession?: boolean;
-		testMode?: boolean; // This option shouldn't be used - We plan on removing it eventually
 		testScheduled?: boolean; // Test scheduled events by visiting /__scheduled in browser
-		watch?: boolean; // unstable_dev doesn't support watch-mode yet in testMode
-		devEnv?: boolean;
+		watch?: boolean; // unstable_dev doesn't support watch-mode yet
 		fileBasedRegistry?: boolean;
-		vectorizeBindToProd?: boolean;
-		imagesLocalMode?: boolean;
 		enableIpc?: boolean;
+		enableContainers?: boolean; // Whether to build and connect to containers in dev mode. Defaults to true.
+		dockerPath?: string; // Path to the docker binary, if not on $PATH
+		containerEngine?: string; // Docker socket
 	};
 }
 
@@ -107,7 +109,6 @@ export async function unstable_dev(
 		disableDevRegistry: false,
 		disableExperimentalWarning: false,
 		showInteractiveDevSession: false,
-		testMode: true,
 		// Override all options, including overwriting with "undefined"
 		...options?.experimental,
 	};
@@ -122,10 +123,7 @@ export async function unstable_dev(
 		forceLocal,
 		liveReload,
 		showInteractiveDevSession,
-		testMode,
 		testScheduled,
-		vectorizeBindToProd,
-		imagesLocalMode,
 		// 2. options for alpha/beta products/libs
 		d1Databases,
 		enablePagesAssetsServiceBinding,
@@ -152,8 +150,9 @@ export async function unstable_dev(
 		readyResolve = resolve;
 	});
 
-	const defaultLogLevel = testMode ? "warn" : "log";
 	const local = options?.local ?? true;
+
+	const dockerPath = options?.experimental?.dockerPath ?? getDockerPath();
 
 	const devOptions: StartDevOptions = {
 		script: script,
@@ -174,6 +173,7 @@ export async function unstable_dev(
 		},
 		config: options?.config,
 		env: options?.env,
+		envFile: options?.envFiles,
 		processEntrypoint,
 		additionalModules,
 		bundle: options?.bundle,
@@ -181,6 +181,7 @@ export async function unstable_dev(
 		compatibilityFlags: options?.compatibilityFlags,
 		ip: "127.0.0.1",
 		inspectorPort: options?.inspectorPort ?? 0,
+		inspectorIp: undefined,
 		v: undefined,
 		cwd: undefined,
 		localProtocol: options?.localProtocol,
@@ -208,13 +209,18 @@ export async function unstable_dev(
 		minify: undefined,
 		legacyEnv: undefined,
 		...options,
-		logLevel: options?.logLevel ?? defaultLogLevel,
+		logLevel: options?.logLevel,
 		port: options?.port ?? 0,
 		experimentalProvision: undefined,
-		experimentalVectorizeBindToProd: vectorizeBindToProd ?? false,
-		experimentalImagesLocalMode: imagesLocalMode ?? false,
+		experimentalAutoCreate: false,
 		enableIpc: options?.experimental?.enableIpc,
 		nodeCompat: undefined,
+		enableContainers: options?.experimental?.enableContainers ?? false,
+		dockerPath,
+		containerEngine: options?.experimental?.containerEngine,
+		types: false,
+		tunnel: undefined,
+		tunnelName: undefined,
 	};
 
 	//outside of test mode, rebuilds work fine, but only one instance of wrangler will work at a time
@@ -223,6 +229,7 @@ export async function unstable_dev(
 			// TODO: can we make this work?
 			MULTIWORKER: false,
 			RESOURCES_PROVISION: false,
+			AUTOCREATE_RESOURCES: false,
 		},
 		() => startDev(devOptions)
 	);
@@ -233,9 +240,6 @@ export async function unstable_dev(
 		address,
 		stop: async () => {
 			await devServer.devEnv.teardown.bind(devServer.devEnv)();
-			const teardownRegistry = await devServer.teardownRegistryPromise;
-			await teardownRegistry?.(devServer.devEnv.config.latestConfig?.name);
-
 			devServer.unregisterHotKeys?.();
 		},
 		fetch: async (input?: RequestInfo, init?: RequestInit) => {
@@ -260,7 +264,7 @@ export function parseRequestInput(
 	if (typeof input === "string") {
 		input = new URL(input, "http://placeholder");
 	}
-	// Adapted from Miniflare 3's `dispatchFetch()` function
+	// Adapted from Miniflare's `dispatchFetch()` function
 	const forward = new Request(input, init);
 	const url = new URL(forward.url);
 	forward.headers.set("MF-Original-URL", url.toString());

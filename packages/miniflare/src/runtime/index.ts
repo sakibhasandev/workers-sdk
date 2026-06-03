@@ -1,15 +1,21 @@
-import assert from "assert";
-import childProcess from "child_process";
-import { Abortable, once } from "events";
-import rl from "readline";
-import { Readable } from "stream";
+import assert from "node:assert";
+import childProcess, { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { once } from "node:events";
+import path from "node:path";
+import rl from "node:readline";
+import { Readable, Transform } from "node:stream";
 import { $ as $colors, red } from "kleur/colors";
 import workerdPath, {
-	compatibilityDate as supportedCompatibilityDate,
+	compatibilityDate as workerdCompatibilityDate,
 } from "workerd";
 import { z } from "zod";
 import { SERVICE_LOOPBACK, SOCKET_ENTRY } from "../plugins";
-import { Awaitable } from "../workers";
+import { MiniflareCoreError } from "../shared";
+import { handleStructuredLogsFromStream } from "./structured-logs";
+import type { Awaitable } from "../workers";
+import type { StructuredLogsHandler } from "./structured-logs";
+import type { Abortable } from "node:events";
 
 const ControlMessageSchema = z.discriminatedUnion("event", [
 	z.object({
@@ -27,13 +33,21 @@ export const kInspectorSocket = Symbol("kInspectorSocket");
 export type SocketIdentifier = string | typeof kInspectorSocket;
 export type SocketPorts = Map<SocketIdentifier, number /* port */>;
 
+export type { StructuredLogsHandler } from "./structured-logs";
+
 export interface RuntimeOptions {
 	entryAddress: string;
 	loopbackAddress: string;
 	requiredSockets: SocketIdentifier[];
 	inspectorAddress?: string;
+	debugPortAddress?: string;
 	verbose?: boolean;
 	handleRuntimeStdio?: (stdout: Readable, stderr: Readable) => void;
+	handleStructuredLogs?: StructuredLogsHandler;
+	// Extra environment variables to set on the spawned `workerd` subprocess.
+	// Merged on top of `process.env` and Miniflare's own defaults
+	// (e.g. `TZ=UTC`, `FORCE_COLOR`), so callers can override those defaults.
+	runtimeEnv?: Record<string, string>;
 }
 
 async function waitForPorts(
@@ -83,7 +97,9 @@ function pipeOutput(stdout: Readable, stderr: Readable) {
 	// https://github.com/vadimdemedes/ink/blob/5d24ed8ada593a6c36ea5416f452158461e33ba5/readme.md#patchconsole
 	// Writing directly to `process.stdout/stderr` would result in graphical
 	// glitches.
+	// eslint-disable-next-line no-console -- Intentional console.log to forward workerd stdout through Ink-patched console
 	rl.createInterface(stdout).on("line", (data) => console.log(data));
+	// eslint-disable-next-line no-console -- Intentional console.error to forward workerd stderr through Ink-patched console
 	rl.createInterface(stderr).on("line", (data) => console.error(red(data)));
 	// stdout.pipe(process.stdout);
 	// stderr.pipe(process.stderr);
@@ -112,11 +128,99 @@ function getRuntimeArgs(options: RuntimeOptions) {
 		// Required to enable the V8 inspector
 		args.push(`--inspector-addr=${options.inspectorAddress}`);
 	}
+	if (options.debugPortAddress !== undefined) {
+		args.push(`--debug-port=${options.debugPortAddress}`);
+	}
 	if (options.verbose) {
 		args.push("--verbose");
 	}
 
 	return args;
+}
+
+/**
+ * Copied from https://github.com/microsoft/vscode-js-debug/blob/0b5e0dade997b3c702a98e1f58989afcb30612d6/src/targets/node/bootloader/environment.ts#L129
+ *
+ * This function returns the segment of process.env.VSCODE_INSPECTOR_OPTIONS that corresponds to the current process (rather than a parent process)
+ */
+function getInspectorOptions() {
+	const value = process.env.VSCODE_INSPECTOR_OPTIONS;
+	if (!value) {
+		return undefined;
+	}
+
+	const ownOptions = value
+		.split(":::")
+		.reverse()
+		.find((v) => !!v);
+	if (!ownOptions) {
+		return;
+	}
+
+	try {
+		return JSON.parse(ownOptions);
+	} catch {
+		return undefined;
+	}
+}
+
+class StartupLogBuffer {
+	stdoutStream: Transform;
+	stderrStream: Transform;
+	stdoutBuffer: string[] = [];
+	stderrBuffer: string[] = [];
+
+	buffering = true;
+
+	constructor() {
+		this.stdoutStream = new Transform({
+			transform: (chunk, encoding, callback) => {
+				if (this.buffering) {
+					this.stdoutBuffer.push(chunk.toString());
+				}
+				callback(null, chunk);
+			},
+		});
+		this.stderrStream = new Transform({
+			transform: (chunk, encoding, callback) => {
+				if (this.buffering) {
+					this.stderrBuffer.push(chunk.toString());
+				}
+				callback(null, chunk);
+			},
+		});
+	}
+
+	stopBuffering() {
+		this.buffering = false;
+	}
+
+	handleStartupFailure() {
+		const addressInUseLog = this.stderrBuffer.find((chunk) =>
+			chunk.includes("Address already in use; toString() = ")
+		);
+		if (addressInUseLog) {
+			const match = addressInUseLog.match(
+				/Address already in use; toString\(\) = (.+):(.+)/
+			) ?? ["", "unknown", "unknown"];
+
+			throw new MiniflareCoreError(
+				"ERR_ADDRESS_IN_USE",
+				`Address already in use (${match[1]}:${match[2]}). Please check that you are not already running a server on this address or specify a different port with --port.`
+			);
+		}
+
+		// If stderr contains any output, surface it so the user can diagnose
+		// the failure (e.g. bind errors on IPv6 addresses, permission denied,
+		// missing libraries, etc.)
+		const stderr = this.stderrBuffer.join("").trim();
+		if (stderr.length > 0) {
+			throw new MiniflareCoreError(
+				"ERR_RUNTIME_FAILURE",
+				`The Workers runtime failed to start. There was likely a problem with the workerd binary or your configuration.\nRuntime stderr:\n${stderr}`
+			);
+		}
+	}
 }
 
 export class Runtime {
@@ -125,7 +229,9 @@ export class Runtime {
 
 	async updateConfig(
 		configBuffer: Buffer,
-		options: Abortable & RuntimeOptions
+		options: Abortable & RuntimeOptions,
+		workerNames: string[],
+		abortSignal: AbortSignal
 	): Promise<SocketPorts | undefined> {
 		// 1. Stop existing process (if any) and wait for exit
 		await this.dispose();
@@ -137,15 +243,45 @@ export class Runtime {
 		// By default, `workerd` will only log with colours if it detects a TTY.
 		// `"pipe"` doesn't create a TTY, so we force enable colours if supported.
 		const FORCE_COLOR = $colors.enabled ? "1" : "0";
+		// Default `TZ` to `UTC` to match the production Cloudflare runtime.
+		// Callers can override via `options.runtimeEnv` (e.g. for tests of
+		// timezone-dependent behaviour).
 		const runtimeProcess = childProcess.spawn(command, args, {
 			stdio: ["pipe", "pipe", "pipe", "pipe"],
-			env: { ...process.env, FORCE_COLOR },
+			env: {
+				...process.env,
+				TZ: "UTC",
+				FORCE_COLOR,
+				...options.runtimeEnv,
+			},
 		});
+		const startupLogBuffer = new StartupLogBuffer();
 		this.#process = runtimeProcess;
-		this.#processExitPromise = waitForExit(runtimeProcess);
+		const processExitPromise = waitForExit(runtimeProcess);
+		this.#processExitPromise = processExitPromise;
 
-		const handleRuntimeStdio = options.handleRuntimeStdio ?? pipeOutput;
-		handleRuntimeStdio(runtimeProcess.stdout, runtimeProcess.stderr);
+		const handleRuntimeStdio =
+			options.handleRuntimeStdio ??
+			(options.handleStructuredLogs
+				? // If `handleStructuredLogs` is provided then by default Miniflare should not pipe through the stream's output
+					() => {}
+				: pipeOutput);
+
+		handleRuntimeStdio(
+			runtimeProcess.stdout.pipe(startupLogBuffer.stdoutStream),
+			runtimeProcess.stderr.pipe(startupLogBuffer.stderrStream)
+		);
+
+		if (options.handleStructuredLogs) {
+			handleStructuredLogsFromStream(
+				startupLogBuffer.stdoutStream,
+				options.handleStructuredLogs
+			);
+			handleStructuredLogsFromStream(
+				startupLogBuffer.stderrStream,
+				options.handleStructuredLogs
+			);
+		}
 
 		const controlPipe = runtimeProcess.stdio[3];
 		assert(controlPipe instanceof Readable);
@@ -155,21 +291,115 @@ export class Runtime {
 		runtimeProcess.stdin.end();
 		await once(runtimeProcess.stdin, "finish");
 
-		// 4. Wait for sockets to start listening
-		return waitForPorts(controlPipe, options);
+		// 4. Wait for sockets to start listening, racing against the process
+		// exiting early. If workerd exits before all required sockets report
+		// their ports (e.g. due to a bind failure), `waitForPorts()` would
+		// hang indefinitely. Racing against the exit promise ensures we
+		// detect this and return `undefined` promptly.
+		const ports = await Promise.race([
+			waitForPorts(controlPipe, options),
+			processExitPromise.then(() => undefined),
+		]);
+		if (ports?.has(kInspectorSocket) && process.env.VSCODE_INSPECTOR_OPTIONS) {
+			// We have an inspector socket and we're in a VSCode Debug Terminal.
+			// Let's startup a watchdog service to register ourselves as a debuggable target
+
+			// First, we need to _find_ the watchdog script. It's located next to bootloader.js, which should be injected as a require hook
+			const bootloaderPath =
+				process.env.NODE_OPTIONS?.match(/--require "(.*?)"/)?.[1];
+
+			if (!bootloaderPath) {
+				return ports;
+			}
+			const watchdogPath = path.resolve(bootloaderPath, "../watchdog.js");
+
+			const info = getInspectorOptions();
+
+			for (const name of workerNames) {
+				// This is copied from https://github.com/microsoft/vscode-js-debug/blob/0b5e0dade997b3c702a98e1f58989afcb30612d6/src/targets/node/bootloader.ts#L284
+				// It spawns a detached "watchdog" process for each corresponding (user) Worker in workerd which will maintain the VSCode debug connection
+				const p = spawn(process.execPath, [watchdogPath], {
+					env: {
+						NODE_INSPECTOR_INFO: JSON.stringify({
+							ipcAddress: info.inspectorIpc || "",
+							pid: String(this.#process.pid),
+							scriptName: name,
+							inspectorURL: `ws://127.0.0.1:${ports?.get(
+								kInspectorSocket
+							)}/core:user:${name}`,
+							waitForDebugger: true,
+							ownId: randomBytes(12).toString("hex"),
+							openerId: info.openerId,
+						}),
+						NODE_SKIP_PLATFORM_CHECK: process.env.NODE_SKIP_PLATFORM_CHECK,
+						ELECTRON_RUN_AS_NODE: "1",
+					},
+					stdio: "ignore",
+					detached: true,
+				});
+				p.unref();
+			}
+		}
+
+		startupLogBuffer.stopBuffering();
+
+		if (ports === undefined && !abortSignal.aborted) {
+			startupLogBuffer.handleStartupFailure();
+		}
+
+		return ports;
 	}
 
 	dispose(): Awaitable<void> {
+		const runtimeProcess = this.#process;
+		if (runtimeProcess === undefined) {
+			return;
+		}
+
+		// Clear reference to prevent potential race conditions
+		this.#process = undefined;
+
+		// Explicitly destroy all stdio streams to ensure file descriptors are
+		// properly released. This prevents EBADF errors when spawning a new
+		// process after restart.
+		// See https://github.com/cloudflare/workers-sdk/issues/11675
+		runtimeProcess.stdin?.destroy();
+		runtimeProcess.stdout?.destroy();
+		runtimeProcess.stderr?.destroy();
+		// The control pipe at stdio[3] could be a Readable stream
+		const controlPipe = runtimeProcess.stdio[3];
+		if (controlPipe instanceof Readable) {
+			controlPipe.destroy();
+		}
+
 		// `kill()` uses `SIGTERM` by default. In `workerd`, this waits for HTTP
 		// connections to close before exiting. Notably, Chrome sometimes keeps
 		// connections open for about 10s, blocking exit. We'd like `dispose()`/
 		// `setOptions()` to immediately terminate the existing process.
 		// Therefore, use `SIGKILL` which force closes all connections.
 		// See https://github.com/cloudflare/workerd/pull/244.
-		this.#process?.kill("SIGKILL");
+		runtimeProcess.kill("SIGKILL");
+
 		return this.#processExitPromise;
 	}
 }
 
 export * from "./config";
-export { supportedCompatibilityDate };
+
+/**
+ * Gets a safe compatibility date from workerd. If the workerd compatibility
+ * date is in the future, returns today's date instead. This handles the case
+ * where workerd releases set their compatibility date up to 7 days in the future.
+ */
+function getSafeCompatibilityDate(): string {
+	const today = new Date().toISOString().slice(0, 10);
+	if (workerdCompatibilityDate > today) {
+		return today;
+	}
+	return workerdCompatibilityDate;
+}
+
+/**
+ * @deprecated Use today's date as the compatibility date instead: `new Date().toISOString().slice(0, 10)`
+ */
+export const supportedCompatibilityDate = getSafeCompatibilityDate();

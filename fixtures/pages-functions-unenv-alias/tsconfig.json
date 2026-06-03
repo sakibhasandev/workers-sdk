@@ -2,7 +2,7 @@
 	"compilerOptions": {
 		"target": "ES2020",
 		"esModuleInterop": true,
-		"module": "CommonJS",
+		"module": "preserve",
 		"lib": ["ES2020"],
 		"types": ["node", "@cloudflare/workers-types"],
 		"moduleResolution": "node",
@@ -14,7 +14,6 @@
 		"apps/workerjs-directory/_worker.js/index.js",
 		"apps/workerjs-file/_worker.js",
 		"functions/[[path]].ts",
-		"tests",
-		"../../node-types.d.ts"
+		"tests"
 	]
 }

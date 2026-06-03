@@ -1,3 +1,4 @@
+import { getWranglerSendErrorReportsFromEnv } from "@cloudflare/workers-utils";
 import * as Sentry from "@sentry/node";
 import { rejectedSyncPromise } from "@sentry/utils";
 import { fetch } from "undici";
@@ -76,7 +77,7 @@ const makeSentry10Transport = (options: BaseTransportOptions) => {
 				};
 			}
 		} catch (err) {
-			console.log(err);
+			logger.error(err);
 
 			return rejectedSyncPromise(err);
 		}
@@ -134,6 +135,14 @@ export function setupSentry() {
 	}
 }
 
+/**
+ * Adds a breadcrumb to any message that may be posted to Sentry.
+ *
+ * This provides more context to any error that is captured.
+ *
+ * @param message The breadcrumb message to add. This must have been sanitized of any sensitive information.
+ * @param level The severity level of the breadcrumb. Defaults to "log".
+ */
 export function addBreadcrumb(
 	message: string,
 	level: Sentry.SeverityLevel = "log"
@@ -150,10 +159,14 @@ export function addBreadcrumb(
 // consent if not already granted.
 export async function captureGlobalException(e: unknown) {
 	if (typeof SENTRY_DSN !== "undefined") {
-		sentryReportingAllowed = await confirm(
-			"Would you like to report this error to Cloudflare? Wrangler's output and the error details will be shared with the Wrangler team to help us diagnose and fix the issue.",
-			{ fallbackValue: false }
-		);
+		const sendErrorReportsEnvVar = getWranglerSendErrorReportsFromEnv();
+		sentryReportingAllowed =
+			sendErrorReportsEnvVar !== undefined
+				? sendErrorReportsEnvVar
+				: await confirm(
+						"Would you like to report this error to Cloudflare? Wrangler's output and the error details will be shared with the Wrangler team to help us diagnose and fix the issue.",
+						{ fallbackValue: false }
+					);
 
 		if (!sentryReportingAllowed) {
 			logger.debug(`Sentry: Reporting disabled - would have sent ${e}.`);

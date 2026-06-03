@@ -1,13 +1,14 @@
+import {
+	runInTempDir,
+	writeWranglerConfig,
+} from "@cloudflare/workers-utils/test-helpers";
+import { beforeEach, describe, test } from "vitest";
 import { normalizeOutput } from "../../../e2e/helpers/normalize";
 import { collectCLIOutput } from "../helpers/collect-cli-output";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { msw, mswGetVersion } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
-import { writeWranglerConfig } from "../helpers/write-wrangler-config";
-
-vi.unmock("../../wrangler-banner");
 
 describe("versions view", () => {
 	mockAccountId();
@@ -19,7 +20,7 @@ describe("versions view", () => {
 	describe("without wrangler.toml", () => {
 		beforeEach(() => msw.use(mswGetVersion()));
 
-		test("fails with no args", async () => {
+		test("fails with no args", async ({ expect }) => {
 			const result = runWrangler("versions view");
 
 			await expect(result).rejects.toMatchInlineSnapshot(
@@ -31,7 +32,7 @@ describe("versions view", () => {
 			expect(normalizeOutput(std.err)).toMatchInlineSnapshot(`""`);
 		});
 
-		test("fails with --name arg only", async () => {
+		test("fails with --name arg only", async ({ expect }) => {
 			const result = runWrangler("versions view --name test-name");
 
 			await expect(result).rejects.toMatchInlineSnapshot(
@@ -43,7 +44,7 @@ describe("versions view", () => {
 			expect(normalizeOutput(std.err)).toMatchInlineSnapshot(`""`);
 		});
 
-		test("fails with positional version-id arg only", async () => {
+		test("fails with positional version-id arg only", async ({ expect }) => {
 			const result = runWrangler(
 				"versions view 10000000-0000-0000-0000-000000000000"
 			);
@@ -57,7 +58,9 @@ describe("versions view", () => {
 			expect(normalizeOutput(std.err)).toMatchInlineSnapshot(`""`);
 		});
 
-		test("succeeds with positional version-id arg and --name arg", async () => {
+		test("succeeds with positional version-id arg and --name arg", async ({
+			expect,
+		}) => {
 			const result = runWrangler(
 				"versions view 10000000-0000-0000-0000-000000000000 --name test-name"
 			);
@@ -71,28 +74,28 @@ describe("versions view", () => {
 				Source:      Upload
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:             fetch, scheduled
 				Compatibility Date:   2020-01-01
 				Compatibility Flags:  test, flag
-				------------------------- bindings -------------------------
-				[[analytics_engine_datasets]]
-				binding = ANALYTICS
-				dataset = analytics_dataset
-
-				[[kv_namespaces]]
-				binding = \\"KV\\"
-				id = \\"kv-namespace-id\\"
-
 				"
 			`);
 
-			expect(cnsl.out).toMatch(/⛅️ wrangler/);
+			expect(cnsl.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Your Worker has access to the following bindings:
+				Binding                                Resource
+				env.KV (kv-namespace-id)               KV Namespace
+				env.ANALYTICS (analytics_dataset)      Analytics Engine Dataset
+				"
+			`);
 
 			expect(normalizeOutput(std.err)).toMatchInlineSnapshot(`""`);
 		});
 
-		test("prints version to stdout as --json", async () => {
+		test("prints version to stdout as valid json", async ({ expect }) => {
 			const result = runWrangler(
 				"versions view 10000000-0000-0000-0000-000000000000 --name test-name --json"
 			);
@@ -101,55 +104,54 @@ describe("versions view", () => {
 
 			expect(cnsl.out).not.toMatch(/⛅️ wrangler/);
 
-			expect(std.out).toMatchInlineSnapshot(`
-				"{
-				  \\"id\\": \\"10000000-0000-0000-0000-000000000000\\",
-				  \\"number\\": 1,
-				  \\"annotations\\": {
-				    \\"workers/triggered_by\\": \\"upload\\"
+			expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+				{
+				  "annotations": {
+				    "workers/triggered_by": "upload",
 				  },
-				  \\"metadata\\": {
-				    \\"author_id\\": \\"Picard-Gamma-6-0-7-3\\",
-				    \\"author_email\\": \\"Jean-Luc-Picard@federation.org\\",
-				    \\"source\\": \\"wrangler\\",
-				    \\"created_on\\": \\"2021-01-01T00:00:00.000000Z\\",
-				    \\"modified_on\\": \\"2021-01-01T00:00:00.000000Z\\"
+				  "id": "10000000-0000-0000-0000-000000000000",
+				  "metadata": {
+				    "author_email": "Jean-Luc-Picard@federation.org",
+				    "author_id": "Picard-Gamma-6-0-7-3",
+				    "created_on": "2021-01-01T00:00:00.000000Z",
+				    "modified_on": "2021-01-01T00:00:00.000000Z",
+				    "source": "wrangler",
 				  },
-				  \\"resources\\": {
-				    \\"bindings\\": [
+				  "number": 1,
+				  "resources": {
+				    "bindings": [
 				      {
-				        \\"type\\": \\"analytics_engine\\",
-				        \\"name\\": \\"ANALYTICS\\",
-				        \\"dataset\\": \\"analytics_dataset\\"
+				        "dataset": "analytics_dataset",
+				        "name": "ANALYTICS",
+				        "type": "analytics_engine",
 				      },
 				      {
-				        \\"type\\": \\"kv_namespace\\",
-				        \\"name\\": \\"KV\\",
-				        \\"namespace_id\\": \\"kv-namespace-id\\"
-				      }
+				        "name": "KV",
+				        "namespace_id": "kv-namespace-id",
+				        "type": "kv_namespace",
+				      },
 				    ],
-				    \\"script\\": {
-				      \\"etag\\": \\"aaabbbccc\\",
-				      \\"handlers\\": [
-				        \\"fetch\\",
-				        \\"scheduled\\"
+				    "script": {
+				      "etag": "aaabbbccc",
+				      "handlers": [
+				        "fetch",
+				        "scheduled",
 				      ],
-				      \\"last_deployed_from\\": \\"api\\"
+				      "last_deployed_from": "api",
 				    },
-				    \\"script_runtime\\": {
-				      \\"compatibility_date\\": \\"2020-01-01\\",
-				      \\"compatibility_flags\\": [
-				        \\"test\\",
-				        \\"flag\\"
+				    "script_runtime": {
+				      "compatibility_date": "2020-01-01",
+				      "compatibility_flags": [
+				        "test",
+				        "flag",
 				      ],
-				      \\"usage_model\\": \\"standard\\",
-				      \\"limits\\": {
-				        \\"cpu_ms\\": 50
-				      }
-				    }
-				  }
+				      "limits": {
+				        "cpu_ms": 50,
+				      },
+				      "usage_model": "standard",
+				    },
+				  },
 				}
-				"
 			`);
 		});
 	});
@@ -160,7 +162,7 @@ describe("versions view", () => {
 			writeWranglerConfig();
 		});
 
-		test("fails with no args", async () => {
+		test("fails with no args", async ({ expect }) => {
 			const result = runWrangler("versions view");
 
 			await expect(result).rejects.toMatchInlineSnapshot(
@@ -172,7 +174,7 @@ describe("versions view", () => {
 			expect(normalizeOutput(std.err)).toMatchInlineSnapshot(`""`);
 		});
 
-		test("succeeds with positional version-id arg only", async () => {
+		test("succeeds with positional version-id arg only", async ({ expect }) => {
 			const result = runWrangler(
 				"versions view 10000000-0000-0000-0000-000000000000"
 			);
@@ -186,26 +188,27 @@ describe("versions view", () => {
 				Source:      Upload
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:             fetch, scheduled
 				Compatibility Date:   2020-01-01
 				Compatibility Flags:  test, flag
-				------------------------- bindings -------------------------
-				[[analytics_engine_datasets]]
-				binding = ANALYTICS
-				dataset = analytics_dataset
-
-				[[kv_namespaces]]
-				binding = \\"KV\\"
-				id = \\"kv-namespace-id\\"
-
+				"
+			`);
+			expect(cnsl.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Your Worker has access to the following bindings:
+				Binding                                Resource
+				env.KV (kv-namespace-id)               KV Namespace
+				env.ANALYTICS (analytics_dataset)      Analytics Engine Dataset
 				"
 			`);
 
 			expect(normalizeOutput(std.err)).toMatchInlineSnapshot(`""`);
 		});
 
-		test("fails with non-existent version-id", async () => {
+		test("fails with non-existent version-id", async ({ expect }) => {
 			const result = runWrangler(
 				"versions view ffffffff-ffff-ffff-ffff-ffffffffffff"
 			);
@@ -219,68 +222,69 @@ describe("versions view", () => {
 			expect(normalizeOutput(std.err)).toMatchInlineSnapshot(`""`);
 		});
 
-		test("prints version to stdout as --json", async () => {
+		test("prints version to stdout as valid json", async ({ expect }) => {
 			const result = runWrangler(
 				"versions view 10000000-0000-0000-0000-000000000000 --json"
 			);
 
 			await expect(result).resolves.toBeUndefined();
 
-			expect(std.out).toMatchInlineSnapshot(`
-				"{
-				  \\"id\\": \\"10000000-0000-0000-0000-000000000000\\",
-				  \\"number\\": 1,
-				  \\"annotations\\": {
-				    \\"workers/triggered_by\\": \\"upload\\"
+			expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+				{
+				  "annotations": {
+				    "workers/triggered_by": "upload",
 				  },
-				  \\"metadata\\": {
-				    \\"author_id\\": \\"Picard-Gamma-6-0-7-3\\",
-				    \\"author_email\\": \\"Jean-Luc-Picard@federation.org\\",
-				    \\"source\\": \\"wrangler\\",
-				    \\"created_on\\": \\"2021-01-01T00:00:00.000000Z\\",
-				    \\"modified_on\\": \\"2021-01-01T00:00:00.000000Z\\"
+				  "id": "10000000-0000-0000-0000-000000000000",
+				  "metadata": {
+				    "author_email": "Jean-Luc-Picard@federation.org",
+				    "author_id": "Picard-Gamma-6-0-7-3",
+				    "created_on": "2021-01-01T00:00:00.000000Z",
+				    "modified_on": "2021-01-01T00:00:00.000000Z",
+				    "source": "wrangler",
 				  },
-				  \\"resources\\": {
-				    \\"bindings\\": [
+				  "number": 1,
+				  "resources": {
+				    "bindings": [
 				      {
-				        \\"type\\": \\"analytics_engine\\",
-				        \\"name\\": \\"ANALYTICS\\",
-				        \\"dataset\\": \\"analytics_dataset\\"
+				        "dataset": "analytics_dataset",
+				        "name": "ANALYTICS",
+				        "type": "analytics_engine",
 				      },
 				      {
-				        \\"type\\": \\"kv_namespace\\",
-				        \\"name\\": \\"KV\\",
-				        \\"namespace_id\\": \\"kv-namespace-id\\"
-				      }
+				        "name": "KV",
+				        "namespace_id": "kv-namespace-id",
+				        "type": "kv_namespace",
+				      },
 				    ],
-				    \\"script\\": {
-				      \\"etag\\": \\"aaabbbccc\\",
-				      \\"handlers\\": [
-				        \\"fetch\\",
-				        \\"scheduled\\"
+				    "script": {
+				      "etag": "aaabbbccc",
+				      "handlers": [
+				        "fetch",
+				        "scheduled",
 				      ],
-				      \\"last_deployed_from\\": \\"api\\"
+				      "last_deployed_from": "api",
 				    },
-				    \\"script_runtime\\": {
-				      \\"compatibility_date\\": \\"2020-01-01\\",
-				      \\"compatibility_flags\\": [
-				        \\"test\\",
-				        \\"flag\\"
+				    "script_runtime": {
+				      "compatibility_date": "2020-01-01",
+				      "compatibility_flags": [
+				        "test",
+				        "flag",
 				      ],
-				      \\"usage_model\\": \\"standard\\",
-				      \\"limits\\": {
-				        \\"cpu_ms\\": 50
-				      }
-				    }
-				  }
+				      "limits": {
+				        "cpu_ms": 50,
+				      },
+				      "usage_model": "standard",
+				    },
+				  },
 				}
-				"
 			`);
 		});
 	});
 
 	describe("test output", () => {
-		test("no secrets, bindings or compat info is logged if not existing", async () => {
+		test("no secrets, bindings or compat info is logged if not existing", async ({
+			expect,
+		}) => {
 			msw.use(
 				mswGetVersion({
 					id: "ce15c78b-cc43-4f60-b5a9-15ce4f298c2a",
@@ -320,13 +324,13 @@ describe("versions view", () => {
 				Source:      API 📡
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:  fetch, queue
 				"
 			`);
 		});
 
-		test("compat date is logged if provided", async () => {
+		test("compat date is logged if provided", async ({ expect }) => {
 			msw.use(
 				mswGetVersion({
 					id: "ce15c78b-cc43-4f60-b5a9-15ce4f298c2a",
@@ -367,14 +371,14 @@ describe("versions view", () => {
 				Source:      API 📡
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:            fetch, queue
 				Compatibility Date:  2000-00-00
 				"
 			`);
 		});
 
-		test("compat flag is logged if provided", async () => {
+		test("compat flag is logged if provided", async ({ expect }) => {
 			msw.use(
 				mswGetVersion({
 					id: "ce15c78b-cc43-4f60-b5a9-15ce4f298c2a",
@@ -416,7 +420,7 @@ describe("versions view", () => {
 				Source:      API 📡
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:             fetch, queue
 				Compatibility Date:   2000-00-00
 				Compatibility Flags:  flag_1, flag_2
@@ -424,7 +428,7 @@ describe("versions view", () => {
 			`);
 		});
 
-		test("secrets are logged if provided", async () => {
+		test("secrets are logged if provided", async ({ expect }) => {
 			msw.use(
 				mswGetVersion({
 					id: "ce15c78b-cc43-4f60-b5a9-15ce4f298c2a",
@@ -469,18 +473,18 @@ describe("versions view", () => {
 				Source:      API 📡
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:             fetch, queue
 				Compatibility Date:   2000-00-00
 				Compatibility Flags:  flag_1, flag_2
-				------------------------- secrets  -------------------------
+				Secrets:
 				Secret Name:  SECRET_ONE
 				Secret Name:  SECRET_TWO
 				"
 			`);
 		});
 
-		test("env vars are logged if provided", async () => {
+		test("env vars are logged if provided", async ({ expect }) => {
 			msw.use(
 				mswGetVersion({
 					id: "ce15c78b-cc43-4f60-b5a9-15ce4f298c2a",
@@ -525,19 +529,15 @@ describe("versions view", () => {
 				Source:      API 📡
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:             fetch, queue
 				Compatibility Date:   2000-00-00
 				Compatibility Flags:  flag_1, flag_2
-				------------------------- bindings -------------------------
-				[vars]
-				VAR_ONE = \\"var-one\\"
-				VAR_TWO = \\"var-one\\"
 				"
 			`);
 		});
 
-		test("bindings are logged if provided", async () => {
+		test("bindings are logged if provided", async ({ expect }) => {
 			msw.use(
 				mswGetVersion({
 					id: "ce15c78b-cc43-4f60-b5a9-15ce4f298c2a",
@@ -618,6 +618,7 @@ describe("versions view", () => {
 								name: "MAIL_3",
 								destination_address: "dest@example.com",
 								allowed_destination_addresses: ["1@a.com", "2@a.com"],
+								allowed_sender_addresses: ["3@a.com", "4@a.com"],
 							},
 							{ type: "service", name: "SERVICE", service: "worker" },
 							{
@@ -657,106 +658,41 @@ describe("versions view", () => {
 				Source:      API 📡
 				Tag:         -
 				Message:     -
-				------------------------------------------------------------
+
 				Handlers:             fetch, queue
 				Compatibility Date:   2000-00-00
 				Compatibility Flags:  flag_1, flag_2
-				------------------------- bindings -------------------------
-				[ai]
-				binding = AI
-
-				[[analytics_engine_datasets]]
-				binding = AE
-				dataset = datset
-
-				[browser]
-				binding = \\"BROWSER\\"
-
-				[[d1_databases]]
-				binding = \\"D1\\"
-				database_id = \\"d1-id\\"
-
-				[[dispatch_namespaces]]
-				binding = \\"WFP\\"
-				namespce = \\"wfp-namespace\\"
-
-				[[dispatch_namespaces]]
-				binding = \\"WFP_2\\"
-				namespce = \\"wfp-namespace\\"
-				outbound = { service = \\"outbound-worker\\" }
-
-				[[dispatch_namespaces]]
-				binding = \\"WFP_3\\"
-				namespce = \\"wfp-namespace\\"
-				outbound = { service = \\"outbound-worker\\", parameters = [paramOne, paramTwo] }
-
-				[[durable_objects.bindings]]
-				name = \\"DO\\"
-				class_name = \\"DurableObject\\"
-
-				[[durable_objects.bindings]]
-				name = \\"DO_2\\"
-				class_name = \\"DurableObject\\"
-				script_name = \\"other-worker\\"
-
-				[[hyperdrive]]
-				binding = \\"HYPERDRIVE\\"
-				id = \\"hyperdrive-id\\"
-
-				[[kv_namespaces]]
-				binding = \\"KV\\"
-				id = \\"kv-id\\"
-
-				[[mtls_certificates]]
-				binding = \\"MTLS\\"
-				certificate_id = \\"mtls-id\\"
-
-				[[queues.producers]]
-				binding = \\"QUEUE\\"
-				queue = \\"queue\\"
-
-				[[queues.producers]]
-				binding = \\"QUEUE_2\\"
-				queue = \\"queue\\"
-				delivery_delay = 60
-
-				[[r2_buckets]]
-				binding = \\"R2\\"
-				bucket_name = \\"r2-bucket\\"
-
-				[[r2_buckets]]
-				binding = \\"R2_2\\"
-				bucket_name = \\"r2-bucket\\"
-				jurisdiction = \\"eu\\"
-
-				[[send_email]]
-				name = \\"MAIL\\"
-
-				[[send_email]]
-				name = \\"MAIL_2\\"
-				destination_address = \\"dest@example.com\\"
-
-				[[send_email]]
-				name = \\"MAIL_3\\"
-				destination_address = \\"dest@example.com\\"
-				allowed_destination_addresses = [\\"1@a.com\\", \\"2@a.com\\"]
-
-				[[services]]
-				binding = \\"SERVICE\\"
-				service = \\"SERVICE\\"
-
-				[[services]]
-				binding = \\"SERVICE_2\\"
-				service = \\"SERVICE_2\\"
-				entrypoint = \\"Enterypoint\\"
-
-				[[vectorize]]
-				binding = \\"VECTORIZE\\"
-				index_name = \\"index\\"
-
-				[version_metadata]
-				binding = \\"VERSION_METADATA\\"
-
+				"
+			`);
+			expect(cnsl.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Your Worker has access to the following bindings:
+				Binding                                                                  Resource
+				env.DO (DurableObject)                                                   Durable Object
+				env.DO_2 (DurableObject, defined in other-worker)                        Durable Object
+				env.KV (kv-id)                                                           KV Namespace
+				env.MAIL (unrestricted)                                                  Send Email
+				env.MAIL_2 (dest@example.com)                                            Send Email
+				env.MAIL_3 (dest@example.com - senders: 3@a.com, 4@a.com)                Send Email
+				env.QUEUE (queue)                                                        Queue
+				env.QUEUE_2 (queue)                                                      Queue
+				env.D1 (d1-id)                                                           D1 Database
+				env.VECTORIZE (index)                                                    Vectorize Index
+				env.HYPERDRIVE (hyperdrive-id)                                           Hyperdrive Config
+				env.R2 (r2-bucket)                                                       R2 Bucket
+				env.R2_2 (r2-bucket (eu))                                                R2 Bucket
+				env.SERVICE (worker)                                                     Worker
+				env.SERVICE_2 (worker#Enterypoint)                                       Worker
+				env.AE (datset)                                                          Analytics Engine Dataset
+				env.BROWSER                                                              Browser Run
+				env.AI                                                                   AI
+				env.VERSION_METADATA                                                     Worker Version Metadata
+				env.WFP (wfp-namespace)                                                  Dispatch Namespace
+				env.WFP_2 (wfp-namespace (outbound -> outbound-worker))                  Dispatch Namespace
+				env.WFP_3 (wfp-namespace (outbound -> outbound-worker))                  Dispatch Namespace
+				env.MTLS (mtls-id)                                                       mTLS Certificate
 				"
 			`);
 		});

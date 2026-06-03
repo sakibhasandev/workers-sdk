@@ -1,6 +1,7 @@
+import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
+import { afterEach, describe, it } from "vitest";
 import { endEventLoop } from "../helpers/end-event-loop";
 import { mockConsoleMethods } from "../helpers/mock-console";
-import { runInTempDir } from "../helpers/run-in-tmp";
 import { runWrangler } from "../helpers/run-wrangler";
 
 describe("pages", () => {
@@ -13,7 +14,9 @@ describe("pages", () => {
 		await endEventLoop();
 	});
 
-	it("should display a list of available subcommands, for pages with no subcommand", async () => {
+	it("should display a list of available subcommands, for pages with no subcommand", async ({
+		expect,
+	}) => {
 		await runWrangler("pages");
 		await endEventLoop();
 
@@ -23,27 +26,31 @@ describe("pages", () => {
 			⚡️ Configure Cloudflare Pages
 
 			COMMANDS
-			  wrangler pages dev [directory] [-- command..]  Develop your full-stack Pages application locally
-			  wrangler pages functions                       Helpers related to Pages Functions
-			  wrangler pages project                         Interact with your Pages projects
-			  wrangler pages deployment                      Interact with the deployments of a project
-			  wrangler pages deploy [directory]              Deploy a directory of static assets as a Pages deployment  [aliases: publish]
-			  wrangler pages secret                          Generate a secret that can be referenced in a Pages project
-			  wrangler pages download                        Download settings from your project
+			  wrangler pages dev [directory] [command]  Develop your full-stack Pages application locally
+			  wrangler pages functions                  Helpers related to Pages Functions
+			  wrangler pages project                    Interact with your Pages projects
+			  wrangler pages deployment                 Interact with the deployments of a project
+			  wrangler pages deploy [directory]         Deploy a directory of static assets as a Pages deployment
+			  wrangler pages secret                     Generate a secret that can be referenced in a Pages project
+			  wrangler pages download                   Download settings from your project
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]"
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("should display a list of available subcommands, for 'pages dev help'", async () => {
+	it("should display a list of available subcommands, for 'pages dev help'", async ({
+		expect,
+	}) => {
 		await runWrangler("pages dev help");
 		await endEventLoop();
 
 		expect(std.out).toMatchInlineSnapshot(`
-			"wrangler pages dev [directory] [-- command..]
+			"wrangler pages dev [directory] [command]
 
 			Develop your full-stack Pages application locally
 
@@ -52,9 +59,11 @@ describe("pages", () => {
 			  command    The proxy command to run  [deprecated]  [string]
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
 			      --compatibility-date                         Date to use for compatibility checks  [string]
@@ -74,18 +83,18 @@ describe("pages", () => {
 			      --version-metadata                           Worker Version metadata (--version-metadata VERSION_METADATA_BINDING)  [string]
 			      --service                                    Service to bind (--service SERVICE=SCRIPT_NAME)  [array]
 			      --live-reload                                Auto reload HTML pages when change is detected  [boolean] [default: false]
-			      --local-protocol                             Protocol to listen to requests on, defaults to http.  [choices: \\"http\\", \\"https\\"]
+			      --local-protocol                             Protocol to listen to requests on, defaults to http.  [choices: "http", "https"]
 			      --https-key-path                             Path to a custom certificate key  [string]
 			      --https-cert-path                            Path to a custom certificate  [string]
 			      --persist-to                                 Specify directory to use for local persistence (defaults to .wrangler/state)  [string]
-			      --log-level                                  Specify logging level  [choices: \\"debug\\", \\"info\\", \\"log\\", \\"warn\\", \\"error\\", \\"none\\"]
-			      --show-interactive-dev-session               Show interactive dev session (defaults to true if the terminal supports interactivity)  [boolean]
-			      --experimental-vectorize-bind-to-prod        Bind to production Vectorize indexes in local development mode  [boolean] [default: false]
-			      --experimental-images-local-mode             Use a local lower-fidelity implementation of the Images binding  [boolean] [default: false]"
+			      --log-level                                  Specify logging level  [choices: "debug", "info", "log", "warn", "error", "none"]
+			      --show-interactive-dev-session               Show interactive dev session (defaults to true if the terminal supports interactivity)  [boolean]"
 		`);
 	});
 
-	it("should display a list of available subcommands for 'pages project help`", async () => {
+	it("should display a list of available subcommands for 'pages project help`", async ({
+		expect,
+	}) => {
 		await runWrangler("pages project help");
 		await endEventLoop();
 
@@ -96,17 +105,21 @@ describe("pages", () => {
 
 			COMMANDS
 			  wrangler pages project list                   List your Cloudflare Pages projects
-			  wrangler pages project create [project-name]  Create a new Cloudflare Pages project
-			  wrangler pages project delete [project-name]  Delete a Cloudflare Pages project
+			  wrangler pages project create <project-name>  Create a new Cloudflare Pages project
+			  wrangler pages project delete <project-name>  Delete a Cloudflare Pages project
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]"
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("should display a list of available subcommands for 'pages deployment'", async () => {
+	it("should display a list of available subcommands for 'pages deployment'", async ({
+		expect,
+	}) => {
 		await runWrangler("pages deployment help");
 		await endEventLoop();
 
@@ -116,18 +129,25 @@ describe("pages", () => {
 			Interact with the deployments of a project
 
 			COMMANDS
-			  wrangler pages deployment list                List deployments in your Cloudflare Pages project
-			  wrangler pages deployment create [directory]  Publish a directory of static assets as a Pages deployment
-			  wrangler pages deployment tail [deployment]   Start a tailing session for a project's deployment and livestream logs from your Functions
+			  wrangler pages deployment list                    List deployments in your Cloudflare Pages project
+			  wrangler pages deployment create [directory]      Deploy a directory of static assets as a Pages deployment
+
+			                                                    Alias for "wrangler pages deploy".
+			  wrangler pages deployment tail [deployment]       Start a tailing session for a project's deployment and livestream logs from your Functions
+			  wrangler pages deployment delete <deployment-id>  Delete a deployment in your Cloudflare Pages project
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]"
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("should display a list of available subcommands for 'pages deploy'", async () => {
+	it("should display a list of available subcommands for 'pages deploy'", async ({
+		expect,
+	}) => {
 		await runWrangler("pages deploy help");
 		await endEventLoop();
 
@@ -140,9 +160,11 @@ describe("pages", () => {
 			  directory  The directory of static files to upload  [string]
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
 			      --project-name        The name of the project you want to deploy to  [string]
@@ -156,7 +178,9 @@ describe("pages", () => {
 		`);
 	});
 
-	it("should display a list of available subcommands for 'pages secret'", async () => {
+	it("should display a list of available subcommands for 'pages secret'", async ({
+		expect,
+	}) => {
 		await runWrangler("pages secret help");
 		await endEventLoop();
 
@@ -172,13 +196,17 @@ describe("pages", () => {
 			  wrangler pages secret list          List all secrets for a Pages project
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]"
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
-	it("should display a list of available subcommands for 'pages download'", async () => {
+	it("should display a list of available subcommands for 'pages download'", async ({
+		expect,
+	}) => {
 		await runWrangler("pages download help");
 		await endEventLoop();
 
@@ -188,17 +216,19 @@ describe("pages", () => {
 			Download settings from your project
 
 			COMMANDS
-			  wrangler pages download config [projectName]  Experimental: Download your Pages project config as a Wrangler configuration file
+			  wrangler pages download config [projectName]  Download your Pages project config as a Wrangler configuration file [experimental]
 
 			GLOBAL FLAGS
-			      --cwd      Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
-			  -h, --help     Show help  [boolean]
-			  -v, --version  Show version number  [boolean]"
+			      --cwd             Run as if Wrangler was started in the specified directory instead of the current working directory  [string]
+			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
+			  -h, --help            Show help  [boolean]
+			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			  -v, --version         Show version number  [boolean]"
 		`);
 	});
 
 	describe("deprecation message for deprecated options", () => {
-		it("should display for 'pages dev -- <command>'", async () => {
+		it("should display for 'pages dev -- <command>'", async ({ expect }) => {
 			await expect(
 				runWrangler("pages dev -- echo 'hi'")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
@@ -214,7 +244,7 @@ describe("pages", () => {
 				"
 			`);
 		});
-		it("should display for 'pages dev --script-path'", async () => {
+		it("should display for 'pages dev --script-path'", async ({ expect }) => {
 			await expect(
 				runWrangler("pages dev --script-path=_worker.js -- echo 'hi'")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
@@ -239,30 +269,47 @@ describe("pages", () => {
 	});
 
 	describe("beta message for subcommands", () => {
-		it("should display for pages:dev", async () => {
+		it("should display for pages:dev", async ({ expect }) => {
 			await expect(
 				runWrangler("pages dev")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
 				`[Error: Must specify a directory of static assets to serve, or a command to run, or a proxy port, or configure \`pages_build_output_dir\` in your Wrangler configuration file.]`
 			);
 
-			expect(std.out).toMatchInlineSnapshot(`""`);
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				"
+			`);
 		});
 
-		it("should display for pages:functions:build", async () => {
+		it("should display for pages:functions:build", async ({ expect }) => {
 			await expect(runWrangler("pages functions build")).rejects.toThrowError();
 
-			expect(std.out).toMatchInlineSnapshot(`""`);
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				"
+			`);
 		});
 
-		it("should display for pages:functions:optimize-routes", async () => {
+		it("should display for pages:functions:optimize-routes", async ({
+			expect,
+		}) => {
 			await expect(
 				runWrangler(
 					'pages functions optimize-routes --routes-path="/build/_routes.json" --output-routes-path="/build/_optimized-routes.json"'
 				)
 			).rejects.toThrowError();
 
-			expect(std.out).toMatchInlineSnapshot(`""`);
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				"
+			`);
 		});
 	});
 });

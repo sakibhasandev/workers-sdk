@@ -1,16 +1,15 @@
+import {
+	runInTempDir,
+	writeWranglerConfig,
+} from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
+import { beforeEach, describe, it } from "vitest";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { useMockIsTTY } from "../helpers/mock-istty";
-import { mockGetMemberships } from "../helpers/mock-oauth-flow";
-import { msw } from "../helpers/msw";
-import { runInTempDir } from "../helpers/run-in-tmp";
+import { getMswSuccessMembershipHandlers, msw } from "../helpers/msw";
 import { runWrangler } from "../helpers/run-wrangler";
-import { writeWranglerConfig } from "../helpers/write-wrangler-config";
 
-// we want to include the banner to make sure it doesn't show up in the output when
-// when --json=true
-vi.unmock("../../wrangler-banner");
 describe("info", () => {
 	mockAccountId({ accountId: null });
 	mockApiToken();
@@ -21,9 +20,9 @@ describe("info", () => {
 
 	beforeEach(() => {
 		setIsTTY(false);
-		mockGetMemberships([
-			{ id: "IG-88", account: { id: "1701", name: "enterprise" } },
-		]);
+		msw.use(
+			...getMswSuccessMembershipHandlers([{ id: "1701", name: "enterprise" }])
+		);
 		writeWranglerConfig({
 			d1_databases: [
 				{
@@ -34,7 +33,7 @@ describe("info", () => {
 			],
 		});
 	});
-	it("should display version when alpha", async () => {
+	it("should display version as valid json when alpha", async ({ expect }) => {
 		msw.use(
 			http.get("*/accounts/:accountId/d1/database/*", async () => {
 				return HttpResponse.json(
@@ -57,20 +56,22 @@ describe("info", () => {
 			})
 		);
 		await runWrangler("d1 info northwind --json");
-		expect(std.out).toMatchInlineSnapshot(`
-		"{
-		  \\"uuid\\": \\"d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06\\",
-		  \\"name\\": \\"northwind\\",
-		  \\"created_at\\": \\"2023-05-23T08:33:54.590Z\\",
-		  \\"version\\": \\"alpha\\",
-		  \\"num_tables\\": 13,
-		  \\"running_in_region\\": \\"WEUR\\",
-		  \\"database_size\\": 33067008
-		}"
-	`);
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			{
+			  "created_at": "2023-05-23T08:33:54.590Z",
+			  "database_size": 33067008,
+			  "name": "northwind",
+			  "num_tables": 13,
+			  "running_in_region": "WEUR",
+			  "uuid": "d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06",
+			  "version": "alpha",
+			}
+		`);
 	});
 
-	it("should not display version when not alpha", async () => {
+	it("should not display version as valid json when not alpha", async ({
+		expect,
+	}) => {
 		msw.use(
 			http.get("*/accounts/:accountId/d1/database/*", async () => {
 				return HttpResponse.json(
@@ -79,10 +80,13 @@ describe("info", () => {
 							uuid: "d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06",
 							name: "northwind",
 							created_at: "2023-05-23T08:33:54.590Z",
-							version: "beta",
+							version: "production",
 							num_tables: 13,
 							file_size: 33067008,
 							running_in_region: "WEUR",
+							read_replication: {
+								mode: "disabled",
+							},
 						},
 						success: true,
 						errors: [],
@@ -106,23 +110,28 @@ describe("info", () => {
 			})
 		);
 		await runWrangler("d1 info northwind --json");
-		expect(std.out).toMatchInlineSnapshot(`
-		"{
-		  \\"uuid\\": \\"d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06\\",
-		  \\"name\\": \\"northwind\\",
-		  \\"created_at\\": \\"2023-05-23T08:33:54.590Z\\",
-		  \\"num_tables\\": 13,
-		  \\"running_in_region\\": \\"WEUR\\",
-		  \\"database_size\\": 33067008,
-		  \\"read_queries_24h\\": 0,
-		  \\"write_queries_24h\\": 0,
-		  \\"rows_read_24h\\": 0,
-		  \\"rows_written_24h\\": 0
-		}"
-	`);
+		expect(JSON.parse(std.out)).toMatchInlineSnapshot(`
+			{
+			  "created_at": "2023-05-23T08:33:54.590Z",
+			  "database_size": 33067008,
+			  "name": "northwind",
+			  "num_tables": 13,
+			  "read_queries_24h": 0,
+			  "read_replication": {
+			    "mode": "disabled",
+			  },
+			  "rows_read_24h": 0,
+			  "rows_written_24h": 0,
+			  "running_in_region": "WEUR",
+			  "uuid": "d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06",
+			  "write_queries_24h": 0,
+			}
+		`);
 	});
 
-	it("should pretty print by default, incl. the wrangler banner", async () => {
+	it("should pretty print by default, incl. the wrangler banner", async ({
+		expect,
+	}) => {
 		msw.use(
 			http.get("*/accounts/:accountId/d1/database/*", async () => {
 				return HttpResponse.json(
@@ -131,10 +140,16 @@ describe("info", () => {
 							uuid: "d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06",
 							name: "northwind",
 							created_at: "2023-05-23T08:33:54.590Z",
-							version: "beta",
+							version: "production",
 							num_tables: 13,
 							file_size: 33067008,
 							running_in_region: "WEUR",
+							read_replication: {
+								mode: "auto",
+							},
+							unexpected_object: {
+								iron: "man",
+							},
 						},
 						success: true,
 						errors: [],
@@ -162,29 +177,32 @@ describe("info", () => {
 		expect(std.out).toMatchInlineSnapshot(`
 			"
 			 ⛅️ wrangler x.x.x
-			------------------
-
-			┌───────────────────┬──────────────────────────────────────┐
-			│ DB                │ d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06 │
-			├───────────────────┼──────────────────────────────────────┤
-			│ name              │ northwind                            │
-			├───────────────────┼──────────────────────────────────────┤
-			│ created_at        │ 2023-05-23T08:33:54.590Z             │
-			├───────────────────┼──────────────────────────────────────┤
-			│ num_tables        │ 13                                   │
-			├───────────────────┼──────────────────────────────────────┤
-			│ running_in_region │ WEUR                                 │
-			├───────────────────┼──────────────────────────────────────┤
-			│ database_size     │ 33.1 MB                              │
-			├───────────────────┼──────────────────────────────────────┤
-			│ read_queries_24h  │ 0                                    │
-			├───────────────────┼──────────────────────────────────────┤
-			│ write_queries_24h │ 0                                    │
-			├───────────────────┼──────────────────────────────────────┤
-			│ rows_read_24h     │ 0                                    │
-			├───────────────────┼──────────────────────────────────────┤
-			│ rows_written_24h  │ 0                                    │
-			└───────────────────┴──────────────────────────────────────┘"
+			──────────────────
+			┌─┬─┐
+			│ DB │ d5b1d127-xxxx-xxxx-xxxx-cbc69f0a9e06 │
+			├─┼─┤
+			│ name │ northwind │
+			├─┼─┤
+			│ created_at │ 2023-05-23T08:33:54.590Z │
+			├─┼─┤
+			│ num_tables │ 13 │
+			├─┼─┤
+			│ running_in_region │ WEUR │
+			├─┼─┤
+			│ unexpected_object │ {"iron":"man"} │
+			├─┼─┤
+			│ database_size │ 33.1 MB │
+			├─┼─┤
+			│ read_queries_24h │ 0 │
+			├─┼─┤
+			│ write_queries_24h │ 0 │
+			├─┼─┤
+			│ rows_read_24h │ 0 │
+			├─┼─┤
+			│ rows_written_24h │ 0 │
+			├─┼─┤
+			│ read_replication.mode │ auto │
+			└─┴─┘"
 		`);
 	});
 });

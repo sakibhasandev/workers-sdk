@@ -1,8 +1,10 @@
 import { http, HttpResponse } from "msw";
 import { createFetchResult, msw } from "./msw";
 import type { KVNamespaceInfo, NamespaceKeyInfo } from "../../kv/helpers";
+import type { ExpectStatic } from "vitest";
 
 export function mockKeyListRequest(
+	expect: ExpectStatic,
 	expectedNamespaceId: string,
 	expectedKeys: NamespaceKeyInfo[],
 	keysPerRequest = 1000,
@@ -45,7 +47,10 @@ export function mockKeyListRequest(
 	return requests;
 }
 
-export function mockListKVNamespacesRequest(...namespaces: KVNamespaceInfo[]) {
+export function mockListKVNamespacesRequest(
+	expect: ExpectStatic,
+	...namespaces: KVNamespaceInfo[]
+) {
 	msw.use(
 		http.get(
 			"*/accounts/:accountId/storage/kv/namespaces",
@@ -59,6 +64,7 @@ export function mockListKVNamespacesRequest(...namespaces: KVNamespaceInfo[]) {
 }
 
 export function mockCreateKVNamespace(
+	expect: ExpectStatic,
 	options: {
 		resultId?: string;
 		assertTitle?: string;

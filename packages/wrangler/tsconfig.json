@@ -1,9 +1,10 @@
 {
 	"extends": "@cloudflare/workers-tsconfig/tsconfig.json",
 	"compilerOptions": {
-		"module": "CommonJS",
+		"module": "preserve",
 		"types": ["node"],
-		"jsx": "react-jsx"
+		"jsx": "react-jsx",
+		"tsBuildInfoFile": ".tsbuildinfo"
 	},
 	"include": ["**/*.ts", "**/*.tsx", "**/*.js"],
 	"exclude": [
@@ -14,6 +15,7 @@
 		"templates",
 		"**/__tests__",
 		"**/*.test.ts",
-		"kv-asset-handler.js"
+		"kv-asset-handler.js",
+		"e2e"
 	]
 }

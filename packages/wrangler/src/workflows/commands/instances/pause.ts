@@ -1,18 +1,22 @@
-import { fetchResult } from "../../../cfetch";
 import { createCommand } from "../../../core/create-command";
 import { logger } from "../../../logger";
 import { requireAuth } from "../../../user";
-import type { Instance } from "../../types";
+import {
+	getLocalInstanceIdFromArgs,
+	localWorkflowArgs,
+	updateLocalInstanceStatus,
+} from "../../local";
+import { getInstanceIdFromArgs, updateInstanceStatus } from "../../utils";
 
 export const workflowsInstancesPauseCommand = createCommand({
 	metadata: {
 		description: "Pause a workflow instance",
 		owner: "Product: Workflows",
-		status: "open-beta",
+		status: "stable",
 	},
-
 	positionalArgs: ["name", "id"],
 	args: {
+		...localWorkflowArgs,
 		name: {
 			describe: "Name of the workflow",
 			type: "string",
@@ -27,37 +31,16 @@ export const workflowsInstancesPauseCommand = createCommand({
 	},
 
 	async handler(args, { config }) {
-		const accountId = await requireAuth(config);
+		let id: string;
 
-		let id = args.id;
-
-		if (id == "latest") {
-			const instances = (
-				await fetchResult<Instance[]>(
-					`/accounts/${accountId}/workflows/${args.name}/instances`
-				)
-			).sort((a, b) => b.created_on.localeCompare(a.created_on));
-
-			if (instances.length == 0) {
-				logger.error(
-					`There are no deployed instances in workflow "${args.name}"`
-				);
-				return;
-			}
-
-			id = instances[0].id;
+		if (args.local) {
+			id = await getLocalInstanceIdFromArgs(args.port, args);
+			await updateLocalInstanceStatus(args.port, args.name, id, "pause");
+		} else {
+			const accountId = await requireAuth(config);
+			id = await getInstanceIdFromArgs(accountId, args, config);
+			await updateInstanceStatus(config, accountId, args.name, id, "pause");
 		}
-
-		await fetchResult(
-			`/accounts/${accountId}/workflows/${args.name}/instances/${id}/status`,
-			{
-				method: "PATCH",
-				headers: {
-					"Content-Type": "application/json",
-				},
-				body: JSON.stringify({ status: "pause" }),
-			}
-		);
 
 		logger.info(
 			`⏸️ The instance "${id}" from ${args.name} was paused successfully`

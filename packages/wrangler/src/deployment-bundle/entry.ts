@@ -1,9 +1,13 @@
 import path from "node:path";
+import {
+	configFileName,
+	getTodaysCompatDate,
+	formatConfigSnippet,
+	UserError,
+} from "@cloudflare/workers-utils";
 import dedent from "ts-dedent";
-import { configFileName, formatConfigSnippet } from "../config";
-import { UserError } from "../errors";
 import { sniffUserAgent } from "../package-manager";
-import guessWorkerFormat from "./guess-worker-format";
+import { guessWorkerFormat } from "./guess-worker-format";
 import {
 	resolveEntryWithAssets,
 	resolveEntryWithEntryPoint,
@@ -11,32 +15,12 @@ import {
 	resolveEntryWithScript,
 } from "./resolve-entry";
 import { runCustomBuild } from "./run-custom-build";
-import type { Config, RawConfig } from "../config";
-import type { DurableObjectBindings } from "../config/environment";
-import type { CfScriptFormat } from "./worker";
-
-/**
- * An entry point for the Worker.
- *
- * It consists not just of a `file`, but also of a `directory` that is used to resolve relative paths.
- */
-export type Entry = {
-	/** A worker's entrypoint */
-	file: string;
-	/** A worker's directory. Usually where the Wrangler configuration file is located */
-	projectRoot: string;
-	/** Is this a module worker or a service worker? */
-	format: CfScriptFormat;
-	/** The directory that contains all of a `--no-bundle` worker's modules. Usually `${directory}/src`. Defaults to path.dirname(file) */
-	moduleRoot: string;
-	/**
-	 * A worker's name
-	 */
-	name?: string | undefined;
-
-	/** Export from a Worker's entrypoint */
-	exports: string[];
-};
+import type {
+	Config,
+	DurableObjectBindings,
+	Entry,
+	RawConfig,
+} from "@cloudflare/workers-utils";
 
 /**
  * Compute the entry-point for the Worker.
@@ -68,15 +52,12 @@ export async function getEntry(
 		if (config.pages_build_output_dir && command === "dev") {
 			throw new UserError(
 				"It looks like you've run a Workers-specific command in a Pages project.\n" +
-					"For Pages, please run `wrangler pages dev` instead."
+					"For Pages, please run `wrangler pages dev` instead.",
+				{ telemetryMessage: "worker entry pages project command mismatch" }
 			);
 		}
 
-		const compatibilityDateStr = [
-			new Date().getFullYear(),
-			(new Date().getMonth() + 1 + "").padStart(2, "0"),
-			(new Date().getDate() + "").padStart(2, "0"),
-		].join("-");
+		const compatibilityDateStr = getTodaysCompatDate();
 
 		const updateConfigMessage = (snippet: RawConfig) => dedent`
 			${
@@ -119,7 +100,8 @@ export async function getEntry(
 		paths.absolutePath,
 		paths.relativePath,
 		config.build,
-		config.configPath
+		config.configPath,
+		command
 	);
 
 	const projectRoot = paths.projectRoot ?? process.cwd();
@@ -141,13 +123,15 @@ export async function getEntry(
 		const migrateUrl =
 			"https://developers.cloudflare.com/workers/learning/migrating-to-module-workers/";
 		throw new UserError(
-			`${errorMessage}\n${addScriptName}\n${addScriptNameExamples}\n${migrateText}\n${migrateUrl}`
+			`${errorMessage}\n${addScriptName}\n${addScriptNameExamples}\n${migrateText}\n${migrateUrl}`,
+			{ telemetryMessage: "tried to use DO with service worker" }
 		);
 	}
 
 	return {
 		file: paths.absolutePath,
 		projectRoot,
+		configPath: config.configPath,
 		format,
 		moduleRoot:
 			args.moduleRoot ?? config.base_dir ?? path.dirname(paths.absolutePath),
