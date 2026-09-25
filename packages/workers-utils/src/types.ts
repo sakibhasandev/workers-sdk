@@ -1,7 +1,14 @@
+import type { ApiCredentials } from "./cfetch";
 import type { Config } from "./config";
 import type {
 	CustomDomainRoute,
+	ContainerApp,
+	ContainerEngine,
+	DurableObjectCodeUpdateStrategy,
+	Exports,
+	DurableObjectMigration,
 	Observability,
+	Rule,
 	TailConsumer,
 	ZoneIdRoute,
 	ZoneNameRoute,
@@ -16,6 +23,7 @@ import type {
 	CfD1Database,
 	CfDispatchNamespace,
 	CfDurableObject,
+	CfExports,
 	CfDurableObjectMigrations,
 	CfFlagship,
 	CfHelloWorld,
@@ -25,6 +33,7 @@ import type {
 	CfLogfwdrBinding,
 	CfMediaBinding,
 	CfMTlsCertificate,
+	CfModule,
 	CfPipeline,
 	CfPlacement,
 	CfQueue,
@@ -41,12 +50,13 @@ import type {
 	CfVectorize,
 	CfVpcNetwork,
 	CfVpcService,
-	CfWebSearch,
 	CfWorkerLoader,
 	CfWorkflow,
 	CfScriptFormat,
+	CfUnsafe,
 } from "./worker";
 import type { AssetConfig, RouterConfig } from "@cloudflare/workers-shared";
+import type { MockAgent } from "undici";
 
 export type Json =
 	| string
@@ -76,7 +86,6 @@ export type WorkerMetadataBinding =
 	| { type: "data_blob"; name: string; part: string }
 	| { type: "ai_search_namespace"; name: string; namespace: string }
 	| { type: "ai_search"; name: string; instance_name: string }
-	| { type: "websearch"; name: string }
 	| { type: "agent_memory"; name: string; namespace: string }
 	| { type: "kv_namespace"; name: string; namespace_id: string; raw?: boolean }
 	| { type: "media"; name: string }
@@ -219,6 +228,17 @@ export type AssetsOptions = {
 };
 
 /**
+ * The result of validating and resolving the assets directory, before the
+ * full {@link AssetsOptions} are resolved. Produced by the validation half of
+ * `getAssetsOptions` and consumed by `resolveAssetOptions`.
+ */
+export type ValidatedAssetsOptions = {
+	directory: string;
+	binding?: string;
+	directoryExists: boolean;
+};
+
+/**
  * Information about the assets that should be uploaded
  */
 export interface LegacyAssetPaths {
@@ -252,6 +272,8 @@ type WorkerMetadataPut = {
 	compatibility_flags?: string[];
 	usage_model?: "bundled" | "unbound";
 	migrations?: CfDurableObjectMigrations;
+	code_update_strategy?: DurableObjectCodeUpdateStrategy;
+	exports?: CfExports;
 	capnp_schema?: string;
 	bindings: WorkerMetadataBinding[];
 	keep_bindings?: (
@@ -270,7 +292,18 @@ type WorkerMetadataPut = {
 		config?: AssetConfigMetadata;
 	};
 	observability?: Observability | undefined;
-	containers?: { class_name: string }[];
+	// `class_name` is omitted when the container is instead referenced from the
+	// Durable Object's `exports` entry via its `container` field.
+	containers?: {
+		name?: string;
+		class_name?: string;
+		images?: Record<string, string>;
+	}[];
+	package_dependencies?: Array<{
+		name: string;
+		packageJsonVersion: string;
+		installedVersion: string;
+	}>;
 	// Allow unsafe.metadata to add arbitrary properties at runtime
 	[key: string]: unknown;
 };
@@ -281,6 +314,71 @@ type WorkerMetadataVersionsPost = WorkerMetadataPut & {
 };
 
 export type WorkerMetadata = WorkerMetadataPut | WorkerMetadataVersionsPost;
+
+/**
+ * Structured per-class entry returned by the declarative exports
+ * reconciliation flow.
+ *
+ * The same shape is used for both successful info entries (under
+ * `exports_reconciliation.info[]`) and blocking errors (under the v4 error
+ * envelope's `meta.details[]`). The `scenario` tag is the stable, machine-
+ * readable identifier of which reconciliation case produced the entry.
+ */
+export type ExportsReconciliationEntryBase = {
+	class: string;
+	scenario: string;
+	message: string;
+	namespace_id?: string;
+};
+
+export type ExportsReconciliationInfo = ExportsReconciliationEntryBase & {
+	/**
+	 * Workers in the account that still bind to the source class name and must
+	 * be redeployed before the tombstone is safe to remove.
+	 */
+	referencing_scripts?: string[];
+};
+
+export type ExportsReconciliationWarning = ExportsReconciliationEntryBase;
+
+export type ExportsReconciliationErrorDetail =
+	ExportsReconciliationEntryBase & {
+		suggestion?: string;
+		referencing_scripts?: string[];
+	};
+
+export type ExportsReconciliationRename = {
+	from: string;
+	to: string;
+};
+
+export type ExportsReconciliationTransfer = {
+	class: string;
+	to: string;
+	phase: "committed";
+};
+
+export type ExportsReconciliationTransferPending = {
+	class: string;
+	from: string;
+};
+
+/**
+ * The customer-visible summary of a successful exports reconciliation,
+ * embedded in the upload response under `exports_reconciliation`. All arrays
+ * are present, and are empty when there are no entries to report.
+ */
+export type ExportsReconciliationResult = {
+	created: string[];
+	updated: string[];
+	deleted: string[];
+	renamed: ExportsReconciliationRename[];
+	transferred: ExportsReconciliationTransfer[];
+	transfer_pending: ExportsReconciliationTransferPending[];
+	warnings: ExportsReconciliationWarning[];
+	info: ExportsReconciliationInfo[];
+	removable_entries: string[];
+};
 
 export type ServiceMetadataRes = {
 	id: string;
@@ -331,6 +429,21 @@ export type BinaryFile = File<Uint8Array>; // Note: Node's `Buffer`s are instanc
 
 type QueueConsumer = NonNullable<Config["queues"]["consumers"]>[number];
 
+type ConnectHandlerBase = {
+	port: number;
+	address?: string;
+};
+
+export type TcpConnectHandler = ConnectHandlerBase & { protocol: "tcp" };
+
+export type UdpConnectHandler = ConnectHandlerBase & {
+	protocol: "udp";
+	idleTimeoutMs?: number;
+	maxPendingBytes?: number;
+};
+
+export type ConnectHandler = TcpConnectHandler | UdpConnectHandler;
+
 export type Trigger =
 	| { type: "workers.dev" }
 	| { type: "route"; pattern: string } // SimpleRoute
@@ -338,10 +451,14 @@ export type Trigger =
 	| ({ type: "route" } & ZoneNameRoute)
 	| ({ type: "route" } & CustomDomainRoute)
 	| { type: "cron"; cron: string }
-	| ({ type: "queue-consumer" } & Omit<QueueConsumer, "type">);
+	| ({ type: "queue-consumer" } & Omit<QueueConsumer, "type">)
+	| ({ type: "connect" } & ConnectHandler);
 
-type BindingOmit<T> = Omit<T, "binding">;
-type NameOmit<T> = Omit<T, "name">;
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
+	? Omit<T, K>
+	: never;
+type BindingOmit<T> = DistributiveOmit<T, "binding">;
+type NameOmit<T> = DistributiveOmit<T, "name">;
 export type Binding =
 	| {
 			type: "plain_text";
@@ -373,7 +490,6 @@ export type Binding =
 	| ({ type: "vectorize" } & BindingOmit<CfVectorize>)
 	| ({ type: "ai_search_namespace" } & BindingOmit<CfAISearchNamespace>)
 	| ({ type: "ai_search" } & BindingOmit<CfAISearch>)
-	| ({ type: "websearch" } & BindingOmit<CfWebSearch>)
 	| ({ type: "agent_memory" } & BindingOmit<CfAgentMemory>)
 	| ({ type: "hyperdrive" } & BindingOmit<CfHyperdrive>)
 	| ({ type: "service" } & BindingOmit<CfService>)
@@ -395,6 +511,208 @@ export type Binding =
 	| ({ type: `unsafe_${string}` } & Omit<CfUnsafeBinding, "name" | "type">)
 	| { type: "assets" }
 	| { type: "inherit" };
+
+export interface CfAccount {
+	/**
+	 * An API token.
+	 *
+	 * @link https://api.cloudflare.com/#user-api-tokens-properties
+	 */
+	apiToken: ApiCredentials;
+	/**
+	 * An account ID.
+	 */
+	accountId: string;
+}
+
+export type HookValues = string | number | boolean | object | undefined | null;
+export type Hook<T extends HookValues, Args extends unknown[] = []> =
+	| T
+	| ((...args: Args) => T);
+export type AsyncHook<T extends HookValues, Args extends unknown[] = []> =
+	| Hook<T, Args>
+	| Hook<Promise<T>, Args>;
+
+export type LogLevel = "debug" | "info" | "log" | "warn" | "error" | "none";
+
+// Duplicate of Miniflare's NodeJSCompatMode to keep workers-utils from depending on Miniflare.
+export type NodeJSCompatMode = "als" | "v1" | "v2" | null;
+
+export interface StartDevWorkerInput {
+	/** The name of the worker. */
+	name?: string;
+	/**
+	 * The javascript or typescript entry-point of the worker.
+	 * This is the `main` property of a Wrangler configuration file.
+	 */
+	entrypoint?: string;
+	/** The configuration path of the worker, or a normalized configuration object. */
+	config?: string | Config;
+
+	/** The compatibility date for the workerd runtime. */
+	compatibilityDate?: string;
+	/** The compatibility flags for the workerd runtime. */
+	compatibilityFlags?: string[];
+
+	/** Specify the compliance region mode of the Worker. */
+	complianceRegion?: Config["compliance_region"];
+
+	/** Configuration for Python modules. */
+	pythonModules?: {
+		/** A list of glob patterns to exclude files from the python_modules directory when bundling. */
+		exclude?: string[];
+	};
+
+	env?: string;
+
+	/**
+	 * An array of paths to the .env files to load for this worker, relative to the project directory.
+	 *
+	 * If not specified, defaults to the standard `.env` files as given from Wrangler.
+	 * The project directory is where the Wrangler configuration file is located or the current working directory otherwise.
+	 */
+	envFiles?: string[];
+
+	/** The bindings available to the worker. The specified binding type will be exposed to the worker on the `env` object under the same key. */
+	bindings?: Record<string, Binding>;
+	/**
+	 * Default bindings that can be overridden by config bindings.
+	 * Useful for injecting environment-specific defaults like CF_PAGES variables.
+	 */
+	defaultBindings?: Record<string, Extract<Binding, { type: "plain_text" }>>;
+	migrations?: DurableObjectMigration[];
+	exports?: Exports;
+	containers?: ContainerApp[];
+	/** The triggers which will cause the worker's exported default handlers to be called. */
+	triggers?: Trigger[];
+
+	tailConsumers?: CfTailConsumer[];
+	streamingTailConsumers?: CfTailConsumer[];
+
+	/** Cloudflare Access authentication configuration */
+	access?: Config["access"];
+
+	/**
+	 * Whether Wrangler should send usage metrics to Cloudflare for this project.
+	 *
+	 * When defined this will override any user settings.
+	 * Otherwise, Wrangler will use the user's preference.
+	 */
+	sendMetrics?: boolean;
+
+	/** Options applying to the worker's build step. Applies to deploy and dev. */
+	build?: {
+		/** Whether the worker and its dependencies are bundled. Defaults to true. */
+		bundle?: boolean;
+
+		additionalModules?: CfModule[];
+
+		findAdditionalModules?: boolean;
+		processEntrypoint?: boolean;
+		/** Specifies types of modules matched by globs. */
+		moduleRules?: Rule[];
+		/** Replace global identifiers with constant expressions, e.g. { debug: 'true', version: '"1.0.0"' }. Only takes effect if bundle: true. */
+		define?: Record<string, string>;
+		/** Alias modules */
+		alias?: Record<string, string>;
+		/** Whether the bundled worker is minified. Only takes effect if bundle: true. */
+		minify?: boolean;
+		/** Whether to keep function names after JavaScript transpilations. */
+		keepNames?: boolean;
+		/** Options controlling a custom build step. */
+		custom?: {
+			/** Custom shell command to run before bundling. Runs even if bundle. */
+			command?: string;
+			/** The cwd to run the command in. */
+			workingDirectory?: string;
+			/** Filepath(s) to watch for changes. Upon changes, the command will be rerun. */
+			watch?: string | string[];
+		};
+		jsxFactory?: string;
+		jsxFragment?: string;
+		tsconfig?: string;
+		nodejsCompatMode?: Hook<NodeJSCompatMode, [Config]>;
+
+		moduleRoot?: string;
+	};
+
+	/** Options applying to the worker's development preview environment. */
+	dev?: {
+		/** Options applying to the worker's inspector server. False disables the inspector server. */
+		inspector?: { hostname?: string; port?: number; secure?: boolean } | false;
+		/** Whether the worker runs on the edge or locally. */
+		remote?: boolean | "minimal";
+		/** Cloudflare Account credentials. Can be provided upfront or as a function which will be called only when required. */
+		auth?: AsyncHook<CfAccount, [Pick<Config, "account_id">]>;
+		/** Whether local storage (KV, Durable Objects, R2, D1, etc) is persisted. You can also specify the directory to persist data to. Set to `false` to disable persistence. */
+		persist?: string | false;
+		/** Controls which logs are logged. */
+		logLevel?: LogLevel;
+		/** Whether the worker server restarts upon source/config file changes. */
+		watch?: boolean;
+		/** Whether a script tag is inserted on text/html responses which will reload the page upon file changes. Defaults to false. */
+		liveReload?: boolean;
+
+		/** The local address to reach your worker. Applies to remote: true (remote mode) and remote: false (local mode). */
+		server?: {
+			hostname?: string;
+			port?: number;
+			secure?: boolean;
+			httpsKeyPath?: string;
+			httpsCertPath?: string;
+		};
+		/** Controls what request.url looks like inside the worker. */
+		origin?: { hostname?: string; secure?: boolean };
+		/** A hook for outbound fetch calls from within the worker. */
+		outboundService?: ServiceFetch;
+		/** An undici MockAgent to declaratively mock fetch calls to particular resources. */
+		mockFetch?: MockAgent;
+
+		testScheduled?: boolean;
+
+		/** Treat this as the primary worker in a multiworker setup (i.e. the first Worker in Miniflare's options) */
+		multiworkerPrimary?: boolean;
+		/** Whether to infer the local request origin from configured routes. */
+		inferOriginFromRoutes?: boolean;
+		/** Whether local requests should be matched against configured routes. */
+		routeRequestsByRoutes?: boolean;
+
+		containerBuildId?: string;
+		/** Whether to build and connect to containers during local dev. Requires Docker daemon to be running. Defaults to true. */
+		enableContainers?: boolean;
+
+		/** Path to the dev registry directory */
+		registry?: string;
+
+		/** Path to the docker executable. Defaults to 'docker' */
+		dockerPath?: string;
+
+		/** Options for the container engine */
+		containerEngine?: ContainerEngine;
+
+		/** Re-generate your worker types when your Wrangler configuration file changes */
+		generateTypes?: boolean;
+
+		/**
+		 * Experimental: Use `cloudflare.config.ts` + optional `wrangler.config.ts`
+		 * instead of `wrangler.json[c]` / `wrangler.toml`.
+		 */
+		experimentalNewConfig?: boolean;
+
+		/** Tunnel configuration for this dev session. */
+		tunnel?: {
+			enabled: boolean;
+			name?: string;
+		};
+	};
+	legacy?: {
+		site?: Hook<Config["site"], [Config]>;
+	};
+	unsafe?: Omit<CfUnsafe, "bindings">;
+	assets?: string;
+
+	experimental?: Record<string, never>;
+}
 
 /**
  * An entry point for the Worker.

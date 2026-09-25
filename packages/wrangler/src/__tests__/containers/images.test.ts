@@ -47,7 +47,8 @@ describe("containers images list", () => {
 			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
 			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
 			  -h, --help            Show help  [boolean]
-			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			      --install-skills  Install Cloudflare skills for detected AI coding agents before running the command  [boolean] [default: false]
+			      --profile         Use a specific auth profile  [string]
 			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
@@ -60,23 +61,30 @@ describe("containers images list", () => {
 		setIsTTY(false);
 		setWranglerConfig({});
 		const tags = {
-			one: ["hundred", "ten", "sha256:239a0dfhasdfui235"],
+			one: ["hundred", "ten", "sha256-release", "sha256:239a0dfhasdfui235"],
 			two: ["thousand", "twenty", "sha256:badfga4mag0vhjakf"],
 			three: ["million", "thirty", "sha256:23f0adfgbja0f0jf0"],
 		};
 
 		msw.use(
-			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				expect(params.domain).toEqual(REGISTRY);
-				return HttpResponse.json(
-					wrapV4Response({
-						account_id: "1234",
-						registry_host: REGISTRY,
-						username: "foo",
-						password: "bar",
-					})
-				);
-			}),
+			http.post(
+				"*/registries/:domain/credentials",
+				async ({ params, request }) => {
+					expect(params.domain).toEqual(REGISTRY);
+					expect(await request.json()).toEqual({
+						expiration_minutes: 5,
+						permissions: ["pull"],
+					});
+					return HttpResponse.json(
+						wrapV4Response({
+							account_id: "1234",
+							registry_host: REGISTRY,
+							username: "foo",
+							password: "bar",
+						})
+					);
+				}
+			),
 			http.get("*/v2/_catalog?tags=true", async () => {
 				return HttpResponse.json({ repositories: tags });
 			})
@@ -88,6 +96,7 @@ describe("containers images list", () => {
 			"REPOSITORY  TAG
 			one         hundred
 			one         ten
+			one         sha256-release
 			two         thousand
 			two         twenty
 			three       million
@@ -105,17 +114,24 @@ describe("containers images list", () => {
 		};
 
 		msw.use(
-			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				expect(params.domain).toEqual(REGISTRY);
-				return HttpResponse.json(
-					wrapV4Response({
-						account_id: "1234",
-						registry_host: REGISTRY,
-						username: "foo",
-						password: "bar",
-					})
-				);
-			}),
+			http.post(
+				"*/registries/:domain/credentials",
+				async ({ params, request }) => {
+					expect(params.domain).toEqual(REGISTRY);
+					expect(await request.json()).toEqual({
+						expiration_minutes: 5,
+						permissions: ["pull"],
+					});
+					return HttpResponse.json(
+						wrapV4Response({
+							account_id: "1234",
+							registry_host: REGISTRY,
+							username: "foo",
+							password: "bar",
+						})
+					);
+				}
+			),
 			http.get("*/v2/_catalog?tags=true", async () => {
 				return HttpResponse.json({ repositories: tags });
 			})
@@ -140,17 +156,24 @@ describe("containers images list", () => {
 		};
 
 		msw.use(
-			http.post("*/registries/:domain/credentials", async ({ params }) => {
-				expect(params.domain).toEqual(REGISTRY);
-				return HttpResponse.json(
-					wrapV4Response({
-						account_id: "1234",
-						registry_host: REGISTRY,
-						username: "foo",
-						password: "bar",
-					})
-				);
-			}),
+			http.post(
+				"*/registries/:domain/credentials",
+				async ({ params, request }) => {
+					expect(params.domain).toEqual(REGISTRY);
+					expect(await request.json()).toEqual({
+						expiration_minutes: 5,
+						permissions: ["pull"],
+					});
+					return HttpResponse.json(
+						wrapV4Response({
+							account_id: "1234",
+							registry_host: REGISTRY,
+							username: "foo",
+							password: "bar",
+						})
+					);
+				}
+			),
 			http.get("*/v2/_catalog?tags=true", async () => {
 				return HttpResponse.json({ repositories: tags });
 			})
@@ -220,7 +243,8 @@ describe("containers images delete", () => {
 			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
 			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
 			  -h, --help            Show help  [boolean]
-			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			      --install-skills  Install Cloudflare skills for detected AI coding agents before running the command  [boolean] [default: false]
+			      --profile         Use a specific auth profile  [string]
 			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
@@ -239,6 +263,24 @@ describe("containers images delete", () => {
 			🤖 Using fallback value in non-interactive context: yes
 			Deleted one:hundred (some-digest)"
 		`);
+	});
+
+	it("reports deletion success with a warning when the GC request fails", async ({
+		expect,
+	}) => {
+		setIsTTY(false);
+		setWranglerConfig({});
+		mockDeleteImage(expect, REGISTRY);
+		msw.use(
+			http.put("*/v2/gc/layers", () => new HttpResponse(null, { status: 503 }))
+		);
+		await runWrangler(
+			"containers images delete one:hundred --skip-confirmation"
+		);
+		expect(std.out).toContain("Deleted one:hundred (some-digest)");
+		expect(std.warn).toContain(
+			"was deleted, but the garbage-collection request failed: 503"
+		);
 	});
 
 	it("should error when provided a repo without a tag", async ({ expect }) => {
@@ -330,17 +372,24 @@ describe("containers images delete", () => {
 
 function mockDeleteImage(expect: ExpectStatic, registry: string) {
 	msw.use(
-		http.post("*/registries/:domain/credentials", async ({ params }) => {
-			expect(params.domain).toEqual(registry);
-			return HttpResponse.json(
-				wrapV4Response({
-					account_id: "1234",
-					registry_host: registry,
-					username: "foo",
-					password: "bar",
-				})
-			);
-		}),
+		http.post(
+			"*/registries/:domain/credentials",
+			async ({ params, request }) => {
+				expect(params.domain).toEqual(registry);
+				expect(await request.json()).toEqual({
+					expiration_minutes: 5,
+					permissions: ["pull", "push"],
+				});
+				return HttpResponse.json(
+					wrapV4Response({
+						account_id: "1234",
+						registry_host: registry,
+						username: "foo",
+						password: "bar",
+					})
+				);
+			}
+		),
 		http.head("*/v2/:accountId/:image/manifests/:tag", async ({ params }) => {
 			expect(params.accountId).toEqual("some-account-id");
 			expect(params.image).toEqual("one");

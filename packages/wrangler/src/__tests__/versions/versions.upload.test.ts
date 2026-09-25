@@ -1,4 +1,14 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- formData() is the standard Web API for parsing multipart bodies; only deprecated on undici's server-side types */
+import assert from "node:assert";
 import * as fs from "node:fs";
+import * as path from "node:path";
+import { ContainerImagePreparationStatus } from "@cloudflare/containers-shared";
+import {
+	ACTOR_BINDING_DEPENDS_ON_EXPORT_CODE,
+	generatePreviewAlias,
+} from "@cloudflare/deploy-helpers";
+import { TEMPORARY_TERMS_NOTICE } from "@cloudflare/workers-auth";
+import { DEFAULT_COMPAT_DATE } from "@cloudflare/workers-utils";
 import {
 	runInTempDir,
 	writeRedirectedWranglerConfig,
@@ -9,15 +19,18 @@ import { http, HttpResponse } from "msw";
  * Uses assert/expect in MSW handlers and top-level mock setup
  * TODO: remove this `expect` import
  */
-import { assert, beforeEach, describe, expect, it, test, vi } from "vitest";
+import { beforeEach, describe, expect, it, test, vi } from "vitest";
+import { logger } from "../../logger";
+import * as metrics from "../../metrics";
 import { dedent } from "../../utils/dedent";
-import { generatePreviewAlias } from "../../versions/upload";
+import { mockAccountV4 as mockContainersAccount } from "../cloudchamber/utils";
 import { makeApiRequestAsserter } from "../helpers/assert-request";
 import { captureRequestsFrom } from "../helpers/capture-requests-from";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { mockConfirm } from "../helpers/mock-dialogs";
 import { useMockIsTTY } from "../helpers/mock-istty";
+import { mockGetSettings } from "../helpers/mock-worker-settings";
 import {
 	mockGetWorkerSubdomain,
 	mockSubDomainRequest,
@@ -35,8 +48,17 @@ describe("versions upload", () => {
 	const { setIsTTY } = useMockIsTTY();
 	const std = mockConsoleMethods();
 	const assertApiRequest = makeApiRequestAsserter(std);
+	const temporaryPreviewAccountUrl =
+		"https://api.cloudflare.com/client/v4/provisioning/previews";
 
-	function mockGetScript(result?: unknown) {
+	/**
+	 * Mocks service metadata for a Worker.
+	 *
+	 * @param result - The service metadata result.
+	 * @param options - Controls whether the handler can respond more than once.
+	 * @returns Nothing.
+	 */
+	function mockGetScript(result?: unknown, options: { once?: boolean } = {}) {
 		msw.use(
 			http.get(
 				`*/accounts/:accountId/workers/services/:scriptName`,
@@ -55,7 +77,7 @@ describe("versions upload", () => {
 						)
 					);
 				},
-				{ once: true }
+				{ once: options.once ?? true }
 			)
 		);
 	}
@@ -131,6 +153,140 @@ describe("versions upload", () => {
 			await toString(formBody.get("metadata"))
 		) as WorkerMetadata;
 	}
+
+	beforeEach(() => {
+		msw.use(
+			http.get("*/applications/:id", () =>
+				HttpResponse.json(
+					createFetchResult(null, false, [
+						{ code: 1000, message: "Application not found" },
+					]),
+					{ status: 404 }
+				)
+			)
+		);
+		// Mock the secrets endpoint that checkRemoteSecretsOverride calls
+		msw.use(
+			http.get(
+				"*/accounts/:accountId/workers/scripts/:scriptName/secrets",
+				() => HttpResponse.json(createFetchResult([]))
+			)
+		);
+	});
+
+	/**
+	 * Mocks the 6 endpoints that downloadWorkerConfig calls when
+	 * last_deployed_from === "dash". The remote config matches a minimal
+	 * local wrangler config so the diff is non-destructive by default.
+	 * Pass `remoteBindings` to create a destructive diff.
+	 */
+	function mockRemoteWorkerConfig(remoteBindings: unknown[] = []) {
+		msw.use(
+			http.get(
+				"*/accounts/:accountId/workers/services/:serviceName/environments/:env/bindings",
+				() => HttpResponse.json(createFetchResult(remoteBindings))
+			),
+			http.get(
+				"*/accounts/:accountId/workers/services/:serviceName/environments/:env/routes",
+				() => HttpResponse.json(createFetchResult([]))
+			),
+			http.get("*/accounts/:accountId/workers/domains/records", () =>
+				HttpResponse.json(createFetchResult([]))
+			),
+			http.get(
+				"*/accounts/:accountId/workers/services/:serviceName/environments/:env/subdomain",
+				() =>
+					HttpResponse.json(
+						createFetchResult({ enabled: false, previews_enabled: false })
+					)
+			),
+			http.get(
+				"*/accounts/:accountId/workers/services/:serviceName/environments/:env",
+				() =>
+					HttpResponse.json(
+						createFetchResult({
+							script: {
+								compatibility_date: "2024-01-01",
+							},
+						})
+					)
+			),
+			http.get(
+				"*/accounts/:accountId/workers/scripts/:workerName/schedules",
+				() => HttpResponse.json(createFetchResult({ schedules: [] }))
+			)
+		);
+	}
+
+	describe("with --temporary", () => {
+		mockAccountId({ accountId: null });
+		mockApiToken({ apiToken: null });
+
+		test("should create a temporary account in non-interactive mode after printing terms notice", async ({
+			expect,
+		}) => {
+			let previewAccountRequests = 0;
+			msw.use(
+				http.post(`${temporaryPreviewAccountUrl}/challenge`, () =>
+					HttpResponse.json({
+						success: true,
+						result: {
+							challengeToken: "challenge-token",
+							seed: Buffer.alloc(32, 1).toString("base64url"),
+							k: 2,
+							g: 2,
+							s: 16,
+							expiresAt: 9999999999,
+						},
+						errors: [],
+						messages: [],
+					})
+				),
+				http.post(temporaryPreviewAccountUrl, async () => {
+					previewAccountRequests += 1;
+					return HttpResponse.json({
+						success: true,
+						result: {
+							account: {
+								id: "preview-account-id",
+								name: "Preview Account Alpha",
+								type: "standard",
+								apiToken: "preview-account-token",
+								tokenId: "preview-token-id",
+								expiresAt: "2027-01-01T00:00:00.000Z",
+							},
+							claim: {
+								token: "claim-token",
+								url: "https://dash.cloudflare.com/claim-preview?claimToken=claim-token",
+								expiresAt: "2027-01-02T00:00:00.000Z",
+							},
+						},
+						errors: [],
+						messages: [],
+					});
+				})
+			);
+
+			mockGetScript();
+			mockUploadVersion(false, 0);
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+			});
+			writeWorkerSource();
+			setIsTTY(false);
+
+			await expect(
+				runWrangler("versions upload --temporary")
+			).resolves.toBeUndefined();
+
+			expect(previewAccountRequests).toBe(1);
+			expect(std.out).toContain(TEMPORARY_TERMS_NOTICE);
+			expect(std.out).toContain("Temporary account ready:");
+			expect(std.out).toContain("Account: Preview Account Alpha (created)");
+			expect(std.out).toContain("Uploaded test-name");
+		});
+	});
 
 	test("should print bindings & startup time on versions upload", async () => {
 		mockGetScript();
@@ -270,6 +426,22 @@ describe("versions upload", () => {
 			Worker Version ID: 51e4886e-2db7-4900-8d38-fbfecfeab993
 			Version Preview URL: https://51e4886e-test-name.test-sub-domain.workers.dev"
 		`);
+	});
+
+	test("should get the preview URL suffix from the Worker resource", async () => {
+		mockGetScript();
+		mockUploadVersion(true);
+		mockGetWorkerSubdomain({ enabled: true, previews_enabled: true });
+		writeWranglerConfig({ name: "test-name", main: "./index.js" });
+		writeWorkerSource();
+		setIsTTY(false);
+
+		await expect(runWrangler("versions upload")).resolves.toBeUndefined();
+
+		expect(std.out).toContain("Worker Version ID:");
+		expect(std.out).toContain(
+			"Version Preview URL: https://51e4886e-test-name.test-sub-domain.workers.dev"
+		);
 	});
 
 	test("should allow specifying --preview-alias", async () => {
@@ -760,7 +932,6 @@ describe("versions upload", () => {
 			mockGetWorkerSubdomain({
 				enabled: true,
 				previews_enabled: false,
-				useServiceEnvironments: false,
 			});
 
 			// Setup
@@ -797,7 +968,6 @@ describe("versions upload", () => {
 			mockGetWorkerSubdomain({
 				enabled: true,
 				previews_enabled: false,
-				useServiceEnvironments: false,
 				env: "test",
 			});
 
@@ -847,7 +1017,6 @@ describe("versions upload", () => {
 			mockGetWorkerSubdomain({
 				enabled: true,
 				previews_enabled: false,
-				useServiceEnvironments: false,
 				env: "test",
 			});
 
@@ -876,7 +1045,6 @@ describe("versions upload", () => {
 			mockGetWorkerSubdomain({
 				enabled: true,
 				previews_enabled: false,
-				useServiceEnvironments: false,
 			});
 
 			// Setup
@@ -900,12 +1068,50 @@ describe("versions upload", () => {
 
 	describe("keep_vars", () => {
 		beforeEach(() => {
+			mockGetSettings({ result: { bindings: [] } });
 			mockGetScript();
 			mockGetWorkerSubdomain({ enabled: true, previews_enabled: false });
 			writeWorkerSource();
 			setIsTTY(false);
 		});
 
+		test.for([
+			{ bindingName: "USER_IMAGES", containers: [] },
+			{ bindingName: "USER_IMAGES", containers: undefined },
+		])(
+			"keeps variables without generating Container image bindings: %j",
+			async ({ bindingName, containers }, { expect }) => {
+				mockGetScript();
+				const requests = mockUploadVersion(false, 0);
+				writeWranglerConfig({
+					name: "test-name",
+					main: "./index.js",
+					keep_vars: true,
+					containers,
+				});
+				writeWorkerSource();
+				msw.use(
+					http.get(
+						"*/accounts/:accountId/workers/scripts/:scriptName/settings",
+						() =>
+							HttpResponse.json(
+								createFetchResult({
+									bindings: [
+										{ name: bindingName, type: "json", json: { OldClass: {} } },
+									],
+								})
+							)
+					)
+				);
+				await runWrangler("versions upload");
+				const metadata = await getMetadata(requests[requests.length - 1]);
+				expect(metadata.containers).toEqual(containers);
+				expect(metadata.keep_bindings).toEqual(
+					expect.arrayContaining(["json", "plain_text"])
+				);
+				expect(metadata.bindings).toEqual([]);
+			}
+		);
 		test("should include plain_text and json in keep_bindings when keep_vars is true", async () => {
 			const mockUploadVersionCapture = captureRequestsFrom(
 				http.post(
@@ -1026,19 +1232,23 @@ describe("versions upload", () => {
 		});
 
 		test("should preserve containers config in metadata", async () => {
+			// Override the beforeEach mockGetScript() with a handler that also
+			// includes migration_tag, so both preUploadApiChecks and
+			// getMigrationsToUpload get valid responses from the same endpoint.
 			msw.use(
-				http.get(
-					"*/accounts/:accountId/workers/scripts",
-					() => {
-						return HttpResponse.json({
-							success: true,
-							errors: [],
-							messages: [],
-							result: [{ id: "test-name", migration_tag: "v1" }],
-						});
-					},
-					{ once: true }
-				)
+				http.get("*/accounts/:accountId/workers/services/:scriptName", () => {
+					return HttpResponse.json(
+						createFetchResult({
+							default_environment: {
+								script: {
+									id: "test-name",
+									last_deployed_from: "wrangler",
+									migration_tag: "v1",
+								},
+							},
+						})
+					);
+				})
 			);
 
 			const mockUploadVersionCapture = captureRequestsFrom(
@@ -1064,12 +1274,7 @@ describe("versions upload", () => {
 				name: "test-name",
 				main: "./index.js",
 				durable_objects: {
-					bindings: [
-						{
-							name: "MY_DO",
-							class_name: "MyDurableObject",
-						},
-					],
+					bindings: [{ name: "MY_DO", class_name: "MyDurableObject" }],
 				},
 				migrations: [
 					{
@@ -1094,7 +1299,12 @@ describe("versions upload", () => {
 				await toString(formBody.get("metadata"))
 			) as WorkerMetadata;
 
-			expect(metadata.containers).toEqual([{ class_name: "MyDurableObject" }]);
+			// The container has no explicit `name`, so validation derives
+			// `<worker>-<class>`. Both directions of the container/Durable Object link
+			// are sent so that the API can resolve it from either side.
+			expect(metadata.containers).toEqual([
+				{ name: "test-name-mydurableobject", class_name: "MyDurableObject" },
+			]);
 
 			expect(std.warn).toContain(
 				"Container configuration changes (such as image, max_instances, etc.) will not be gradually rolled out with versions"
@@ -1196,7 +1406,11 @@ describe("versions upload", () => {
 			await expect(
 				runWrangler("versions upload index.js --latest --dry-run")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[Error: You need to provide a name of your worker. Either pass it as a cli arg with \`--name <name>\` or in your config file as \`name = "<name>"\`]`
+				`
+				[Error: You need to provide the name of your worker. Either pass it as a cli arg with --name <name> or in your config file as {
+				  "name": "<name>"
+				}]
+			`
 			);
 		});
 
@@ -1211,7 +1425,7 @@ describe("versions upload", () => {
 			writeWorkerSource();
 
 			await expect(runWrangler("versions upload --dry-run")).rejects.toThrow(
-				/A compatibility_date is required when uploading a Worker Version/
+				/A compatibility_date is required when uploading a Worker/
 			);
 		});
 
@@ -1240,11 +1454,12 @@ describe("versions upload", () => {
 			setIsTTY(true);
 		});
 
-		test("should warn when worker was last deployed from dashboard", async ({
+		test("should warn when worker was last deployed from dashboard with destructive config diff", async ({
 			expect,
 		}) => {
 			mockGetScript({
 				default_environment: {
+					environment: "production",
 					script: {
 						last_deployed_from: "dash",
 						tag: "test-tag",
@@ -1252,6 +1467,10 @@ describe("versions upload", () => {
 					},
 				},
 			});
+			// Remote config has a binding that local config does not — destructive diff
+			mockRemoteWorkerConfig([
+				{ name: "REMOTE_VAR", text: "remote-value", type: "plain_text" },
+			]);
 			mockUploadVersion(false);
 
 			writeWranglerConfig({
@@ -1268,7 +1487,7 @@ describe("versions upload", () => {
 			await runWrangler("versions upload");
 
 			expect(std.warn).toContain(
-				"You are about to upload a Worker Version that was last published via the Cloudflare Dashboard"
+				"Uploading the Worker will override the remote configuration with your local one."
 			);
 		});
 
@@ -1300,7 +1519,7 @@ describe("versions upload", () => {
 			await runWrangler("versions upload");
 
 			expect(std.warn).toContain(
-				"You are about to upload a Workers Version that was last updated via the API"
+				"You are about to upload a Worker that was last updated via the script API"
 			);
 		});
 
@@ -1309,6 +1528,7 @@ describe("versions upload", () => {
 		}) => {
 			mockGetScript({
 				default_environment: {
+					environment: "production",
 					script: {
 						last_deployed_from: "dash",
 						tag: "test-tag",
@@ -1316,6 +1536,10 @@ describe("versions upload", () => {
 					},
 				},
 			});
+			// Remote config has a binding that local config does not — destructive diff
+			mockRemoteWorkerConfig([
+				{ name: "REMOTE_VAR", text: "remote-value", type: "plain_text" },
+			]);
 
 			writeWranglerConfig({
 				name: "test-name",
@@ -1334,7 +1558,7 @@ describe("versions upload", () => {
 			expect(std.out).not.toContain("Uploaded");
 		});
 
-		test("should handle worker not found gracefully (new worker)", async ({
+		test("should error when worker not found (must deploy first)", async ({
 			expect,
 		}) => {
 			// Mock a 404 for the service lookup
@@ -1354,6 +1578,42 @@ describe("versions upload", () => {
 					{ once: true }
 				)
 			);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+			});
+			writeWorkerSource();
+
+			await expect(runWrangler("versions upload")).rejects.toThrow(
+				"You cannot upload a new version of a Worker that does not yet exist. Please run the `deploy` command first."
+			);
+		});
+	});
+
+	describe("non-interactive/CI behavior", () => {
+		beforeEach(() => {
+			setIsTTY(false);
+			vi.stubEnv("CI", "true");
+		});
+
+		test("should continue without prompting in non-interactive mode when last deployed from dashboard", async ({
+			expect,
+		}) => {
+			mockGetScript({
+				default_environment: {
+					environment: "production",
+					script: {
+						last_deployed_from: "dash",
+						tag: "test-tag",
+						tags: null,
+					},
+				},
+			});
+			// Remote config has a destructive diff to exercise the warning path
+			mockRemoteWorkerConfig([
+				{ name: "REMOTE_VAR", text: "remote-value", type: "plain_text" },
+			]);
 			mockUploadVersion(false);
 
 			writeWranglerConfig({
@@ -1364,7 +1624,167 @@ describe("versions upload", () => {
 
 			await runWrangler("versions upload");
 
+			// Should upload successfully without prompting (auto-continues in CI)
 			expect(std.out).toContain("Uploaded test-name");
+		});
+
+		test("should continue without prompting in non-interactive mode when last deployed from API", async ({
+			expect,
+		}) => {
+			mockGetScript({
+				default_environment: {
+					script: {
+						last_deployed_from: "api",
+						tag: "test-tag",
+						tags: null,
+					},
+				},
+			});
+			mockUploadVersion(false);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+			});
+			writeWorkerSource();
+
+			await runWrangler("versions upload");
+
+			// Should upload successfully without prompting
+			expect(std.out).toContain("Uploaded test-name");
+		});
+
+		test("should error when worker not found in non-interactive mode", async ({
+			expect,
+		}) => {
+			// Mock a 404 for the service lookup
+			msw.use(
+				http.get(
+					`*/accounts/:accountId/workers/services/:scriptName`,
+					() => {
+						return HttpResponse.json(
+							createFetchResult(null, false, [
+								{
+									code: 10090,
+									message: "workers.api.error.service_not_found",
+								},
+							])
+						);
+					},
+					{ once: true }
+				)
+			);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+			});
+			writeWorkerSource();
+
+			await expect(runWrangler("versions upload")).rejects.toThrow(
+				"You cannot upload a new version of a Worker that does not yet exist. Please run the `deploy` command first."
+			);
+		});
+
+		test("should abort in non-interactive strict mode when last deployed from API", async ({
+			expect,
+		}) => {
+			mockGetScript({
+				default_environment: {
+					script: {
+						last_deployed_from: "api",
+						tag: "test-tag",
+						tags: null,
+					},
+				},
+			});
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+			});
+			writeWorkerSource();
+
+			await runWrangler("versions upload --strict");
+
+			expect(std.warn).toContain(
+				"You are about to upload a Worker that was last updated via the script API"
+			);
+			expect(std.err).toContain(
+				"Aborting the upload operation because of conflicts"
+			);
+			expect(std.out).not.toContain("Uploaded");
+			expect(process.exitCode).not.toBe(0);
+		});
+
+		test("should abort in non-interactive strict mode when dashboard config has destructive diff", async ({
+			expect,
+		}) => {
+			mockGetScript({
+				default_environment: {
+					environment: "production",
+					script: {
+						last_deployed_from: "dash",
+						tag: "test-tag",
+						tags: null,
+					},
+				},
+			});
+			// Remote config has a binding that local config does not — destructive diff
+			mockRemoteWorkerConfig([
+				{ name: "REMOTE_VAR", text: "remote-value", type: "plain_text" },
+			]);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+			});
+			writeWorkerSource();
+
+			await runWrangler("versions upload --strict");
+
+			expect(std.warn).toContain(
+				"Uploading the Worker will override the remote configuration with your local one."
+			);
+			expect(std.err).toContain(
+				"Aborting the upload operation because of conflicts"
+			);
+			expect(std.out).not.toContain("Uploaded");
+			expect(process.exitCode).not.toBe(0);
+		});
+
+		test("should abort in non-interactive strict mode when remote secrets would be overridden", async ({
+			expect,
+		}) => {
+			mockGetScript();
+
+			// Override default secrets mock to return a secret that conflicts with a local var
+			msw.use(
+				http.get(
+					"*/accounts/:accountId/workers/scripts/:scriptName/secrets",
+					() =>
+						HttpResponse.json(
+							createFetchResult([{ name: "MY_VAR", type: "secret_text" }])
+						),
+					{ once: true }
+				)
+			);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+				vars: { MY_VAR: "not-a-secret" },
+			});
+			writeWorkerSource();
+
+			await runWrangler("versions upload --strict");
+
+			expect(std.warn).toContain("conflict");
+			expect(std.err).toContain(
+				"Aborting the upload operation because of conflicts"
+			);
+			expect(std.out).not.toContain("Uploaded");
+			expect(process.exitCode).not.toBe(0);
 		});
 	});
 
@@ -1404,6 +1824,23 @@ describe("versions upload", () => {
 			expect(std.out).toContain("MY_KV");
 			expect(std.out).toContain("--dry-run: exiting now.");
 		});
+
+		test("categorises the positional path in command telemetry", async ({
+			expect,
+		}) => {
+			logger.loggerLevel = "debug";
+			writeWranglerConfig({ name: "test-name" });
+			writeWorkerSource();
+
+			try {
+				await runWrangler("versions upload index.js --dry-run");
+			} finally {
+				logger.resetLoggerLevel();
+			}
+
+			expect(std.debug).toContain('"sanitizedCommand":"versions upload"');
+			expect(std.debug).toContain('"path":"file"');
+		});
 	});
 
 	// --no-bundle, --var/--define/--alias, annotations, non-versioned fields,
@@ -1427,7 +1864,11 @@ describe("versions upload", () => {
 				compatibility_flags: ["nodejs_compat"],
 				placement: { mode: "smart" },
 				limits: { cpu_ms: 100 },
-				cache: { enabled: true },
+				cache: { enabled: true, cross_version_cache: true },
+				exports: {
+					default: { type: "worker", cache: { enabled: false } },
+					Admin: { type: "worker", cache: { enabled: true } },
+				},
 			});
 			writeWorkerSource();
 
@@ -1442,6 +1883,38 @@ describe("versions upload", () => {
 			// cache is serialized as cache_options in the upload form metadata
 			expect((metadata as Record<string, unknown>).cache_options).toEqual({
 				enabled: true,
+				cross_version_cache: true,
+			});
+			expect((metadata as Record<string, unknown>).exports).toEqual({
+				default: { type: "worker", cache: { enabled: false } },
+				Admin: { type: "worker", cache: { enabled: true } },
+			});
+		});
+
+		test("should include worker export cache config without top-level cache", async ({
+			expect,
+		}) => {
+			mockGetScript();
+			const requests = mockUploadVersion(false);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+				compatibility_date: "2024-01-01",
+				exports: {
+					Admin: { type: "worker", cache: { enabled: true } },
+				},
+			});
+			writeWorkerSource();
+
+			await runWrangler("versions upload");
+
+			const metadata = await getMetadata(requests[requests.length - 1]);
+			expect(
+				(metadata as Record<string, unknown>).cache_options
+			).toBeUndefined();
+			expect((metadata as Record<string, unknown>).exports).toEqual({
+				Admin: { type: "worker", cache: { enabled: true } },
 			});
 		});
 	});
@@ -1475,7 +1948,17 @@ describe("versions upload", () => {
 				}),
 				http.get("*/accounts/:accountId/r2/buckets/:bucketName", () => {
 					return HttpResponse.json(createFetchResult({ name: "my-bucket" }));
-				})
+				}),
+				http.get("*/accounts/:accountId/workers/dispatch/namespaces", () =>
+					HttpResponse.json(
+						createFetchResult([
+							{
+								namespace_id: "namespace-id",
+								namespace_name: "my-namespace",
+							},
+						])
+					)
+				)
 			);
 
 			writeWranglerConfig({
@@ -1655,7 +2138,7 @@ describe("versions upload", () => {
 			await runWrangler("versions upload --latest");
 
 			expect(std.warn).toContain(
-				"Using the latest version of the Workers runtime"
+				`Using the latest compatibility date supported by this version of Wrangler (${DEFAULT_COMPAT_DATE})`
 			);
 			expect(std.out).toContain("Uploaded test-name");
 		});
@@ -1726,9 +2209,12 @@ describe("versions upload", () => {
 			setIsTTY(false);
 		});
 
-		test("should upload assets and include jwt in metadata", async ({
+		test("should upload assets and include stats in upload metrics", async ({
 			expect,
 		}) => {
+			const sendMetricsEventSpy = vi
+				.spyOn(metrics, "sendMetricsEvent")
+				.mockImplementation(() => {});
 			mockGetScript();
 			const requests = mockUploadVersion(false, 0);
 
@@ -1736,13 +2222,34 @@ describe("versions upload", () => {
 			msw.use(
 				http.post(
 					`*/accounts/:accountId/workers/scripts/:scriptName/assets-upload-session`,
-					() => {
+					async ({ request }) => {
+						const { manifest } = (await request.json()) as {
+							manifest: Record<string, { hash: string; size: number }>;
+						};
 						return HttpResponse.json(
 							{
 								success: true,
 								errors: [],
 								messages: [],
-								result: { jwt: "test-assets-jwt", buckets: [[]] },
+								result: {
+									jwt: "test-assets-jwt",
+									buckets: [Object.values(manifest).map(({ hash }) => hash)],
+								},
+							},
+							{ status: 201 }
+						);
+					}
+				),
+				http.post(
+					`*/accounts/:accountId/workers/assets/upload`,
+					async ({ request }) => {
+						expect(new URL(request.url).search).toBe("?base64=true");
+						return HttpResponse.json(
+							{
+								success: true,
+								errors: [],
+								messages: [],
+								result: { jwt: "test-assets-completion-jwt" },
 							},
 							{ status: 201 }
 						);
@@ -1763,7 +2270,18 @@ describe("versions upload", () => {
 
 			const metadata = await getMetadata(requests[requests.length - 1]);
 			expect(metadata.assets).toBeDefined();
-			expect(metadata.assets?.jwt).toEqual("test-assets-jwt");
+			expect(metadata.assets?.jwt).toEqual("test-assets-completion-jwt");
+			expect(sendMetricsEventSpy).toHaveBeenCalledWith(
+				"upload worker version",
+				expect.objectContaining({
+					assetUploadDurationMs: expect.any(Number),
+					assetUploadIsBulk: true,
+					assetUploadFileCount: 1,
+					assetUploadTotalBytes: 14,
+				}),
+				expect.any(Object)
+			);
+			sendMetricsEventSpy.mockRestore();
 		});
 
 		test("should upload assets via --assets CLI flag", async ({ expect }) => {
@@ -1863,23 +2381,19 @@ describe("versions upload", () => {
 			setIsTTY(false);
 		});
 
-		test("should include migrations in upload metadata", async ({ expect }) => {
-			mockGetScript();
-
-			// Mock the scripts list for migration tag lookup
-			msw.use(
-				http.get(
-					"*/accounts/:accountId/workers/scripts",
-					() => {
-						return HttpResponse.json({
-							success: true,
-							errors: [],
-							messages: [],
-							result: [{ id: "test-name", migration_tag: "" }],
-						});
+		test("fails before uploading a version with pending migrations", async ({
+			expect,
+		}) => {
+			mockGetScript(
+				{
+					default_environment: {
+						script: {
+							last_deployed_from: "wrangler",
+							migration_tag: "",
+						},
 					},
-					{ once: true }
-				)
+				},
+				{ once: false }
 			);
 
 			const requests = mockUploadVersion(false, 0);
@@ -1899,12 +2413,154 @@ describe("versions upload", () => {
 			});
 			writeWorkerSource({ durableObjects: ["MyDurableObject"] });
 
-			await runWrangler("versions upload");
-
-			const metadata = await getMetadata(requests[requests.length - 1]);
-			expect(metadata.migrations).toBeDefined();
-			expect(metadata.migrations?.new_tag).toEqual("v1");
+			const rejection = runWrangler("versions upload");
+			await expect(rejection).rejects.toThrow(
+				/pending Durable Object migration/
+			);
+			await expect(rejection).rejects.toThrow(/Run `wrangler deploy`/);
+			expect(requests).toHaveLength(0);
 		});
+
+		test.for([false, true])(
+			"uploads managed images without updating an existing application (%s)",
+			async (applicationExists, { expect }) => {
+				const namespaceId = "14758f1afd44c09b7992073ccf00b43d";
+				const image =
+					"registry.cloudflare.com/some-account-id/tools@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+				mockGetScript(
+					{
+						default_environment: {
+							script: {
+								last_deployed_from: "wrangler",
+								migration_tag: "v1",
+							},
+						},
+					},
+					{ once: false }
+				);
+				mockContainersAccount();
+				const requests = mockUploadVersion(false, 0);
+				const applicationRequests: unknown[] = [];
+				msw.use(
+					http.get(`*/applications/${namespaceId}`, () =>
+						applicationExists
+							? HttpResponse.json(
+									createFetchResult({
+										id: namespaceId,
+										name: "test-name-mydurableobject",
+										scheduling_policy: "durable_object",
+										durable_objects: { namespace_id: namespaceId },
+										configuration: { experimental_flags: ["old"] },
+										observability: { logs: { enabled: true } },
+									})
+								)
+							: HttpResponse.json(
+									createFetchResult(null, false, [
+										{ code: 1000, message: "Application not found" },
+									]),
+									{ status: 404 }
+								)
+					),
+					http.post("*/image-preparations", async ({ request }) => {
+						const body = (await request.json()) as { image: string };
+						expect(body).toEqual({ image });
+						return HttpResponse.json(
+							createFetchResult({
+								image,
+								status: ContainerImagePreparationStatus.READY,
+							})
+						);
+					}),
+					http.get(
+						"*/accounts/:accountId/workers/scripts/:scriptName/versions/:versionId",
+						({ params }) => {
+							expect(params.versionId).toBe(
+								"51e4886e-2db7-4900-8d38-fbfecfeab993"
+							);
+							return HttpResponse.json(
+								createFetchResult({
+									id: params.versionId,
+									metadata: {},
+									number: 1,
+									resources: {
+										bindings: [
+											{
+												type: "durable_object_namespace",
+												namespace_id: namespaceId,
+												class_name: "MyDurableObject",
+											},
+										],
+									},
+								})
+							);
+						}
+					),
+					http.post("*/applications", async ({ request }) => {
+						const body = await request.json();
+						applicationRequests.push(body);
+						return HttpResponse.json(createFetchResult(body));
+					})
+				);
+
+				writeWranglerConfig({
+					name: "test-name",
+					main: "./index.js",
+					durable_objects: {
+						bindings: [{ name: "MY_DO", class_name: "MyDurableObject" }],
+					},
+					migrations: [
+						{
+							tag: "v1",
+							new_sqlite_classes: ["MyDurableObject"],
+						},
+					],
+					containers: [
+						{
+							class_name: "MyDurableObject",
+							scheduling_policy: "durable_object",
+							observability: { enabled: false },
+							unsafe: { configuration: { experimental_flags: [] } },
+							images: {
+								tools: { image },
+							},
+						},
+					],
+				});
+				writeWorkerSource({ durableObjects: ["MyDurableObject"] });
+
+				await runWrangler("versions upload");
+
+				const metadata = await getMetadata(requests[requests.length - 1]);
+				expect(metadata.migrations).toBeUndefined();
+				expect(metadata.exports).toBeUndefined();
+				expect(metadata.containers).toEqual([
+					{
+						name: "test-name-mydurableobject",
+						class_name: "MyDurableObject",
+						images: { tools: image },
+					},
+				]);
+				expect(metadata.bindings.filter(({ type }) => type === "json")).toEqual(
+					[]
+				);
+				expect(applicationRequests).toEqual(
+					applicationExists
+						? []
+						: [
+								{
+									name: "test-name-mydurableobject",
+									scheduling_policy: "durable_object",
+									durable_objects: { namespace_id: namespaceId },
+									configuration: { experimental_flags: [] },
+									observability: { logs: { enabled: false } },
+								},
+							]
+				);
+				expect(std.warn).not.toContain(
+					"Container configuration changes (such as image, max_instances, etc.) will not be gradually rolled out with versions"
+				);
+			}
+		);
 
 		test("should skip migrations in dry-run", async ({ expect }) => {
 			writeWranglerConfig({
@@ -1926,6 +2582,473 @@ describe("versions upload", () => {
 			await runWrangler("versions upload --dry-run");
 
 			expect(std.out).toContain("--dry-run: exiting now.");
+		});
+	});
+
+	describe("durable object exports (declarative)", () => {
+		beforeEach(() => {
+			setIsTTY(false);
+		});
+
+		test("sends the `exports` payload (and omits `migrations`)", async ({
+			expect,
+		}) => {
+			// The versions POST controller (EWC) accepts `exports` and
+			// persists it on the new script_version row with
+			// `SkipDeploy:true`; reconciliation runs at deploy time
+			// (`wrangler deploy` or `wrangler versions deploy <id>`).
+			mockGetScript();
+			const requests = mockUploadVersion(false, 0);
+
+			writeWranglerConfig(
+				{
+					name: "test-name",
+					main: "./index.js",
+					durable_objects: {
+						bindings: [{ name: "MY_DO", class_name: "MyDurableObject" }],
+					},
+					exports: {
+						MyDurableObject: { type: "durable-object", storage: "sqlite" },
+						Admin: { type: "worker", cache: { enabled: true } },
+					},
+				},
+				"./wrangler.json"
+			);
+			writeWorkerSource({ durableObjects: ["MyDurableObject"] });
+
+			await runWrangler("versions upload --config ./wrangler.json");
+
+			const metadata = await getMetadata(requests[requests.length - 1]);
+			expect(metadata.exports).toEqual({
+				MyDurableObject: { type: "durable-object", storage: "sqlite" },
+				Admin: { type: "worker", cache: { enabled: true } },
+			});
+			expect(metadata.migrations).toBeUndefined();
+		});
+
+		test.for([
+			{ imageMap: "populated", appState: "missing-namespace" },
+			{ imageMap: "empty", appState: "missing-namespace" },
+			{ imageMap: "empty", appState: "missing-app" },
+			{ imageMap: "empty", appState: "exists" },
+			{ imageMap: "empty", appState: "mismatch" },
+			{ imageMap: "empty", appState: "forbidden" },
+		] as const)(
+			"uploads a name-only managed Container export with $imageMap images and $appState",
+			async ({ imageMap, appState }, { expect }) => {
+				const image =
+					"registry.cloudflare.com/some-account-id/app@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+				const imageRefs: Record<string, string> =
+					imageMap === "empty" ? {} : { app: image };
+				mockGetScript();
+				mockContainersAccount();
+				const requests = mockUploadVersion(false, 0);
+				const preparationRequests: unknown[] = [];
+				let namespaceListRequests = 0;
+				let applicationRequests = 0;
+				msw.use(
+					http.post("*/image-preparations", async ({ request }) => {
+						preparationRequests.push(await request.json());
+						return HttpResponse.json(
+							createFetchResult({
+								image,
+								status: ContainerImagePreparationStatus.READY,
+							})
+						);
+					}),
+					http.get(
+						"*/accounts/:accountId/workers/durable_objects/namespaces",
+						() => {
+							namespaceListRequests++;
+							return HttpResponse.json(
+								createFetchResult(
+									appState === "missing-namespace"
+										? []
+										: [
+												{
+													id: "existing-namespace",
+													class: "Sandbox",
+													script: "test-name",
+													use_sqlite: true,
+												},
+											]
+								)
+							);
+						}
+					),
+					http.get("*/applications/existing-namespace", () => {
+						if (appState === "missing-app" || appState === "forbidden") {
+							return HttpResponse.json(
+								createFetchResult(null, false, [
+									{
+										code: 1000,
+										message:
+											appState === "forbidden"
+												? "Forbidden"
+												: "Application not found",
+									},
+								]),
+								{ status: appState === "forbidden" ? 403 : 404 }
+							);
+						}
+						return HttpResponse.json(
+							createFetchResult({
+								id: "existing-namespace",
+								name: appState === "mismatch" ? "other-app" : "managed-app",
+								scheduling_policy: "durable_object",
+								durable_objects: { namespace_id: "existing-namespace" },
+							})
+						);
+					}),
+					http.patch("*/applications/:id", () => {
+						applicationRequests++;
+						return HttpResponse.json(createFetchResult({}));
+					}),
+					http.post("*/applications", () => {
+						applicationRequests++;
+						return HttpResponse.json(createFetchResult({}));
+					})
+				);
+
+				writeWranglerConfig(
+					{
+						name: "test-name",
+						main: "./index.js",
+						exports: {
+							Sandbox: {
+								type: "durable-object",
+								storage: "sqlite",
+								container: "managed-app",
+							},
+						},
+						containers: [
+							{
+								name: "managed-app",
+								scheduling_policy: "durable_object",
+								observability: { logs: { enabled: true } },
+								unsafe: {
+									configuration: { experimental_flags: ["test-flag"] },
+								},
+								...(imageMap === "populated" && { images: { app: { image } } }),
+							},
+						],
+					},
+					"./wrangler.json"
+				);
+				writeWorkerSource({ durableObjects: ["Sandbox"] });
+
+				if (imageMap === "empty" && appState !== "exists") {
+					const message =
+						appState === "mismatch"
+							? "does not match Container"
+							: appState === "forbidden"
+								? "Forbidden"
+								: "Run `wrangler deploy`";
+					await expect(
+						runWrangler("versions upload --config ./wrangler.json")
+					).rejects.toThrow(message);
+					expect(requests).toHaveLength(0);
+					expect(applicationRequests).toBe(0);
+					expect(preparationRequests).toHaveLength(0);
+					return;
+				}
+
+				await runWrangler("versions upload --config ./wrangler.json");
+
+				const metadata = await getMetadata(requests[requests.length - 1]);
+				expect(metadata.exports).toEqual({
+					Sandbox: {
+						type: "durable-object",
+						storage: "sqlite",
+						container: "managed-app",
+					},
+				});
+				expect(metadata.containers).toEqual([
+					{
+						name: "managed-app",
+						class_name: "Sandbox",
+						...(imageMap === "populated" && { images: imageRefs }),
+					},
+				]);
+				expect(metadata.bindings).toEqual([]);
+				expect(preparationRequests).toEqual(
+					imageMap === "empty" ? [] : [{ image }]
+				);
+				expect(metadata.migrations).toBeUndefined();
+				expect(namespaceListRequests).toBe(imageMap === "empty" ? 1 : 0);
+				expect(applicationRequests).toBe(0);
+			}
+		);
+
+		test.for(["namespace", "application"])(
+			"rejects an image-less Container missing its %s before preparing other images",
+			async (missing, { expect }) => {
+				const image =
+					"registry.cloudflare.com/some-account-id/tools@sha256:" +
+					"b".repeat(64);
+				mockGetScript();
+				mockContainersAccount();
+				const uploads = mockUploadVersion(false, 0);
+				let preparations = 0;
+				msw.use(
+					http.post("*/image-preparations", () => {
+						preparations++;
+						return HttpResponse.json(
+							createFetchResult({
+								image,
+								status: ContainerImagePreparationStatus.READY,
+							})
+						);
+					}),
+					http.get(
+						"*/accounts/:accountId/workers/durable_objects/namespaces",
+						() =>
+							HttpResponse.json(
+								createFetchResult(
+									missing === "namespace"
+										? []
+										: [
+												{
+													id: "sandbox-namespace",
+													class: "Sandbox",
+													script: "test-name",
+													use_sqlite: true,
+												},
+											]
+								)
+							)
+					),
+					http.get("*/applications/sandbox-namespace", () =>
+						HttpResponse.json(
+							createFetchResult(null, false, [
+								{ code: 1000, message: "Application not found" },
+							]),
+							{ status: 404 }
+						)
+					)
+				);
+				writeWranglerConfig({
+					name: "test-name",
+					main: "./index.js",
+					exports: {
+						Images: {
+							type: "durable-object",
+							storage: "sqlite",
+							container: "images-app",
+						},
+						Sandbox: {
+							type: "durable-object",
+							storage: "sqlite",
+							container: "sandbox-app",
+						},
+					},
+					containers: [
+						{
+							name: "images-app",
+							scheduling_policy: "durable_object",
+							images: { tools: { image } },
+						},
+						{ name: "sandbox-app", scheduling_policy: "durable_object" },
+					],
+				});
+				writeWorkerSource({ durableObjects: ["Images", "Sandbox"] });
+
+				await expect(runWrangler("versions upload")).rejects.toThrow(
+					"Run `wrangler deploy`"
+				);
+				expect(uploads).toHaveLength(0);
+				expect(preparations).toBe(0);
+			}
+		);
+
+		test("surfaces a friendly error when EWC rejects a binding to a not-yet-provisioned `exports` class (code 100406)", async ({
+			expect,
+		}) => {
+			// EWC returns 100406 (ErrActorBindingDependsOnExport) when a
+			// `versions upload` payload binds to a DO class that is declared in
+			// `exports` but not yet provisioned — reconciliation defers to
+			// deploy, so the namespace can't exist at upload time. The message
+			// is already actionable, so wrangler surfaces it verbatim.
+			mockGetScript();
+
+			const serverMessage =
+				"Durable Object binding 'ANOTHER' references class 'AnotherClass', which is declared in `exports` but not yet provisioned. Declarative `exports` are reconciled when the version is deployed, so the namespace must exist before a binding can reference it. Deploy this version to provision the class, or remove the binding and access the Durable Object via `ctx.exports.AnotherClass` until then.";
+
+			msw.use(
+				http.post(
+					`*/accounts/:accountId/workers/scripts/:scriptName/versions`,
+					() =>
+						HttpResponse.json(
+							createFetchResult(null, false, [
+								{
+									code: ACTOR_BINDING_DEPENDS_ON_EXPORT_CODE,
+									message: serverMessage,
+								},
+							]),
+							{ status: 403 }
+						),
+					{ once: true }
+				)
+			);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+				durable_objects: {
+					bindings: [{ name: "ANOTHER", class_name: "AnotherClass" }],
+				},
+				exports: {
+					AnotherClass: { type: "durable-object", storage: "sqlite" },
+				},
+			});
+			writeWorkerSource({ durableObjects: ["AnotherClass"] });
+
+			const rejection = runWrangler("versions upload");
+
+			// The EWC message is surfaced verbatim (binding/class names + both
+			// remediations), not the generic "request to the Cloudflare API
+			// failed" envelope.
+			await expect(rejection).rejects.toThrow(
+				/declared in `exports` but not yet provisioned/
+			);
+			await expect(rejection).rejects.toThrow(/ctx\.exports\.AnotherClass/);
+			await expect(rejection).rejects.not.toThrow(
+				/A request to the Cloudflare API .* failed/
+			);
+		});
+
+		test("does not remap unrelated EWC errors on `versions upload`", async ({
+			expect,
+		}) => {
+			// A different EWC error code must pass through untransformed — the
+			// 100406 branch falls through and the original APIError surfaces.
+			mockGetScript();
+
+			msw.use(
+				http.post(
+					`*/accounts/:accountId/workers/scripts/:scriptName/versions`,
+					() =>
+						HttpResponse.json(
+							createFetchResult(null, false, [
+								{ code: 10001, message: "some other API error" },
+							]),
+							// 400 so the upload isn't retried (retryOnAPIFailure
+							// retries 5xx and 429, not other 4xx), keeping this
+							// test fast.
+							{ status: 400 }
+						),
+					{ once: true }
+				)
+			);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+				durable_objects: {
+					bindings: [{ name: "ANOTHER", class_name: "AnotherClass" }],
+				},
+				exports: {
+					AnotherClass: { type: "durable-object", storage: "sqlite" },
+				},
+			});
+			writeWorkerSource({ durableObjects: ["AnotherClass"] });
+
+			const rejection = runWrangler("versions upload");
+			await expect(rejection).rejects.toThrow(
+				/A request to the Cloudflare API .* failed/
+			);
+			await expect(rejection).rejects.not.toThrow(
+				/declared in `exports` but not yet provisioned/
+			);
+		});
+	});
+
+	describe("workflow exports", () => {
+		beforeEach(() => {
+			setIsTTY(false);
+		});
+
+		test("sends workflow exports by name without provisioning the Workflow", async ({
+			expect,
+		}) => {
+			mockGetScript();
+			const requests = mockUploadVersion(false, 0);
+			let workflowPuts = 0;
+			msw.use(
+				http.get("*/accounts/:accountId/workflows/:workflowName", () =>
+					HttpResponse.json(
+						createFetchResult(null, false, [
+							{ code: 10200, message: "Workflow not found" },
+						]),
+						{ status: 404 }
+					)
+				),
+				http.put("*/accounts/:accountId/workflows/:workflowName", () => {
+					workflowPuts++;
+					return HttpResponse.json(createFetchResult({}));
+				})
+			);
+
+			writeWranglerConfig(
+				{
+					name: "test-name",
+					main: "./index.js",
+					exports: {
+						MyWorkflow: {
+							type: "workflow",
+							name: "my-workflow",
+							limits: { steps: 10 },
+						},
+					},
+				},
+				"./wrangler.json"
+			);
+			writeWorkerSource();
+
+			await runWrangler("versions upload --config ./wrangler.json");
+
+			const metadata = await getMetadata(requests[requests.length - 1]);
+			expect(metadata.exports).toEqual({
+				MyWorkflow: { type: "workflow", name: "my-workflow" },
+			});
+			expect(workflowPuts).toBe(0);
+		});
+
+		test("rejects a binding and an export that declare the same Workflow with different classes", async ({
+			expect,
+		}) => {
+			writeWranglerConfig(
+				{
+					name: "test-name",
+					main: "./index.js",
+					workflows: [
+						{
+							binding: "WORKFLOW",
+							name: "my-workflow",
+							class_name: "OldWorkflow",
+						},
+					],
+					exports: {
+						MyWorkflow: { type: "workflow", name: "my-workflow" },
+					},
+				},
+				"./wrangler.json"
+			);
+			fs.writeFileSync(
+				"index.js",
+				dedent`
+					import { WorkflowEntrypoint } from "cloudflare:workers";
+					export default {};
+					export class OldWorkflow extends WorkflowEntrypoint {}
+					export class MyWorkflow extends WorkflowEntrypoint {}
+				`
+			);
+
+			await expect(
+				runWrangler("versions upload --config ./wrangler.json")
+			).rejects.toThrow(
+				'"workflows[0]" and "exports.MyWorkflow" both declare the Workflow "my-workflow", but with different classes ("OldWorkflow" and "MyWorkflow").'
+			);
 		});
 	});
 
@@ -2010,16 +3133,158 @@ describe("versions upload", () => {
 			expect(std.out).toContain("Uploaded test-name");
 		});
 	});
+
+	describe("package_dependencies", () => {
+		beforeEach(() => {
+			setIsTTY(false);
+		});
+
+		test("should include package_dependencies in upload metadata", async ({
+			expect,
+		}) => {
+			mockGetScript();
+			const requests = mockUploadVersion(false, 0);
+
+			// Create a resolvable public package in node_modules
+			const pkgPath = path.join(process.cwd(), "node_modules", "test-dep");
+			fs.mkdirSync(pkgPath, { recursive: true });
+			fs.writeFileSync(path.join(pkgPath, "index.js"), "module.exports = {}");
+			fs.writeFileSync(
+				path.join(pkgPath, "package.json"),
+				JSON.stringify({ name: "test-dep", version: "1.2.3" })
+			);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+			});
+			// Write package.json with the dependency
+			fs.writeFileSync(
+				"package.json",
+				JSON.stringify({
+					name: "test-project",
+					dependencies: {
+						"test-dep": "^1.0.0",
+					},
+				})
+			);
+			writeWorkerSource();
+
+			await runWrangler("versions upload");
+
+			const metadata = await getMetadata(requests[0]);
+			expect(metadata.package_dependencies).toEqual([
+				{
+					name: "test-dep",
+					packageJsonVersion: "^1.0.0",
+					installedVersion: "1.2.3",
+				},
+			]);
+		});
+
+		test("should omit package_dependencies when dependencies_instrumentation.enabled is false", async ({
+			expect,
+		}) => {
+			mockGetScript();
+			const requests = mockUploadVersion(false, 0);
+
+			// Create a resolvable public package in node_modules
+			const pkgPath = path.join(process.cwd(), "node_modules", "test-dep");
+			fs.mkdirSync(pkgPath, { recursive: true });
+			fs.writeFileSync(path.join(pkgPath, "index.js"), "module.exports = {}");
+			fs.writeFileSync(
+				path.join(pkgPath, "package.json"),
+				JSON.stringify({ name: "test-dep", version: "1.2.3" })
+			);
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+				dependencies_instrumentation: { enabled: false },
+			});
+			fs.writeFileSync(
+				"package.json",
+				JSON.stringify({
+					name: "test-project",
+					dependencies: {
+						"test-dep": "^1.0.0",
+					},
+				})
+			);
+			writeWorkerSource();
+
+			await runWrangler("versions upload");
+
+			const metadata = await getMetadata(requests[0]);
+			expect(metadata.package_dependencies).toBeUndefined();
+		});
+
+		test("should exclude packages matching exclude_packages patterns from upload metadata", async ({
+			expect,
+		}) => {
+			mockGetScript();
+			const requests = mockUploadVersion(false, 0);
+
+			// Create two resolvable packages in node_modules
+			for (const [name, version] of [
+				["@internal/secret", "1.0.0"],
+				["public-lib", "2.0.0"],
+			] as const) {
+				const pkgPath = path.join(process.cwd(), "node_modules", name);
+				fs.mkdirSync(pkgPath, { recursive: true });
+				fs.writeFileSync(path.join(pkgPath, "index.js"), "module.exports = {}");
+				fs.writeFileSync(
+					path.join(pkgPath, "package.json"),
+					JSON.stringify({ name, version })
+				);
+			}
+
+			writeWranglerConfig({
+				name: "test-name",
+				main: "./index.js",
+				dependencies_instrumentation: {
+					enabled: true,
+					exclude_packages: ["@internal/*"],
+				},
+			});
+			fs.writeFileSync(
+				"package.json",
+				JSON.stringify({
+					name: "test-project",
+					dependencies: {
+						"@internal/secret": "^1.0.0",
+						"public-lib": "^2.0.0",
+					},
+				})
+			);
+			writeWorkerSource();
+
+			await runWrangler("versions upload");
+
+			const metadata = await getMetadata(requests[0]);
+			expect(metadata.package_dependencies).toEqual([
+				{
+					name: "public-lib",
+					packageJsonVersion: "^2.0.0",
+					installedVersion: "2.0.0",
+				},
+			]);
+		});
+	});
 });
 
 const mockExecSync = vi.fn();
 
+// At the top level because `vi.mock` is hoisted to module scope regardless of
+// where it is written, so nesting it in the `describe` misrepresented its
+// scope: it mocks `child_process` for the whole file, not just these tests.
+vi.mock("child_process", () => ({
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any -- vi.mock callback needs untyped rest args to forward to mock
+	execSync: (...args: any[]) => mockExecSync(...args),
+}));
+
 describe("generatePreviewAlias", () => {
 	mockConsoleMethods();
-	vi.mock("child_process", () => ({
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any -- vi.mock callback needs untyped rest args to forward to mock
-		execSync: (...args: any[]) => mockExecSync(...args),
-	}));
 
 	beforeEach(() => {
 		mockExecSync.mockReset();

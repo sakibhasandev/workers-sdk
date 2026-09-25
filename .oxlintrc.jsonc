@@ -52,6 +52,7 @@
 		"workers-sdk/no-unsafe-command-execution": "error",
 		"workers-sdk/no-direct-recursive-rm": "error",
 		"workers-sdk/require-description-when-disabling": "error",
+		"@typescript-eslint/no-deprecated": "error",
 
 		"no-unused-vars": [
 			"error",
@@ -81,6 +82,10 @@
 						"name": "vitest",
 						"importNames": ["expect"],
 						"message": "Import 'expect' from the test context instead of 'vitest' for concurrency safety. Use: test('name', ({ expect }) => { ... })",
+					},
+					{
+						"name": "am-i-vibing",
+						"message": "Use `detectAgent()` from `src/utils/detect-agent` instead.",
 					},
 				],
 			},
@@ -128,7 +133,6 @@
 		{
 			"files": ["packages/miniflare/**"],
 			"rules": {
-				"curly": "off",
 				"@typescript-eslint/no-explicit-any": "off",
 				"@typescript-eslint/ban-ts-comment": "off",
 				"@typescript-eslint/no-floating-promises": "off",
@@ -165,6 +169,24 @@
 			"files": ["packages/miniflare/src/workers/**/*.ts"],
 			"rules": {
 				"no-console": "off",
+				"no-restricted-imports": [
+					"error",
+					{
+						"paths": [
+							{
+								"name": "zod",
+								"allowTypeImports": true,
+								"message": "Import runtime values from `miniflare:zod` instead.",
+							},
+						],
+					},
+				],
+			},
+		},
+		{
+			"files": ["packages/miniflare/src/workers/shared/zod.worker.ts"],
+			"rules": {
+				"no-restricted-imports": "off",
 			},
 		},
 		// Relax some rules for test & script files

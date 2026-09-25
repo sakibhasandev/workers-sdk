@@ -1,7 +1,9 @@
+import { setTimeout as sleep } from "node:timers/promises";
+import { prepareContainerImagesForDev } from "@cloudflare/containers-shared";
 import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import dedent from "ts-dedent";
 import { fetch } from "undici";
-import { describe, it } from "vitest";
+import { beforeEach, describe, it, vi } from "vitest";
 import { MultiworkerRuntimeController } from "../../../api/startDevWorker/MultiworkerRuntimeController";
 import { urlFromParts } from "../../../api/startDevWorker/utils";
 import { FakeBus } from "../../helpers/fake-bus";
@@ -9,6 +11,12 @@ import { mockConsoleMethods } from "../../helpers/mock-console";
 import { useTeardown } from "../../helpers/teardown";
 import { unusable } from "../../helpers/unusable";
 import type { Bundle, StartDevWorkerOptions } from "../../../api";
+
+vi.mock("@cloudflare/containers-shared", async (importOriginal) => {
+	const original =
+		await importOriginal<typeof import("@cloudflare/containers-shared")>();
+	return { ...original, prepareContainerImagesForDev: vi.fn() };
+});
 
 function makeEsbuildBundle(testBundle: string): Bundle {
 	return {
@@ -48,10 +56,204 @@ function configDefaults(
 	};
 }
 
+/**
+ * Miniflare's rate limiter buckets requests into fixed windows aligned to the
+ * wall clock and clears every counter on rollover, so a burst that straddles a
+ * boundary has its count reset part way through. Wait out the tail of the
+ * current window so the burst below is guaranteed to run inside a single one.
+ */
+async function waitForFreshRateLimitWindow(periodSeconds: number) {
+	const periodMs = periodSeconds * 1000;
+	const remainingMs = periodMs - (Date.now() % periodMs);
+	if (remainingMs < 10_000) {
+		await sleep(remainingMs + 50);
+	}
+}
+
 describe("MultiworkerRuntimeController", () => {
 	mockConsoleMethods();
 	runInTempDir();
 	const teardown = useTeardown();
+
+	beforeEach(() => {
+		vi.mocked(prepareContainerImagesForDev).mockReset();
+		vi.mocked(prepareContainerImagesForDev).mockResolvedValue({
+			aborted: false,
+		});
+	});
+
+	it("tracks image-free Container preparation independently for each Worker", async ({
+		expect,
+	}) => {
+		const bus = new FakeBus();
+		const controller = new MultiworkerRuntimeController(bus, 2);
+		teardown(() => controller.teardown());
+		function workerEvent(name: string, enabled: boolean) {
+			return {
+				type: "bundleComplete" as const,
+				bundle: makeEsbuildBundle("export default {}"),
+				config: configDefaults({
+					name,
+					containerDevPlan: {
+						containerOptions: [],
+						containerRuntimeOptions: new Map([["Probe", {}]]),
+					},
+					dev: {
+						persist: "./persist",
+						remote: false,
+						enableContainers: enabled,
+						multiworkerPrimary: name === "worker-a",
+					},
+				}),
+			};
+		}
+		let reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete(workerEvent("worker-a", true));
+		controller.onBundleComplete(workerEvent("worker-b", false));
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(1);
+
+		reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete(workerEvent("worker-b", true));
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(2);
+		for (const [args] of vi.mocked(prepareContainerImagesForDev).mock.calls) {
+			expect(args.containerOptions).toEqual([]);
+		}
+
+		reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete(workerEvent("worker-a", true));
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(2);
+	});
+
+	it("tracks successful image preparation plans per Worker", async ({
+		expect,
+	}) => {
+		const bus = new FakeBus();
+		const controller = new MultiworkerRuntimeController(bus, 2);
+		teardown(async () => {
+			// Image preparation is mocked, but teardown's Container cleanup is not.
+			controller.containerImageTagsSeen.clear();
+			await controller.teardown();
+		});
+
+		function makeWorkerConfig(
+			name: string,
+			primary: boolean,
+			imageTag: string,
+			imageUri?: string
+		): StartDevWorkerOptions {
+			return configDefaults({
+				name,
+				containerDevPlan:
+					imageUri === undefined
+						? undefined
+						: {
+								containerOptions: [
+									{
+										image_uri: imageUri,
+										class_name: "SharedContainer",
+										image_tag: imageTag,
+									},
+								],
+								containerRuntimeOptions: new Map(),
+							},
+				dev: {
+					persist: "./persist",
+					remote: false,
+					enableContainers: true,
+					multiworkerPrimary: primary,
+					containerBuildId: "shared-build-id",
+					dockerPath: "docker",
+				},
+			});
+		}
+
+		const firstTag = "cloudflare-dev/sharedcontainer-app:worker-a";
+		const secondTag = "cloudflare-dev/sharedcontainer-app:worker-b";
+		const firstImageUri = "example.invalid/image@sha256:1234";
+		const replacementImageUri = "example.invalid/image@sha256:5678";
+		const firstConfig = makeWorkerConfig(
+			"worker-a",
+			true,
+			firstTag,
+			firstImageUri
+		);
+		const secondConfig = makeWorkerConfig(
+			"worker-b",
+			false,
+			secondTag,
+			firstImageUri
+		);
+
+		let reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete({
+			type: "bundleComplete",
+			config: firstConfig,
+			bundle: makeEsbuildBundle("export default {}"),
+		});
+		controller.onBundleComplete({
+			type: "bundleComplete",
+			config: secondConfig,
+			bundle: makeEsbuildBundle("export default {}"),
+		});
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(2);
+
+		reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete({
+			type: "bundleComplete",
+			config: secondConfig,
+			bundle: makeEsbuildBundle("export default {}"),
+		});
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(2);
+
+		reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete({
+			type: "bundleComplete",
+			config: makeWorkerConfig("worker-a", true, firstTag, replacementImageUri),
+			bundle: makeEsbuildBundle("export default {}"),
+		});
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(3);
+		const replacementImage = vi.mocked(prepareContainerImagesForDev).mock
+			.calls[2][0].containerOptions[0];
+		if (!("image_uri" in replacementImage)) {
+			throw new Error("Expected a registry image");
+		}
+		expect(replacementImage.image_uri).toBe(replacementImageUri);
+
+		reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete({
+			type: "bundleComplete",
+			config: makeWorkerConfig("worker-a", true, firstTag),
+			bundle: makeEsbuildBundle("export default {}"),
+		});
+		await reloadComplete;
+
+		vi.mocked(prepareContainerImagesForDev).mockResolvedValueOnce({
+			aborted: true,
+		});
+		reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete({
+			type: "bundleComplete",
+			config: makeWorkerConfig("worker-a", true, firstTag, replacementImageUri),
+			bundle: makeEsbuildBundle("export default {}"),
+		});
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(4);
+
+		reloadComplete = bus.waitFor("reloadComplete");
+		controller.onBundleComplete({
+			type: "bundleComplete",
+			config: makeWorkerConfig("worker-a", true, firstTag, replacementImageUri),
+			bundle: makeEsbuildBundle("export default {}"),
+		});
+		await reloadComplete;
+		expect(prepareContainerImagesForDev).toHaveBeenCalledTimes(5);
+	});
 
 	describe("stale bundle bail-out", () => {
 		it("should not bail out when different workers submit bundles", async ({
@@ -108,6 +310,92 @@ describe("MultiworkerRuntimeController", () => {
 			const event = await bus.waitFor("reloadComplete");
 			const res = await fetch(urlFromParts(event.proxyData.userWorkerUrl));
 			expect(await res.text()).toContain("hello from");
+		});
+
+		it("supports ratelimit bindings on secondary workers", async ({
+			expect,
+		}) => {
+			const bus = new FakeBus();
+			const controller = new MultiworkerRuntimeController(bus, 2);
+			teardown(() => controller.teardown());
+
+			// The primary forwards every request to the secondary worker via a
+			// service binding; the secondary owns the rate-limit binding. The
+			// runtime controller used to delete ratelimits from secondary workers
+			// to work around a Miniflare crash — this exercises that path
+			// end-to-end to guard against a regression.
+			const primaryConfig = configDefaults({
+				name: "worker-a",
+				bindings: { DOWNSTREAM: { type: "service", service: "worker-b" } },
+				dev: {
+					persist: "./persist",
+					remote: false,
+					multiworkerPrimary: true,
+				},
+			});
+			const secondaryConfig = configDefaults({
+				name: "worker-b",
+				bindings: {
+					RATE: {
+						type: "ratelimit",
+						namespace_id: "b-namespace",
+						simple: { limit: 2, period: 60 },
+					},
+				},
+				dev: {
+					persist: "./persist",
+					remote: false,
+					multiworkerPrimary: false,
+				},
+			});
+
+			const primaryBundle = makeEsbuildBundle(dedent /*javascript*/ `
+				export default {
+					fetch(request, env, ctx) {
+						return env.DOWNSTREAM.fetch(request);
+					}
+				}
+			`);
+			const secondaryBundle = makeEsbuildBundle(dedent /*javascript*/ `
+				export default {
+					async fetch(request, env, ctx) {
+						const { success } = await env.RATE.limit({ key: "k" });
+						return new Response(success ? "ok" : "limited", {
+							status: success ? 200 : 429,
+						});
+					}
+				}
+			`);
+
+			controller.onBundleStart({
+				type: "bundleStart",
+				config: primaryConfig,
+			});
+			controller.onBundleComplete({
+				type: "bundleComplete",
+				config: primaryConfig,
+				bundle: primaryBundle,
+			});
+			controller.onBundleStart({
+				type: "bundleStart",
+				config: secondaryConfig,
+			});
+			controller.onBundleComplete({
+				type: "bundleComplete",
+				config: secondaryConfig,
+				bundle: secondaryBundle,
+			});
+
+			const event = await bus.waitFor("reloadComplete");
+			const url = urlFromParts(event.proxyData.userWorkerUrl);
+
+			await waitForFreshRateLimitWindow(60);
+
+			// limit is 2, so the first two requests succeed and the third is
+			// rate limited — proving the secondary's binding survived the merge.
+			expect((await fetch(url)).status).toBe(200);
+			expect((await fetch(url)).status).toBe(200);
+			expect((await fetch(url)).status).toBe(429);
 		});
 
 		it("should skip stale bundles for the same worker during rapid updates", async ({

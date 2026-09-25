@@ -2,8 +2,10 @@ import { fetchListResult, fetchResult } from "../cfetch";
 import { requireAuth } from "../user";
 import type {
 	AiSearchInstance,
-	AiSearchMessage,
+	AiSearchJob,
+	AiSearchJobLog,
 	AiSearchNamespace,
+	AiSearchSearchRequest,
 	AiSearchSearchResponse,
 	AiSearchStats,
 	AiSearchToken,
@@ -121,13 +123,7 @@ export async function searchInstance(
 	config: Config,
 	namespace: string,
 	name: string,
-	body: {
-		messages: AiSearchMessage[];
-		filters?: Record<string, string>;
-		max_num_results?: number;
-		score_threshold?: number;
-		reranking?: boolean;
-	}
+	body: AiSearchSearchRequest
 ): Promise<AiSearchSearchResponse> {
 	const accountId = await requireAuth(config);
 	return await fetchResult<AiSearchSearchResponse>(
@@ -209,6 +205,97 @@ export async function deleteNamespace(
 	await fetchResult<unknown>(config, `${baseNamespaceUrl(accountId)}/${name}`, {
 		method: "DELETE",
 	});
+}
+
+// ── Jobs ─────────────────────────────────────────────────────────────────────
+
+function baseJobUrl(
+	accountId: string,
+	namespace: string,
+	instance: string
+): string {
+	return `${baseInstanceUrl(accountId, namespace)}/${instance}/jobs`;
+}
+
+export async function listJobs(
+	config: Config,
+	namespace: string,
+	instance: string,
+	queryParams?: URLSearchParams
+): Promise<AiSearchJob[]> {
+	const accountId = await requireAuth(config);
+	return await fetchResult<AiSearchJob[]>(
+		config,
+		baseJobUrl(accountId, namespace, instance),
+		{ method: "GET" },
+		queryParams
+	);
+}
+
+export async function createJob(
+	config: Config,
+	namespace: string,
+	instance: string,
+	body: { description?: string }
+): Promise<AiSearchJob> {
+	const accountId = await requireAuth(config);
+	return await fetchResult<AiSearchJob>(
+		config,
+		baseJobUrl(accountId, namespace, instance),
+		{
+			method: "POST",
+			headers: { "content-type": jsonContentType },
+			body: JSON.stringify(body),
+		}
+	);
+}
+
+export async function getJob(
+	config: Config,
+	namespace: string,
+	instance: string,
+	jobId: string
+): Promise<AiSearchJob> {
+	const accountId = await requireAuth(config);
+	return await fetchResult<AiSearchJob>(
+		config,
+		`${baseJobUrl(accountId, namespace, instance)}/${jobId}`,
+		{ method: "GET" }
+	);
+}
+
+export async function cancelJob(
+	config: Config,
+	namespace: string,
+	instance: string,
+	jobId: string
+): Promise<AiSearchJob> {
+	const accountId = await requireAuth(config);
+	return await fetchResult<AiSearchJob>(
+		config,
+		`${baseJobUrl(accountId, namespace, instance)}/${jobId}`,
+		{
+			method: "PATCH",
+			headers: { "content-type": jsonContentType },
+			body: JSON.stringify({ action: "cancel" }),
+		}
+	);
+}
+
+export async function listJobLogs(
+	config: Config,
+	namespace: string,
+	instance: string,
+	jobId: string,
+	queryParams?: URLSearchParams
+): Promise<AiSearchJobLog[]> {
+	const accountId = await requireAuth(config);
+	return await fetchResult<AiSearchJobLog[]>(
+		config,
+		`${baseJobUrl(accountId, namespace, instance)}/${jobId}/logs`,
+		{ method: "GET" },
+		queryParams
+	);
 }
 
 // ── Tokens ─────────────────────────────────────────────────────────────────────

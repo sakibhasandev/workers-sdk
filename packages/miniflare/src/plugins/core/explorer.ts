@@ -1,4 +1,5 @@
-import assert from "node:assert";
+import { createHash } from "node:crypto";
+import path from "node:path";
 import SCRIPT_DO_WRAPPER from "worker:core/do-wrapper";
 import SCRIPT_LOCAL_EXPLORER from "worker:local-explorer/explorer";
 import {
@@ -8,19 +9,30 @@ import {
 	type Worker_Module,
 } from "../../runtime";
 import { CoreBindings } from "../../workers";
-import { normaliseDurableObject } from "../do";
+import { D1_LOCAL_ENTRY_SERVICE_NAME } from "../../workers/d1/constants";
+import { KV_LOCAL_ENTRY_SERVICE_NAME } from "../../workers/kv/constants";
+import { R2_LOCAL_ENTRY_SERVICE_NAME } from "../../workers/r2/constants";
 import {
-	namespaceEntries,
+	getEnvBindingsOfType,
+	getTriggersOfType,
+	getRemoteProxyConnectionString,
+	getStorageService,
 	WORKER_BINDING_SERVICE_LOOPBACK,
 	SERVICE_DEV_REGISTRY_PROXY,
 } from "../shared";
 import {
+	EMAIL_STORE_SERVICE_NAME,
 	getUserServiceName,
 	LOCAL_EXPLORER_DISK,
+	OBSERVABILITY_COLLECTOR_SERVICE_NAME,
 	SERVICE_LOCAL_EXPLORER,
 } from "./constants";
-import type { PluginWorkerOptions } from "..";
-import type { DurableObjectClassNames, WorkflowOption } from "../shared";
+import type {
+	DurableObjectClassNames,
+	ParsedInstanceOptions,
+	ParsedWorkerOptions,
+	WorkflowOption,
+} from "../shared";
 import type {
 	BindingIdMap,
 	ExplorerWorkerOpts,
@@ -39,6 +51,12 @@ export interface ExplorerServicesOptions {
 		enabled: boolean;
 		deviceId?: string;
 	};
+	/** Whether local observability is enabled — gates the collector binding. */
+	observabilityEnabled: boolean;
+	sharedOptions: Pick<
+		ParsedInstanceOptions,
+		"resourcePersistencePath" | "unsafeEnableSharedStorage"
+	>;
 }
 
 /**
@@ -55,11 +73,19 @@ export function getExplorerServices(
 		workerNames,
 		explorerWorkerOpts,
 		telemetry,
+		observabilityEnabled,
+		sharedOptions,
 	} = options;
+	const workflowProxyBindings = proxyBindings.filter((binding) =>
+		binding.name?.startsWith(
+			`${CoreBindings.DURABLE_OBJECT_NAMESPACE_PROXY}:workflows:`
+		)
+	);
 
 	const explorerBindings: Worker_Binding[] = [
-		// Gives explorer access to all user resource bindings
-		...proxyBindings,
+		// Workflow creation still uses the configured binding API. D1, KV and R2
+		// operations use the dedicated internal storage service bindings below.
+		...workflowProxyBindings,
 		{
 			name: CoreBindings.JSON_LOCAL_EXPLORER_BINDING_MAP,
 			json: JSON.stringify(bindingIdMap),
@@ -77,6 +103,30 @@ export function getExplorerServices(
 			name: CoreBindings.JSON_LOCAL_EXPLORER_WORKER_NAMES,
 			json: JSON.stringify(workerNames),
 		},
+		{
+			name: CoreBindings.SERVICE_D1,
+			service: getStorageService(
+				D1_LOCAL_ENTRY_SERVICE_NAME,
+				{},
+				sharedOptions
+			),
+		},
+		{
+			name: CoreBindings.SERVICE_KV,
+			service: getStorageService(
+				KV_LOCAL_ENTRY_SERVICE_NAME,
+				{},
+				sharedOptions
+			),
+		},
+		{
+			name: CoreBindings.SERVICE_R2,
+			service: getStorageService(
+				R2_LOCAL_ENTRY_SERVICE_NAME,
+				{},
+				sharedOptions
+			),
+		},
 		// Per-worker resource bindings for the /local/workers endpoint
 		{
 			name: CoreBindings.JSON_EXPLORER_WORKER_OPTS,
@@ -91,7 +141,30 @@ export function getExplorerServices(
 			// workerdDebugPort bindings don't have any additional configuration
 			workerdDebugPort: kVoid,
 		},
+		// The email store service is registered alongside the explorer (see the
+		// core plugin's getServices), so it's always available to read from here.
+		{
+			name: CoreBindings.SERVICE_EMAIL_STORE,
+			service: { name: EMAIL_STORE_SERVICE_NAME },
+		},
+		// Direct service bindings to each user worker in this instance. These let
+		// the explorer invoke a worker's handlers (e.g. `email()`.
+		...workerNames.map((name) => ({
+			name: `${CoreBindings.SERVICE_EXPLORER_USER_WORKER_PREFIX}${name}`,
+			service: { name: getUserServiceName(name) },
+		})),
 	];
+
+	// Only bind the observability collector when observability is enabled —
+	// otherwise the service doesn't exist and workerd would fail to start.
+	if (observabilityEnabled) {
+		explorerBindings.push({
+			name: CoreBindings.SERVICE_OBSERVABILITY_COLLECTOR,
+			service: {
+				name: getUserServiceName(OBSERVABILITY_COLLECTOR_SERVICE_NAME),
+			},
+		});
+	}
 
 	if (hasDurableObjects) {
 		// Add Durable Object namespace bindings for the explorer
@@ -133,7 +206,7 @@ export function getExplorerServices(
 			name: SERVICE_LOCAL_EXPLORER,
 			worker: {
 				compatibilityDate: "2026-01-01",
-				compatibilityFlags: ["nodejs_compat"],
+				compatibilityFlags: ["nodejs_compat", "service_binding_extra_handlers"],
 				modules: [
 					{
 						name: "explorer.worker.js",
@@ -147,10 +220,12 @@ export function getExplorerServices(
 }
 
 /**
- * Build binding ID map from proxyBindings, durableObjectClassNames, and workflow options.
+ * Build binding ID map from worker options, proxy bindings, Durable Object
+ * class names, and workflow options.
  * Maps resource IDs to binding information for the local explorer.
  */
 export function constructExplorerBindingMap(
+	allWorkerOpts: ParsedWorkerOptions[],
 	proxyBindings: Worker_Binding[],
 	durableObjectClassNames: DurableObjectClassNames,
 	workflowOptions?: Map<string, WorkflowOption>
@@ -163,47 +238,38 @@ export function constructExplorerBindingMap(
 		workflows: {},
 	};
 
-	for (const binding of proxyBindings) {
-		// D1 bindings: name = "MINIFLARE_PROXY:d1:worker-*:BINDING", wrapped.innerBindings[0].service.name = "d1:db:ID"
-		if (
-			binding.name?.startsWith(
-				`${CoreBindings.DURABLE_OBJECT_NAMESPACE_PROXY}:d1:`
-			) &&
-			"wrapped" in binding
-		) {
-			const [innerBinding] = binding.wrapped?.innerBindings ?? [];
-			assert(innerBinding && "service" in innerBinding);
-
-			const databaseId = innerBinding.service?.name?.replace(/^d1:db:/, "");
-			assert(databaseId);
-
-			IDToBindingName.d1[databaseId] = binding.name;
+	for (const workerOpts of allWorkerOpts) {
+		for (const [bindingName, binding] of getEnvBindingsOfType(
+			workerOpts.config,
+			"d1"
+		)) {
+			if (
+				getRemoteProxyConnectionString(binding, workerOpts.dev) === undefined
+			) {
+				IDToBindingName.d1[binding.id] = bindingName;
+			}
 		}
 
-		// KV bindings: name = "MINIFLARE_PROXY:kv:worker:BINDING", kvNamespace.name = "kv:ns:ID"
-		if (
-			binding.name?.startsWith(
-				`${CoreBindings.DURABLE_OBJECT_NAMESPACE_PROXY}:kv:`
-			) &&
-			"kvNamespace" in binding &&
-			binding.kvNamespace?.name?.startsWith("kv:ns:")
-		) {
-			// Extract ID from service name "kv:ns:ID"
-			const namespaceId = binding.kvNamespace.name.replace(/^kv:ns:/, "");
-			IDToBindingName.kv[namespaceId] = binding.name;
+		for (const [bindingName, binding] of getEnvBindingsOfType(
+			workerOpts.config,
+			"kv"
+		)) {
+			if (
+				getRemoteProxyConnectionString(binding, workerOpts.dev) === undefined
+			) {
+				IDToBindingName.kv[binding.id] = bindingName;
+			}
 		}
 
-		// R2 bindings: name = "MINIFLARE_PROXY:r2:worker:BINDING", r2Bucket.name = "r2:bucket:ID"
-		if (
-			binding.name?.startsWith(
-				`${CoreBindings.DURABLE_OBJECT_NAMESPACE_PROXY}:r2:`
-			) &&
-			"r2Bucket" in binding &&
-			binding.r2Bucket?.name?.startsWith("r2:bucket:")
-		) {
-			// Extract bucket name from service name "r2:bucket:BUCKET_NAME"
-			const bucketName = binding.r2Bucket.name.replace(/^r2:bucket:/, "");
-			IDToBindingName.r2[bucketName] = binding.name;
+		for (const [bindingName, binding] of getEnvBindingsOfType(
+			workerOpts.config,
+			"r2"
+		)) {
+			if (
+				getRemoteProxyConnectionString(binding, workerOpts.dev) === undefined
+			) {
+				IDToBindingName.r2[binding.name] = bindingName;
+			}
 		}
 	}
 
@@ -279,13 +345,13 @@ export function constructExplorerBindingMap(
  * Maps worker names to their resource bindings with IDs.
  */
 export function constructExplorerWorkerOpts(
-	allWorkerOpts: PluginWorkerOptions[],
+	allWorkerOpts: ParsedWorkerOptions[],
 	durableObjectClassNames: DurableObjectClassNames
 ): ExplorerWorkerOpts {
 	const result: ExplorerWorkerOpts = {};
 
 	for (const workerOpts of allWorkerOpts) {
-		const workerName = workerOpts.core.name;
+		const workerName = workerOpts.config.name;
 		if (!workerName) {
 			continue;
 		}
@@ -295,62 +361,104 @@ export function constructExplorerWorkerOpts(
 			r2: [],
 			do: [],
 			workflows: [],
+			sendEmail: [],
 		};
 
-		for (const [bindingName, ns] of namespaceEntries(
-			workerOpts.kv.kvNamespaces
+		for (const [bindingName, binding] of getEnvBindingsOfType(
+			workerOpts.config,
+			"kv"
 		)) {
-			bindings.kv.push({ id: ns.id, bindingName });
+			bindings.kv.push({ id: binding.id ?? bindingName, bindingName });
 		}
 
-		for (const [bindingName, db] of namespaceEntries(
-			workerOpts.d1.d1Databases
+		for (const [bindingName, binding] of getEnvBindingsOfType(
+			workerOpts.config,
+			"d1"
 		)) {
-			bindings.d1.push({ id: db.id, bindingName });
+			bindings.d1.push({ id: binding.id ?? bindingName, bindingName });
 		}
 
-		for (const [bindingName, bucket] of namespaceEntries(
-			workerOpts.r2.r2Buckets
+		for (const [bindingName, binding] of getEnvBindingsOfType(
+			workerOpts.config,
+			"r2"
 		)) {
-			bindings.r2.push({ id: bucket.id, bindingName });
+			bindings.r2.push({ id: binding.name ?? bindingName, bindingName });
 		}
 
-		for (const [bindingName, designator] of Object.entries(
-			workerOpts.do.durableObjects ?? {}
+		for (const [bindingName, binding] of getEnvBindingsOfType(
+			workerOpts.config,
+			"durable-object"
 		)) {
-			const doInfo = normaliseDurableObject(designator);
-			const scriptName = doInfo.scriptName ?? workerName;
+			const className = binding.exportName;
+			const scriptName = binding.worker;
 			const serviceName = getUserServiceName(scriptName);
-			const uniqueKey = `${scriptName}-${doInfo.className}`;
+			const uniqueKey = `${scriptName}-${className}`;
 
-			const classMap = durableObjectClassNames.get(serviceName);
-			const classInfo = classMap?.get(doInfo.className);
-			const useSqlite = classInfo?.enableSql ?? false;
+			const useSqlite =
+				durableObjectClassNames.get(serviceName)?.get(className)?.enableSql ??
+				false;
 
 			bindings.do.push({
 				id: uniqueKey,
 				bindingName,
-				className: doInfo.className,
+				className,
 				scriptName,
 				useSqlite,
 			});
 		}
 
-		for (const [bindingName, workflow] of Object.entries(
-			workerOpts.workflows.workflows ?? {}
-		)) {
+		for (const [bindingName, workflow] of getEnvBindingsOfType(
+			workerOpts.config,
+			"workflow"
+		) ?? {}) {
 			bindings.workflows.push({
 				id: workflow.name,
 				bindingName,
-				className: workflow.className,
-				scriptName: workflow.scriptName ?? workerName,
+				className: workflow.exportName,
+				scriptName: workflow.worker ?? workerName,
 			});
 		}
 
-		result[workerName] = bindings;
+		for (const [bindingName] of getEnvBindingsOfType(
+			workerOpts.config,
+			"send-email"
+		) ?? {}) {
+			bindings.sendEmail.push({ bindingName });
+		}
+
+		result[workerName] = {
+			bindings,
+			triggers: {
+				crons: getTriggersOfType(workerOpts.config, "scheduled").map(
+					(trigger) => trigger.schedule
+				),
+			},
+			persistenceScope: getPersistenceScope(workerOpts.dev.rootPath),
+		};
 	}
 
 	return result;
+}
+
+/**
+ * Derive a project-scoped browser persistence key without sending the project
+ * root itself to the Local Explorer UI. Normalising here keeps equivalent
+ * direct structured Miniflare paths aligned with paths from the V4 converter.
+ *
+ * Keep the domain/version prefix stable: changing it intentionally invalidates
+ * persisted Local Explorer state. Return no scope if a future caller cannot
+ * provide a usable project root, allowing the UI to fall back safely.
+ */
+export function getPersistenceScope(
+	projectRoot: string | undefined
+): string | undefined {
+	if (!projectRoot) {
+		return undefined;
+	}
+
+	return createHash("sha256")
+		.update(`local-explorer:persistence-scope:v1\0${path.resolve(projectRoot)}`)
+		.digest("hex");
 }
 
 /**

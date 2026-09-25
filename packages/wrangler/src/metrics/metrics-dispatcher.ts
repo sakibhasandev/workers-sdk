@@ -1,12 +1,11 @@
-import { configFormat } from "@cloudflare/workers-utils";
-import { detectAgenticEnvironment } from "am-i-vibing";
+import { configFormat, isInteractive } from "@cloudflare/workers-utils";
 import chalk from "chalk";
 import ci from "ci-info";
 import { fetch } from "undici";
 import { telemetryCurrentAgentSkillsInstalled } from "../agents-skills-install";
-import isInteractive from "../is-interactive";
 import { logger } from "../logger";
 import { sniffUserAgent } from "../package-manager";
+import { detectAgent } from "../utils/detect-agent";
 import {
 	getNodeVersion,
 	getOS,
@@ -52,18 +51,8 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 	const amplitude_session_id = Date.now();
 	let amplitude_event_id = 0;
 
-	// Detect agent environment once when dispatcher is created
-	// Pass empty array for processAncestry to skip process tree checks entirely.
-	// Process tree traversal uses execSync('ps ...') which is slow and can cause
-	// timeouts, especially in CI environments. Environment variable detection
-	// is sufficient for identifying most agentic environments.
-	let agent: string | null = null;
-	try {
-		const agentDetection = detectAgenticEnvironment(process.env, []);
-		agent = agentDetection.id;
-	} catch {
-		// Silent failure - agent remains null
-	}
+	// Detect agent environment once when dispatcher is created.
+	const agent = detectAgent().id;
 
 	function getCommonEventProperties(): CommonEventProperties {
 		return {
@@ -98,8 +87,7 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 		 */
 		sendAdhocEvent(name: string, properties: Properties = {}) {
 			trackDispatch(
-				telemetryCurrentAgentSkillsInstalled()
-					.catch(() => null)
+				currentAgentSkillsInstalledForTelemetry()
 					.then((currentAgentSkillsInstalled) => {
 						const baseProperties = {
 							...getCommonEventProperties(),
@@ -162,8 +150,7 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 				};
 
 				trackDispatch(
-					telemetryCurrentAgentSkillsInstalled()
-						.catch(() => null)
+					currentAgentSkillsInstalledForTelemetry()
 						.then((currentAgentSkillsInstalled) => {
 							return dispatch({
 								name,
@@ -183,6 +170,19 @@ export function getMetricsDispatcher(options: MetricsConfigOptions) {
 			}
 		},
 	};
+
+	/**
+	 * Resolves the `currentAgentSkillsInstalled` telemetry property, but only
+	 * when telemetry is enabled. The underlying lookup can hit the GitHub API,
+	 * so it must be skipped entirely for users who have opted out of telemetry
+	 * rather than being resolved and then discarded in {@link dispatch}.
+	 */
+	function currentAgentSkillsInstalledForTelemetry() {
+		if (!getMetricsConfig(options).enabled) {
+			return Promise.resolve(null);
+		}
+		return telemetryCurrentAgentSkillsInstalled().catch(() => null);
+	}
 
 	function dispatch(event: {
 		name: string;

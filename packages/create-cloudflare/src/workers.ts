@@ -3,12 +3,13 @@ import { join } from "node:path";
 import { warn } from "@cloudflare/cli-shared-helpers";
 import { brandColor, dim } from "@cloudflare/cli-shared-helpers/colors";
 import { runCommand } from "@cloudflare/cli-shared-helpers/command";
+import { resolveNodejsCompat } from "@cloudflare/workers-utils";
 import { getLatestTypesEntrypoint } from "helpers/compatDate";
 import { readFile, readJSON, usesTypescript, writeFile } from "helpers/files";
 import { detectPackageManager } from "helpers/packageManagers";
 import { installPackages } from "helpers/packages";
 import * as jsonc from "jsonc-parser";
-import TOML from "smol-toml";
+import * as TOML from "smol-toml";
 import {
 	readWranglerJsonOrJsonc,
 	readWranglerToml,
@@ -69,14 +70,22 @@ const maybeInstallNodeTypes = async (ctx: C3Context, npm: string) => {
 		parsedConfig = TOML.parse(wranglerTomlStr);
 	}
 
-	const compatibilityFlags = Array.isArray(parsedConfig["compatibility_flags"])
+	const compatibilityFlags: string[] = Array.isArray(
+		parsedConfig["compatibility_flags"]
+	)
 		? parsedConfig["compatibility_flags"]
 		: [];
+	const compatibilityDate =
+		typeof parsedConfig["compatibility_date"] === "string"
+			? parsedConfig["compatibility_date"]
+			: "";
 
-	if (
-		compatibilityFlags.includes("nodejs_compat") ||
-		compatibilityFlags.includes("nodejs_compat_v2")
-	) {
+	// The flags alone are not enough to tell: a recent enough compatibility date
+	// enables Node.js compatibility without them being present at all.
+	const { isNodejsCompatEnabled, isNodejsCompatV2Enabled } =
+		resolveNodejsCompat(compatibilityDate, compatibilityFlags);
+
+	if (isNodejsCompatEnabled || isNodejsCompatV2Enabled) {
 		await installPackages(["@types/node"], {
 			dev: true,
 			startText: "Installing @types/node",
@@ -116,18 +125,31 @@ export async function updateTsConfig(
 		let newTypes = new Set(currentTypes);
 		if (ctx.template.workersTypes === "installed") {
 			const entrypointVersion = getLatestTypesEntrypoint(ctx);
-			if (entrypointVersion === null) {
-				return;
-			}
-			const typesEntrypoint = `@cloudflare/workers-types/${entrypointVersion}`;
 			const explicitEntrypoint = currentTypes.some((t) =>
 				t.match(/@cloudflare\/workers-types\/\d{4}-\d{2}-\d{2}/)
 			);
 			// If a type declaration with an explicit entrypoint exists, leave the types as is.
-			// Otherwise, add the latest entrypoint
+			// Otherwise add the workers-types entry:
+			// - `@cloudflare/workers-types` v4 and earlier ship date-versioned entrypoints,
+			//   so use the latest one (e.g. `@cloudflare/workers-types/2024-01-01`).
+			// - v5+ dropped the date-versioned entrypoints (getLatestTypesEntrypoint returns
+			//   null), so fall back to the bare package import when it is actually installed.
 			if (!explicitEntrypoint) {
 				newTypes.delete("@cloudflare/workers-types");
-				newTypes.add(typesEntrypoint);
+				if (entrypointVersion !== null) {
+					newTypes.add(`@cloudflare/workers-types/${entrypointVersion}`);
+				} else if (
+					existsSync(
+						join(
+							ctx.project.path,
+							"node_modules",
+							"@cloudflare",
+							"workers-types"
+						)
+					)
+				) {
+					newTypes.add("@cloudflare/workers-types");
+				}
 			}
 		} else if (ctx.template.workersTypes === "generated") {
 			newTypes.add(ctx.template.typesPath ?? "./worker-configuration.d.ts");

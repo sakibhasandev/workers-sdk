@@ -20,6 +20,8 @@ import type { NonVersionedScriptSettings } from "../../versions/api";
 import type {
 	AssetConfigMetadata,
 	CfWorkerInit,
+	DurableObjectCodeUpdateStrategy,
+	ExportsReconciliationResult,
 	RawConfig,
 	RawEnvironment,
 	WorkerMetadata,
@@ -31,6 +33,8 @@ export function mockUploadWorkerRequest(
 	options: {
 		wranglerConfigPath?: string;
 		expectedBaseUrl?: string;
+		expectedAccountId?: string;
+		expectedAuthToken?: string;
 		expectedEntry?: string | RegExp | ((entry: string | null) => void);
 		expectedMainModule?: string;
 		expectedType?: "esm" | "sw" | "none";
@@ -40,12 +44,17 @@ export function mockUploadWorkerRequest(
 		expectedCompatibilityDate?: string;
 		expectedCompatibilityFlags?: string[];
 		expectedMigrations?: CfWorkerInit["migrations"];
+		expectedExports?: CfWorkerInit["exports"];
+		/**
+		 * When set, the upload mock returns this `exports_reconciliation`
+		 * envelope alongside the success response so deploy.ts can render it.
+		 */
+		mockUploadReturnsExportsReconciliation?: ExportsReconciliationResult;
 		expectedTailConsumers?: CfWorkerInit["tail_consumers"];
 		expectedUnsafeMetaData?: Record<string, unknown>;
 		expectedCapnpSchema?: string;
 		expectedLimits?: CfWorkerInit["limits"];
 		env?: string;
-		useServiceEnvironments?: boolean;
 		keepVars?: boolean;
 		keepSecrets?: boolean;
 		tag?: string;
@@ -58,9 +67,15 @@ export function mockUploadWorkerRequest(
 		useOldUploadApi?: boolean;
 		expectedObservability?: CfWorkerInit["observability"];
 		expectedSettingsPatch?: Partial<NonVersionedScriptSettings>;
-		expectedContainers?: { class_name: string }[];
+		expectedContainers?: {
+			name?: string;
+			class_name?: string;
+			images?: Record<string, string>;
+		}[];
 		expectedAnnotations?: Record<string, string | undefined>;
 		expectedDeploymentMessage?: string;
+		expectedDurableObjectsCodeUpdateStrategy?: DurableObjectCodeUpdateStrategy;
+		expectedBindingsInherit?: "strict";
 	} = {}
 ) {
 	const handleUpload: HttpResponseResolver = async ({ params, request }) => {
@@ -68,18 +83,28 @@ export function mockUploadWorkerRequest(
 		expect(url.hostname).toMatch(
 			options.expectedBaseUrl ?? "api.cloudflare.com"
 		);
-		expect(params.accountId).toEqual("some-account-id");
-		expect(params.scriptName).toEqual(expectedScriptName);
-		if (useServiceEnvironments) {
-			expect(params.envName).toEqual(env);
+		expect(params.accountId).toEqual(
+			options.expectedAccountId ?? "some-account-id"
+		);
+		if (options.expectedAuthToken !== undefined) {
+			expect(request.headers.get("Authorization")).toEqual(
+				`Bearer ${options.expectedAuthToken}`
+			);
 		}
+		expect(params.scriptName).toEqual(expectedScriptName);
 		if (useOldUploadApi) {
 			expect(url.searchParams.get("excludeScript")).toEqual("true");
+		}
+		if (options.expectedBindingsInherit !== undefined) {
+			expect(url.searchParams.get("bindings_inherit")).toEqual(
+				options.expectedBindingsInherit
+			);
 		}
 		if (expectedDispatchNamespace) {
 			expect(params.dispatchNamespace).toEqual(expectedDispatchNamespace);
 		}
 
+		// eslint-disable-next-line @typescript-eslint/no-deprecated -- formData() is the standard Web API; only deprecated on undici's server-side types
 		const formBody = await request.formData();
 		if (typeof expectedEntry === "string" || expectedEntry instanceof RegExp) {
 			expect(await serialize(formBody.get("index.js"))).toMatch(expectedEntry);
@@ -128,6 +153,9 @@ export function mockUploadWorkerRequest(
 		if ("expectedMigrations" in options) {
 			expect(metadata.migrations).toEqual(expectedMigrations);
 		}
+		if ("expectedExports" in options) {
+			expect(metadata.exports).toEqual(expectedExports);
+		}
 		if ("expectedTailConsumers" in options) {
 			expect(metadata.tail_consumers).toEqual(expectedTailConsumers);
 		}
@@ -151,7 +179,14 @@ export function mockUploadWorkerRequest(
 		if ("expectedAnnotations" in options) {
 			expect(metadata.annotations).toEqual(expectedAnnotations);
 		}
-
+		if (
+			useOldUploadApi &&
+			"expectedDurableObjectsCodeUpdateStrategy" in options
+		) {
+			expect(metadata.code_update_strategy).toEqual(
+				expectedDurableObjectsCodeUpdateStrategy
+			);
+		}
 		if (expectedUnsafeMetaData !== undefined) {
 			Object.keys(expectedUnsafeMetaData).forEach((key) => {
 				expect(metadata[key]).toEqual(expectedUnsafeMetaData[key]);
@@ -174,6 +209,9 @@ export function mockUploadWorkerRequest(
 					tag: "sample-tag",
 					deployment_id: "Galaxy-Class",
 					startup_time_ms: 100,
+					...(mockUploadReturnsExportsReconciliation && {
+						exports_reconciliation: mockUploadReturnsExportsReconciliation,
+					}),
 				})
 			);
 		}
@@ -187,6 +225,9 @@ export function mockUploadWorkerRequest(
 						etag: "etag98765",
 					},
 				},
+				...(mockUploadReturnsExportsReconciliation && {
+					exports_reconciliation: mockUploadReturnsExportsReconciliation,
+				}),
 			})
 		);
 	};
@@ -205,8 +246,9 @@ export function mockUploadWorkerRequest(
 		expectedCompatibilityDate,
 		expectedCompatibilityFlags,
 		env = undefined,
-		useServiceEnvironments = true,
 		expectedMigrations,
+		expectedExports,
+		mockUploadReturnsExportsReconciliation,
 		expectedTailConsumers,
 		expectedUnsafeMetaData,
 		expectedCapnpSchema,
@@ -220,20 +262,13 @@ export function mockUploadWorkerRequest(
 		expectedObservability,
 		expectedSettingsPatch,
 		expectedDeploymentMessage,
+		expectedDurableObjectsCodeUpdateStrategy,
 	} = options;
 
 	const expectedScriptName =
-		options.expectedScriptName ??
-		"test-name" + (!useServiceEnvironments && env ? `-${env}` : "");
+		options.expectedScriptName ?? "test-name" + (env ? `-${env}` : "");
 
-	if (env && useServiceEnvironments) {
-		msw.use(
-			http.put(
-				"*/accounts/:accountId/workers/services/:scriptName/environments/:envName",
-				handleUpload
-			)
-		);
-	} else if (expectedDispatchNamespace) {
+	if (expectedDispatchNamespace) {
 		msw.use(
 			http.put(
 				"*/accounts/:accountId/workers/dispatch/namespaces/:dispatchNamespace/scripts/:scriptName",
@@ -256,13 +291,24 @@ export function mockUploadWorkerRequest(
 			http.post(
 				"*/accounts/:accountId/workers/scripts/:scriptName/deployments",
 				async ({ request }) => {
-					if ("expectedDeploymentMessage" in options) {
+					if (
+						"expectedDeploymentMessage" in options ||
+						"expectedDurableObjectsCodeUpdateStrategy" in options
+					) {
 						const body = (await request.json()) as {
 							annotations?: { "workers/message"?: string };
+							code_update_strategy?: DurableObjectCodeUpdateStrategy;
 						};
-						expect(body.annotations?.["workers/message"]).toEqual(
-							expectedDeploymentMessage
-						);
+						if ("expectedDeploymentMessage" in options) {
+							expect(body.annotations?.["workers/message"]).toEqual(
+								expectedDeploymentMessage
+							);
+						}
+						if ("expectedDurableObjectsCodeUpdateStrategy" in options) {
+							expect(body.code_update_strategy).toEqual(
+								expectedDurableObjectsCodeUpdateStrategy
+							);
+						}
 					}
 					return HttpResponse.json(createFetchResult({ id: "Deployment-ID" }));
 				}
@@ -306,7 +352,7 @@ export function mockUploadWorkerRequest(
 		enabled: subdomainDefaults.workers_dev,
 		previews_enabled: subdomainDefaults.preview_urls,
 		env,
-		useServiceEnvironments,
+		expectedAccountId: options.expectedAccountId,
 		expectedScriptName,
 	});
 	const subdomainValues = getSubdomainValues(
@@ -322,7 +368,7 @@ export function mockUploadWorkerRequest(
 			previews_enabled: subdomainDefaults.preview_urls,
 		},
 		env,
-		useServiceEnvironments,
+		expectedAccountId: options.expectedAccountId,
 		expectedScriptName,
 	});
 }

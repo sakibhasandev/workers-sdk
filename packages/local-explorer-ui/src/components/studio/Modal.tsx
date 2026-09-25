@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useState } from "react";
-import type { ComponentType, PropsWithChildren } from "react";
+import type { ComponentType, JSX, PropsWithChildren } from "react";
 
 interface ModalInjectedProps {
 	closeModal: () => void;
@@ -43,7 +43,7 @@ export function ModalProvider({ children }: PropsWithChildren): JSX.Element {
 	const [modals, setModals] = useState<Array<IModalEntry>>([]);
 
 	const handleOpenModal = useCallback(
-		<Props = unknown>(
+		<Props = unknown,>(
 			ModalComponent: ComponentType<Props>,
 			props?: Omit<Props, keyof ModalInjectedProps> & { onClose?: () => void }
 		) => {
@@ -62,7 +62,7 @@ export function ModalProvider({ children }: PropsWithChildren): JSX.Element {
 	);
 
 	const handleCloseModal = useCallback(
-		<Props = unknown>(ModalComponent?: ComponentType<Props>) => {
+		<Props = unknown,>(ModalComponent?: ComponentType<Props>) => {
 			setModals((prev) => {
 				if (ModalComponent) {
 					return prev.filter(

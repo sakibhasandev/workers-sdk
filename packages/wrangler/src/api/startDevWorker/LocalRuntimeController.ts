@@ -1,15 +1,19 @@
 import assert from "node:assert";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
 	cleanupContainers,
-	getDevContainerImageName,
 	prepareContainerImagesForDev,
-	runDockerCmdWithOutput,
 } from "@cloudflare/containers-shared";
 import { getDockerPath } from "@cloudflare/workers-utils";
 import chalk from "chalk";
-import { buildPublicUrl, Miniflare, Mutex } from "miniflare";
+import {
+	buildPublicUrl,
+	convertV4MiniflareOptions,
+	Miniflare,
+	Mutex,
+} from "miniflare";
 import * as MF from "../../dev/miniflare";
 import { logger } from "../../logger";
 import { RuntimeController } from "./BaseController";
@@ -112,13 +116,20 @@ export async function convertToConfigBundle(
 	const bindings: Record<string, Binding> = { ...event.config.bindings };
 
 	const crons = [];
+	const routes = [];
 	const queueConsumers = [];
+	const connectHandlers = [];
 	for (const trigger of event.config.triggers ?? []) {
 		if (trigger.type === "cron") {
 			crons.push(trigger.cron);
+		} else if (trigger.type === "route") {
+			routes.push(trigger.pattern);
 		} else if (trigger.type === "queue-consumer") {
 			const { type: _, ...consumer } = trigger;
 			queueConsumers.push(consumer);
+		} else if (trigger.type === "connect") {
+			const { type: _, ...connectHandler } = trigger;
+			connectHandlers.push(connectHandler);
 		}
 	}
 	if (event.bundle.entry.format === "service-worker") {
@@ -157,6 +168,7 @@ export async function convertToConfigBundle(
 
 	return {
 		name: event.config.name,
+		projectRoot: event.config.projectRoot,
 		bundle: event.bundle,
 		format: event.bundle.entry.format,
 		compatibilityDate: event.config.compatibilityDate,
@@ -164,6 +176,7 @@ export async function convertToConfigBundle(
 		complianceRegion: event.config.complianceRegion,
 		bindings,
 		migrations: event.config.migrations,
+		exports: event.config.exports,
 		devRegistry: event.config.dev.registry,
 		legacyAssetPaths: event.config.legacy?.site?.bucket
 			? {
@@ -189,24 +202,23 @@ export async function convertToConfigBundle(
 					inspectorHost: event.config.dev.inspector?.hostname,
 				}),
 		localPersistencePath: event.config.dev.persist,
-		liveReload: event.config.dev?.liveReload ?? false,
 		crons,
+		routes: event.config.dev.routeRequestsByRoutes ? routes : undefined,
 		queueConsumers,
+		connectHandlers,
+		outboundService: event.config.dev.outboundService,
 		localProtocol: event.config.dev?.server?.secure ? "https" : "http",
-		httpsCertPath: event.config.dev?.server?.httpsCertPath,
-		httpsKeyPath: event.config.dev?.server?.httpsKeyPath,
 		localUpstream: event.config.dev?.origin?.hostname,
 		upstreamProtocol: event.config.dev?.origin?.secure ? "https" : "http",
 		testScheduled: !!event.config.dev.testScheduled,
 		tails: event.config.tailConsumers,
 		streamingTails: event.config.streamingTailConsumers,
-		containerDOClassNames: new Set(
-			event.config.containers?.map((c) => c.class_name)
-		),
-		containerBuildId: event.config.dev?.containerBuildId,
+		containerRuntimeOptions:
+			event.config.containerDevPlan?.containerRuntimeOptions,
 		containerEngine: event.config.dev.containerEngine,
 		enableContainers: event.config.dev.enableContainers ?? true,
 		zone: getZoneForCfWorkerHeader(event.config),
+		access: event.config.access,
 		sendMetrics: event.config.sendMetrics,
 		publicUrl: event.config.dev?.server?.port
 			? buildPublicUrl({
@@ -215,8 +227,16 @@ export async function convertToConfigBundle(
 					secure: event.config.dev.server.secure,
 				})
 			: undefined,
+		structuredLogsHandler: event.config.dev.structuredLogsHandler,
 	};
 }
+
+export type ContainerImagePreparationState = {
+	dockerPath: string;
+	complianceRegion: StartDevWorkerOptions["complianceRegion"];
+	hasContainers: boolean;
+	containerOptions: ContainerDevOptions[];
+};
 
 export class LocalRuntimeController extends RuntimeController {
 	#log = MF.buildLog();
@@ -237,6 +257,10 @@ export class LocalRuntimeController extends RuntimeController {
 	#mutex = new Mutex();
 	#mf?: Miniflare;
 
+	override get mf(): Miniflare | undefined {
+		return this.#mf;
+	}
+
 	#remoteProxySessionData: {
 		session: RemoteProxySession;
 		remoteBindings: Record<string, Binding>;
@@ -248,9 +272,7 @@ export class LocalRuntimeController extends RuntimeController {
 	containerImageTagsSeen: Set<string> = new Set();
 	// Stored here, so it can be used in `cleanupContainers()`
 	dockerPath: string | undefined;
-	// If this doesn't match what is in config, trigger a rebuild.
-	// Used for the rebuild hotkey
-	#currentContainerBuildId: string | undefined;
+	#containerImagePreparationState?: ContainerImagePreparationState;
 
 	// Used to store the information and abort handle for the
 	// current container that is being built
@@ -264,6 +286,80 @@ export class LocalRuntimeController extends RuntimeController {
 		// Remove any existing listener, then add a new one.
 		process.off("exit", this.cleanupContainers);
 		process.on("exit", this.cleanupContainers);
+	}
+
+	/**
+	 * Surfaces uncaught Worker exceptions as typed `runtimeError` events
+	 * (workerd catches handler exceptions to build the 500 response, so they
+	 * never reach the inspector — Miniflare's pretty-error path is where the
+	 * revived, source-mapped Error exists). Installed as Miniflare's
+	 * `handleUncaughtError` by every code path that builds Miniflare options:
+	 * this controller's and `MultiworkerRuntimeController`'s.
+	 */
+	protected dispatchRuntimeError = (error: Error): void => {
+		this.bus.dispatch({
+			type: "runtimeError",
+			source: "LocalRuntimeController",
+			text: `${error.name ?? "Error"}: ${error.message}`,
+			stack: error.stack ?? "",
+		});
+	};
+
+	protected async prepareContainerImages(
+		data: BundleCompleteEvent,
+		previousState?: ContainerImagePreparationState
+	): Promise<ContainerImagePreparationState | undefined> {
+		const nextState: ContainerImagePreparationState = {
+			dockerPath: data.config.dev.dockerPath ?? getDockerPath(),
+			complianceRegion: data.config.complianceRegion,
+			hasContainers: Boolean(
+				data.config.dev.enableContainers &&
+				data.config.containerDevPlan !== undefined
+			),
+			containerOptions: data.config.dev.enableContainers
+				? (data.config.containerDevPlan?.containerOptions ?? [])
+				: [],
+		};
+
+		if (
+			isDeepStrictEqual(previousState, nextState) ||
+			!nextState.hasContainers
+		) {
+			return nextState;
+		}
+
+		this.dockerPath = nextState.dockerPath;
+		for (const { image_tag } of nextState.containerOptions) {
+			this.containerImageTagsSeen.add(image_tag);
+		}
+
+		logger.log(chalk.dim("⎔ Preparing container image(s)..."));
+		const { aborted } = await prepareContainerImagesForDev({
+			dockerPath: nextState.dockerPath,
+			containerOptions: nextState.containerOptions,
+			onContainerImagePreparationStart: (buildStartEvent) => {
+				this.containerBeingBuilt = {
+					...buildStartEvent,
+					abortRequested: false,
+				};
+			},
+			onContainerImagePreparationEnd: () => {
+				this.containerBeingBuilt = undefined;
+			},
+			logger,
+			complianceConfig: {
+				compliance_region: nextState.complianceRegion,
+			},
+		});
+		if (this.containerBeingBuilt) {
+			this.containerBeingBuilt.abortRequested = false;
+		}
+		if (aborted) {
+			return previousState;
+		}
+		logger.log(chalk.dim("⎔ Container image(s) ready"));
+
+		return nextState;
 	}
 
 	async #onBundleComplete(data: BundleCompleteEvent, id: number) {
@@ -305,60 +401,10 @@ export class LocalRuntimeController extends RuntimeController {
 				return;
 			}
 
-			// Assemble container options and build if necessary
-
-			if (
-				data.config.containers?.length &&
-				data.config.dev.enableContainers &&
-				this.#currentContainerBuildId !== data.config.dev.containerBuildId
-			) {
-				this.dockerPath = data.config.dev?.dockerPath ?? getDockerPath();
-				assert(
-					data.config.dev.containerBuildId,
-					"Build ID should be set if containers are enabled and defined"
-				);
-				const containerDevOptions = await getContainerDevOptions(
-					data.config.containers,
-					data.config.dev.containerBuildId
-				);
-
-				for (const container of containerDevOptions) {
-					// if this was triggered by the rebuild hotkey, delete the old image
-					if (this.#currentContainerBuildId !== undefined) {
-						runDockerCmdWithOutput(this.dockerPath, [
-							"rmi",
-							getDevContainerImageName(
-								container.class_name,
-								this.#currentContainerBuildId
-							),
-						]);
-					}
-					this.containerImageTagsSeen.add(container.image_tag);
-				}
-				logger.log(chalk.dim("⎔ Preparing container image(s)..."));
-				await prepareContainerImagesForDev({
-					dockerPath: this.dockerPath,
-					containerOptions: containerDevOptions,
-					onContainerImagePreparationStart: (buildStartEvent) => {
-						this.containerBeingBuilt = {
-							...buildStartEvent,
-							abortRequested: false,
-						};
-					},
-					onContainerImagePreparationEnd: () => {
-						this.containerBeingBuilt = undefined;
-					},
-					logger: logger,
-				});
-				if (this.containerBeingBuilt) {
-					this.containerBeingBuilt.abortRequested = false;
-				}
-
-				this.#currentContainerBuildId = data.config.dev.containerBuildId;
-				// Miniflare will have logged 'Ready on...' before the containers are built, but that is actually the proxy server :/
-				// The actual user worker's miniflare instance is blocked until the containers are built
-				logger.log(chalk.dim("⎔ Container image(s) ready"));
-			}
+			this.#containerImagePreparationState = await this.prepareContainerImages(
+				data,
+				this.#containerImagePreparationState
+			);
 
 			// Bail out if a newer bundle arrived while we were building
 			// container images.
@@ -379,21 +425,22 @@ export class LocalRuntimeController extends RuntimeController {
 					});
 				}
 			);
-			options.liveReload = false; // TODO: set in buildMiniflareOptions once old code path is removed
+			options.handleUncaughtError = this.dispatchRuntimeError;
 
 			// Bail out if a newer bundle arrived while we were building
 			// miniflare options — avoid a redundant local server reload.
 			if (id !== this.#currentBundleId) {
 				return;
 			}
+			const miniflareOptions = convertV4MiniflareOptions(options);
 
 			if (this.#mf === undefined) {
 				logger.log(chalk.dim("⎔ Starting local server..."));
-				this.#mf = new Miniflare(options);
+				this.#mf = new Miniflare(miniflareOptions);
 			} else {
 				logger.log(chalk.dim("⎔ Reloading local server..."));
 
-				await this.#mf.setOptions(options);
+				await this.#mf.setOptions(miniflareOptions);
 
 				logger.log(chalk.dim("⎔ Local server updated and ready"));
 			}
@@ -541,40 +588,4 @@ export class LocalRuntimeController extends RuntimeController {
 	emitDevRegistryUpdateEvent(data: DevRegistryUpdateEvent): void {
 		this.bus.dispatch(data);
 	}
-}
-
-/**
- * @returns Container options suitable for building or pulling images,
- * with image tag set to well-known dev format.
- * Undefined if containers are not enabled or not configured.
- */
-export async function getContainerDevOptions(
-	containersConfig: NonNullable<BundleCompleteEvent["config"]["containers"]>,
-	containerBuildId: string
-) {
-	const containers: ContainerDevOptions[] = [];
-	for (const container of containersConfig) {
-		if ("image_uri" in container) {
-			containers.push({
-				image_uri: container.image_uri,
-				class_name: container.class_name,
-				image_tag: getDevContainerImageName(
-					container.class_name,
-					containerBuildId
-				),
-			});
-		} else {
-			containers.push({
-				dockerfile: container.dockerfile,
-				image_build_context: container.image_build_context,
-				image_vars: container.image_vars,
-				class_name: container.class_name,
-				image_tag: getDevContainerImageName(
-					container.class_name,
-					containerBuildId
-				),
-			});
-		}
-	}
-	return containers;
 }

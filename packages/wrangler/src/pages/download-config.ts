@@ -1,13 +1,14 @@
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { getCloudflareAccountIdFromEnv } from "@cloudflare/workers-auth";
 import {
 	COMPLIANCE_REGION_CONFIG_PUBLIC,
+	DEFAULT_COMPAT_DATE,
 	FatalError,
-	getTodaysCompatDate,
 	UserError,
 } from "@cloudflare/workers-utils";
 import chalk from "chalk";
-import TOML from "smol-toml";
+import * as TOML from "smol-toml";
 import { fetchResult } from "../cfetch";
 import { getConfigCache } from "../config-cache";
 import { createCommand } from "../core/create-command";
@@ -15,7 +16,6 @@ import { confirm } from "../dialogs";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
 import { requireAuth } from "../user";
-import { getCloudflareAccountIdFromEnv } from "../user/auth-variables";
 import { PAGES_CONFIG_CACHE_FILENAME } from "./constants";
 import type { PagesConfigCache } from "./types";
 import type { Project } from "@cloudflare/types";
@@ -75,11 +75,13 @@ async function toEnvironment(
 ): Promise<RawEnvironment> {
 	const configObj = {} as RawEnvironment;
 	configObj.compatibility_date =
-		deploymentConfig.compatibility_date ?? getTodaysCompatDate();
+		deploymentConfig.compatibility_date ?? DEFAULT_COMPAT_DATE;
 
-	// Find the latest supported compatibility date and use that
+	// The project is set to always use the latest compatibility date, so use the
+	// latest date supported by the runtime this Wrangler ships with. Using the
+	// current date instead would produce a config that the local runtime rejects.
 	if (deploymentConfig.always_use_latest_compatibility_date) {
-		configObj.compatibility_date = getTodaysCompatDate();
+		configObj.compatibility_date = DEFAULT_COMPAT_DATE;
 	}
 
 	if (deploymentConfig.compatibility_flags?.length) {
@@ -115,6 +117,7 @@ async function toEnvironment(
 		deploymentConfig.durable_object_namespaces ?? {}
 	)) {
 		configObj.durable_objects ??= { bindings: [] };
+		configObj.durable_objects.bindings ??= [];
 		if (ns.class_name && ns.class_name !== "") {
 			configObj.durable_objects.bindings.push({
 				name: name,
@@ -320,8 +323,11 @@ export const pagesDownloadConfigCommand = createCommand({
 		const projectConfig = getConfigCache<PagesConfigCache>(
 			PAGES_CONFIG_CACHE_FILENAME
 		);
-		const accountId =
-			getCloudflareAccountIdFromEnv() ?? (await requireAuth(projectConfig));
+		const envAccountId = getCloudflareAccountIdFromEnv();
+		const accountId = await requireAuth({
+			...projectConfig,
+			...(envAccountId ? { account_id: envAccountId } : {}),
+		});
 
 		projectName ??= projectConfig.project_name;
 

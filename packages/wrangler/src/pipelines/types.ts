@@ -14,6 +14,8 @@ export interface Pipeline {
 	modified_at: string;
 	sql: string;
 	status: string;
+	/** Free-form server message describing why the pipeline failed. Only set when `status` is "failed". */
+	failure_reason?: string;
 	tables?: PipelineTable[];
 }
 
@@ -123,6 +125,7 @@ export type StreamJsonFormat = {
 // Format types
 export type JsonFormat = {
 	type: "json";
+	compression?: "uncompressed" | "gzip";
 };
 
 export type ParquetFormat = {

@@ -2,33 +2,74 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import {
 	configFileName,
-	getTodaysCompatDate,
+	DEFAULT_COMPAT_DATE,
+	getWorkerNameFromProject,
 	UserError,
 	type Config,
 } from "@cloudflare/workers-utils";
+import { isNonInteractiveOrCI } from "@cloudflare/workers-utils";
 import chalk from "chalk";
-import { getDetailsForAutoConfig } from "../autoconfig/details";
-import { runAutoConfig } from "../autoconfig/run";
 import {
+	runAutoConfigDetection,
+	runAutoConfigLogic,
 	sendAutoConfigProcessEndedMetricsEvent,
 	sendAutoConfigProcessStartedMetricsEvent,
-} from "../autoconfig/telemetry-utils";
+} from "../autoconfig";
+import { createWranglerAutoConfigContext } from "../autoconfig-context";
 import { readConfig } from "../config";
+import { applyZoneArgsToRoutes } from "../deployment-bundle/route-zone-args";
 import { confirm, prompt } from "../dialogs";
-import { isNonInteractiveOrCI } from "../is-interactive";
 import { logger } from "../logger";
 import { writeOutput } from "../output";
+import { collectKeyValues } from "../utils/collectKeyValues";
 import type { ReadConfigCommandArgs } from "../config";
 
-type AutoConfigArgs = ReadConfigCommandArgs & {
-	experimentalAutoconfig: boolean | undefined;
-	assets: string | undefined;
-	path: string | undefined;
-	dryRun: boolean | undefined;
-	latest: boolean | undefined;
+/**
+ * CLI flags that affect the worker's deployment configuration.
+ * These are persisted to the generated wrangler.jsonc and/or included
+ * in the suggested CLI command during the interactive deploy flow.
+ */
+type DeployConfigFlags = {
 	compatibilityDate: string | undefined;
 	compatibilityFlags: string[] | undefined;
+	// Routing & scheduling
+	routes: string[] | undefined;
+	zone: string[] | undefined;
+	zoneId: string[] | undefined;
+	experimentalRouteZones: boolean | undefined;
+	domains: string[] | undefined;
+	triggers: string[] | undefined;
+	// Variables & build-time substitutions
+	var: string[] | undefined;
+	define: string[] | undefined;
+	alias: string[] | undefined;
+	// Build configuration
+	jsxFactory: string | undefined;
+	jsxFragment: string | undefined;
+	tsconfig: string | undefined;
+	minify: boolean | undefined;
+	uploadSourceMaps: boolean | undefined;
+	bundle: boolean | undefined;
+	// Deployment behavior
+	logpush: boolean | undefined;
+	keepVars: boolean | undefined;
+	dispatchNamespace: string | undefined;
 };
+
+/**
+ * The full set of CLI args consumed by the interactive deploy autoconfig flow.
+ * Combines the base config/script/name args from {@link ReadConfigCommandArgs},
+ * all deployment-affecting flags from {@link DeployConfigFlags}, and the
+ * autoconfig-specific control flags (autoconfig, assets, dryRun, latest).
+ */
+type AutoConfigArgs = ReadConfigCommandArgs &
+	DeployConfigFlags & {
+		autoconfig: boolean | undefined;
+		path: string | undefined;
+		assets: string | undefined;
+		dryRun: boolean | undefined;
+		latest: boolean | undefined;
+	};
 
 /**
  * Runs autoconfig if applicable, including open-next delegation and interactive
@@ -38,10 +79,11 @@ type AutoConfigArgs = ReadConfigCommandArgs & {
  */
 export async function maybeRunAutoConfig<Args extends AutoConfigArgs>(
 	args: Args,
-	config: Config
+	config: Config,
+	options: { skipConfirmations?: boolean } = {}
 ): Promise<{ config: Config; aborted: boolean }> {
 	const shouldRunAutoConfig =
-		args.experimentalAutoconfig &&
+		args.autoconfig &&
 		// If there is a positional parameter, an assets directory specified via --assets, or an
 		// explicit --config path then we don't want to run autoconfig since we assume that the
 		// user knows what they are doing and that they are specifying what needs to be deployed
@@ -66,9 +108,13 @@ export async function maybeRunAutoConfig<Args extends AutoConfigArgs>(
 			dryRun: !!args.dryRun,
 		});
 
+		const autoConfigContext = createWranglerAutoConfigContext();
+
 		try {
-			const details = await getDetailsForAutoConfig({
+			const details = await runAutoConfigDetection({
+				command: "wrangler deploy",
 				wranglerConfig: config,
+				context: autoConfigContext,
 			});
 
 			if (details.framework?.id === "cloudflare-pages") {
@@ -93,8 +139,11 @@ export async function maybeRunAutoConfig<Args extends AutoConfigArgs>(
 					return { config, aborted: true };
 				}
 			} else if (!details.configured) {
-				// Only run auto config if the project is not already configured
-				const autoConfigSummary = await runAutoConfig(details);
+				const autoConfigSummary = await runAutoConfigLogic(details, {
+					context: autoConfigContext,
+					dryRun: !!args.dryRun,
+					skipConfirmations: options.skipConfirmations === true,
+				});
 
 				writeOutput({
 					type: "autoconfig",
@@ -136,9 +185,11 @@ export async function maybeRunAutoConfig<Args extends AutoConfigArgs>(
  */
 export async function promptForMissingDeployConfig<Args extends AutoConfigArgs>(
 	args: Args,
-	config: { configPath?: string; compatibility_date?: string; name?: string }
+	config: { configPath?: string; compatibility_date?: string; name?: string },
+	options: { useProjectName?: boolean } = {}
 ): Promise<Args> {
-	if (isNonInteractiveOrCI()) {
+	const nonInteractiveOrCI = isNonInteractiveOrCI();
+	if (nonInteractiveOrCI && !options.useProjectName) {
 		return args;
 	}
 
@@ -146,31 +197,36 @@ export async function promptForMissingDeployConfig<Args extends AutoConfigArgs>(
 
 	// Prompt for name when missing from both CLI args and config
 	if (!args.name && !config.name) {
-		const defaultName = process
-			.cwd()
-			.split(path.sep)
-			.pop()
-			?.replaceAll("_", "-")
-			.trim();
-		const isValidName = defaultName && /^[a-zA-Z0-9-]+$/.test(defaultName);
-		const projectName = await prompt("What do you want to name your project?", {
-			defaultValue: isValidName ? defaultName : "my-project",
-		});
-		args.name = projectName;
+		if (options.useProjectName) {
+			args.name = getWorkerNameFromProject(process.cwd());
+		} else {
+			const defaultName = process
+				.cwd()
+				.split(path.sep)
+				.pop()
+				?.replaceAll("_", "-")
+				.trim();
+			const isValidName = defaultName && /^[a-zA-Z0-9-]+$/.test(defaultName);
+			args.name = await prompt("What do you want to name your project?", {
+				defaultValue: isValidName ? defaultName : "my-project",
+			});
+		}
 		logger.log("");
 		promptedForMissing = true;
 	}
 
+	if (nonInteractiveOrCI) {
+		return args;
+	}
+
 	// Prompt for compatibility date when missing
 	if (!args.latest && !args.compatibilityDate && !config.compatibility_date) {
-		const compatibilityDateStr = getTodaysCompatDate();
-
 		if (
 			await confirm(
-				`No compatibility date is set. Would you like to use today's date (${compatibilityDateStr})?`
+				`No compatibility date is set. Would you like to use the default (${DEFAULT_COMPAT_DATE})?`
 			)
 		) {
-			args.compatibilityDate = compatibilityDateStr;
+			args.compatibilityDate = DEFAULT_COMPAT_DATE;
 			promptedForMissing = true;
 			logger.log("");
 		} else {
@@ -188,8 +244,7 @@ export async function promptForMissingDeployConfig<Args extends AutoConfigArgs>(
 		// When --latest was used, the compat date prompt was skipped but we still
 		// need a concrete date in the config file for future deploys without --latest
 		const effectiveCompatDate =
-			args.compatibilityDate ??
-			(args.latest ? getTodaysCompatDate() : undefined);
+			args.compatibilityDate ?? (args.latest ? DEFAULT_COMPAT_DATE : undefined);
 
 		const configContent: Record<string, unknown> = {
 			name: args.name,
@@ -203,6 +258,52 @@ export async function promptForMissingDeployConfig<Args extends AutoConfigArgs>(
 		}
 		if (args.compatibilityFlags?.length) {
 			configContent.compatibility_flags = args.compatibilityFlags;
+		}
+		if (args.routes?.length || args.domains?.length) {
+			const routeEntries: unknown[] = applyZoneArgsToRoutes(
+				args.routes ?? [],
+				args
+			);
+			for (const domain of args.domains ?? []) {
+				routeEntries.push({ pattern: domain, custom_domain: true });
+			}
+			configContent.routes = routeEntries;
+		}
+		if (args.triggers?.length) {
+			configContent.triggers = { crons: args.triggers };
+		}
+		if (args.var?.length) {
+			configContent.vars = collectKeyValues(args.var);
+		}
+		if (args.define?.length) {
+			configContent.define = collectKeyValues(args.define);
+		}
+		if (args.alias?.length) {
+			configContent.alias = collectKeyValues(args.alias);
+		}
+		if (args.jsxFactory) {
+			configContent.jsx_factory = args.jsxFactory;
+		}
+		if (args.jsxFragment) {
+			configContent.jsx_fragment = args.jsxFragment;
+		}
+		if (args.tsconfig) {
+			configContent.tsconfig = args.tsconfig;
+		}
+		if (args.minify) {
+			configContent.minify = true;
+		}
+		if (args.uploadSourceMaps) {
+			configContent.upload_source_maps = true;
+		}
+		if (args.bundle === false) {
+			configContent.no_bundle = true;
+		}
+		if (args.logpush) {
+			configContent.logpush = true;
+		}
+		if (args.keepVars) {
+			configContent.keep_vars = true;
 		}
 
 		const writeConfigFile = await confirm(
@@ -233,6 +334,32 @@ export async function promptForMissingDeployConfig<Args extends AutoConfigArgs>(
 					: "",
 				...(args.compatibilityFlags?.length
 					? [`--compatibility-flags ${args.compatibilityFlags.join(" ")}`]
+					: []),
+				...(args.routes?.length ? [`--routes ${args.routes.join(" ")}`] : []),
+				...(args.zone?.length || args.zoneId?.length
+					? ["--x-route-zones"]
+					: []),
+				...(args.zone?.length ? [`--zone ${args.zone.join(" ")}`] : []),
+				...(args.zoneId?.length ? [`--zone-id ${args.zoneId.join(" ")}`] : []),
+				...(args.domains?.length
+					? [`--domains ${args.domains.join(" ")}`]
+					: []),
+				...(args.triggers?.length
+					? [`--triggers ${args.triggers.map((t) => `'${t}'`).join(" ")}`]
+					: []),
+				...(args.var?.length ? [`--var ${args.var.join(" ")}`] : []),
+				...(args.define?.length ? [`--define ${args.define.join(" ")}`] : []),
+				...(args.alias?.length ? [`--alias ${args.alias.join(" ")}`] : []),
+				...(args.jsxFactory ? [`--jsx-factory ${args.jsxFactory}`] : []),
+				...(args.jsxFragment ? [`--jsx-fragment ${args.jsxFragment}`] : []),
+				...(args.tsconfig ? [`--tsconfig ${args.tsconfig}`] : []),
+				...(args.minify ? ["--minify"] : []),
+				...(args.uploadSourceMaps ? ["--upload-source-maps"] : []),
+				...(args.bundle === false ? ["--no-bundle"] : []),
+				...(args.logpush ? ["--logpush"] : []),
+				...(args.keepVars ? ["--keep-vars"] : []),
+				...(args.dispatchNamespace
+					? [`--dispatch-namespace ${args.dispatchNamespace}`]
 					: []),
 			]
 				.filter(Boolean)

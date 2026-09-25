@@ -15,6 +15,7 @@ import {
 } from "../../constants";
 import { handleFetchError } from "../../utils";
 import type { PostQueueBody } from "../../client";
+import type { QueueJurisdiction } from "@cloudflare/deploy-helpers";
 
 export const queuesCreateCommand = createCommand({
 	metadata: {
@@ -22,11 +23,17 @@ export const queuesCreateCommand = createCommand({
 		owner: "Product: Queues",
 		status: "stable",
 	},
+	behaviour: { supportTemporary: true },
 	args: {
 		name: {
 			type: "string",
 			demandOption: true,
 			description: "The name of the queue",
+		},
+		jurisdiction: {
+			type: "string",
+			describe: "The jurisdiction of the queue",
+			choices: ["eu", "us", "fedramp"],
 		},
 		"delivery-delay-secs": {
 			type: "number",
@@ -85,6 +92,7 @@ export const queuesCreateCommand = createCommand({
 function createBody(args: typeof queuesCreateCommand.args): PostQueueBody {
 	const body: PostQueueBody = {
 		queue_name: args.name,
+		jurisdiction: args.jurisdiction as QueueJurisdiction,
 	};
 
 	body.settings = {};

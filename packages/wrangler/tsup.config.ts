@@ -5,6 +5,34 @@ import { EXTERNAL_DEPENDENCIES } from "./scripts/deps";
 import type { Options } from "tsup";
 
 const TEMPLATES_DIR = path.join(__dirname, "templates");
+const MONOREPO_PACKAGE_ALIASES = {
+	"@cloudflare/autoconfig": path.join(__dirname, "../autoconfig/src/index.ts"),
+	"@cloudflare/deploy-helpers/context": path.join(
+		__dirname,
+		"../deploy-helpers/src/shared/context.ts"
+	),
+	"@cloudflare/deploy-helpers/create-worker-upload-form": path.join(
+		__dirname,
+		"../deploy-helpers/src/deploy/helpers/create-worker-upload-form.ts"
+	),
+	"@cloudflare/deploy-helpers/startup-profile": path.join(
+		__dirname,
+		"../deploy-helpers/src/startup-profile.ts"
+	),
+	"@cloudflare/deploy-helpers": path.join(
+		__dirname,
+		"../deploy-helpers/src/index.ts"
+	),
+	"@cloudflare/pages-functions": path.join(
+		__dirname,
+		"../pages-functions/src/index.ts"
+	),
+	"@cloudflare/runtime-types": path.join(
+		__dirname,
+		"../runtime-types/src/index.ts"
+	),
+	"@cloudflare/workers-utils": path.join(__dirname, "../workers-utils/src"),
+};
 const workersContexts = new Map<string, esbuild.BuildContext>();
 function embedWorkersPlugin({
 	isWatch,
@@ -79,10 +107,11 @@ export default defineConfig((options) => [
 		entry: ["src/cli.ts"],
 		platform: "node",
 		format: "cjs",
-		dts: true,
+		dts: {
+			resolve: ["@cloudflare/workflows-shared/src/types"],
+		},
 		outDir: "wrangler-dist",
 		tsconfig: "tsconfig.json",
-		metafile: true,
 		external: EXTERNAL_DEPENDENCIES,
 		sourcemap: process.env.SOURCEMAPS !== "false",
 		inject: [path.join(__dirname, "import_meta_url.js")],
@@ -110,5 +139,27 @@ export default defineConfig((options) => [
 				: {}),
 		},
 		esbuildPlugins: [embedWorkersPlugin({ isWatch: !!options.watch })],
+		esbuildOptions(esbuildOptions) {
+			// These workspace packages publish bundles for npm consumers. Resolving
+			// their sources here gives Wrangler's monorepo build enough module
+			// structure to tree-shake exports it doesn't use, without changing the
+			// dependencies installed with the published package.
+			esbuildOptions.alias = {
+				...esbuildOptions.alias,
+				...MONOREPO_PACKAGE_ALIASES,
+			};
+			esbuildOptions.logOverride = {
+				...esbuildOptions.logOverride,
+				// Suppress the warning for the intentional runtime dynamic
+				// `import()` in `@cloudflare/config`'s `loadConfig`
+				// (packages/config/src/load.ts). The import is unanalyzable by
+				// design: the specifier is computed at runtime and the
+				// `with: { cf: "no-cache" }` attribute is consumed by a Node
+				// `registerHooks` resolver. esbuild already preserves the call
+				// verbatim — only the warning is noise. This suppression is
+				// needed as long as wrangler bundles `@cloudflare/config`.
+				"unsupported-dynamic-import": "silent",
+			};
+		},
 	},
 ]);

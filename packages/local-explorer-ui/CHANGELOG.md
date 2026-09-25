@@ -1,5 +1,57 @@
 # @cloudflare/local-explorer-ui
 
+## 0.17.0
+
+### Minor Changes
+
+- [#15652](https://github.com/cloudflare/workers-sdk/pull/15652) [`44f5295`](https://github.com/cloudflare/workers-sdk/commit/44f52951a699f77a35fa5d3b0ba1d33c7e2e3a31) Thanks [@tpmmorris](https://github.com/tpmmorris)! - Add one-off Cron Trigger testing to Local Explorer
+
+  Developers can invoke a Worker's configured or custom Cron Trigger with an exact or guided expression, choose a UTC or epoch-millisecond scheduled time, and inspect the latest structured result without editing configuration.
+
+## 0.16.0
+
+### Minor Changes
+
+- [#15567](https://github.com/cloudflare/workers-sdk/pull/15567) [`a71237a`](https://github.com/cloudflare/workers-sdk/commit/a71237a662d50d51caed454f0a47f4a29f9cd2b1) Thanks [@tpmmorris](https://github.com/tpmmorris)! - Add row-level email resend tools to the Local Explorer
+
+  Routing captures can now be resent directly or loaded into the test email composer for editing. Routing rows expose and use a UUID-based capture ID for identity, detail lookup, and resend operations instead of relying on the email's Message-ID. Message-ID detail lookup remains available for compatibility, and resends preserve partial-capture warnings across replayed messages.
+
+## 0.15.0
+
+### Minor Changes
+
+- [#15337](https://github.com/cloudflare/workers-sdk/pull/15337) [`b23de74`](https://github.com/cloudflare/workers-sdk/commit/b23de747f6a4e7c19655da3adb10a5da49b8e368) Thanks [@tpmmorris](https://github.com/tpmmorris)! - Add email inspection and testing to Local Explorer
+
+  Add an Email group with Routing and Sending views for inspecting messages received by a Worker's `email()` handler and messages sent through its `send_email` bindings. Detail views show message content, metadata, attachments, and handler activity including forwarding, replies, rejection, and unhandled messages.
+
+  Add a test-email composer that delivers custom text, HTML, headers, and attachments directly to the selected Worker's `email()` handler during local development.
+
+## 0.14.2
+
+### Patch Changes
+
+- [#14668](https://github.com/cloudflare/workers-sdk/pull/14668) [`e93d27e`](https://github.com/cloudflare/workers-sdk/commit/e93d27eab1c54b08c5576cb50887429c1f45c40f) Thanks [@DebadityaHait](https://github.com/DebadityaHait)! - Make long worker selector lists scrollable
+
+  Workers beyond the visible selector limit can now be reached with a mouse, trackpad, or keyboard without scrolling the Local Explorer page.
+
+## 0.14.1
+
+### Patch Changes
+
+- [#14531](https://github.com/cloudflare/workers-sdk/pull/14531) [`ad8d4b2`](https://github.com/cloudflare/workers-sdk/commit/ad8d4b242cdaf9f128e40de0c1921bbd7008522e) Thanks [@matingathani](https://github.com/matingathani)! - Don't swallow unhandled keydown events (e.g. `Cmd/Ctrl+<number>` tab-switch shortcuts) when a data studio table cell is focused but not being edited
+
+- [#14629](https://github.com/cloudflare/workers-sdk/pull/14629) [`c5647dd`](https://github.com/cloudflare/workers-sdk/commit/c5647dd76c299836ac4032af2ffcefc7a5d45a87) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Fix D1 schema editor tab not tracking unsaved changes
+
+  The schema editor tab (edit table / create table) now correctly marks the tab as dirty when there are unsaved schema changes. This shows the unsaved changes indicator on the tab, triggers the browser's leave guard when navigating away, and prompts for confirmation when closing the tab.
+
+  Additionally, column and constraint deletions now properly mark the schema as dirty. Previously, removing a column or constraint would filter the entry out of the state array entirely, causing the dirty-state check to miss the change.
+
+## 0.14.0
+
+### Minor Changes
+
+- [#14154](https://github.com/cloudflare/workers-sdk/pull/14154) [`204f90a`](https://github.com/cloudflare/workers-sdk/commit/204f90a39000e54a9387eb45b54b2a6d894d8dcd) Thanks [@pombosilva](https://github.com/pombosilva)! - Add a restart-from-step button to each row in the workflow instance step list
+
 ## 0.13.3
 
 ### Patch Changes

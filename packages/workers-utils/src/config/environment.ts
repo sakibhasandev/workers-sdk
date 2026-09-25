@@ -1,3 +1,11 @@
+/**
+ * Wrangler configuration types. The JSDoc on these fields is also the source
+ * of truth for the equivalent fields in `@cloudflare/config`
+ * (`packages/config/src/types.ts` — `WorkerConfig` — and the binding option
+ * interfaces in `packages/config/src/config.ts`). When editing prose here,
+ * mirror the changes there.
+ */
+
 import type { Json } from "../types";
 
 /**
@@ -10,6 +18,12 @@ export interface Environment
 	extends EnvironmentInheritable, EnvironmentNonInheritable {}
 
 type SimpleRoute = string;
+/** AWS SigV4 credentials for miniflare's local S3-compatible endpoint */
+export interface LocalS3Credentials {
+	accessKeyId: string;
+	secretAccessKey: string;
+}
+
 export type ZoneIdRoute = {
 	pattern: string;
 	zone_id: string;
@@ -84,14 +98,66 @@ type UnsafeBinding = {
 };
 
 /**
- * Configuration for a container application
+ * An image Wrangler prepares for a Durable Object-managed container.
  */
+export type DurableObjectContainerImage =
+	| {
+			/**
+			 * Path to the Dockerfile Wrangler builds and pushes.
+			 */
+			dockerfile: string;
+			/**
+			 * Build context, relative to the Wrangler configuration file.
+			 * Defaults to the Dockerfile's directory.
+			 */
+			build_context?: string;
+			/** Variables available to the image only while it is being built. */
+			build_vars?: Record<string, string>;
+			image?: never;
+	  }
+	| {
+			/**
+			 * Digest-pinned image in the account's managed registry.
+			 */
+			image: string;
+			dockerfile?: never;
+			build_context?: never;
+			build_vars?: never;
+	  };
+
+/**
+ * Configuration for a container application.
+ */
+export type ContainerObservability = {
+	/** If observability is enabled for this container application */
+	enabled?: boolean;
+	logs?: {
+		enabled?: boolean;
+	};
+	/**
+	 * Percentage of instances to target with application-level observability hot reloads.
+	 * Mutually exclusive with `target_instance_count`.
+	 */
+	target_instance_percentage?: number;
+	/**
+	 * Number of instances to target with application-level observability hot reloads.
+	 * Mutually exclusive with `target_instance_percentage`.
+	 */
+	target_instance_count?: number;
+};
+
 export type ContainerApp = {
 	// TODO: fill out the entire type
 
 	/**
-	 * Name of the application
-	 * @optional Defaults to `worker_name-class_name` if not specified.
+	 * Name of the application.
+	 *
+	 * This is also the identifier used to reference the container from a Durable
+	 * Object's `exports` entry via its `container` field.
+	 *
+	 * @optional Defaults to `worker_name-class_name` if not specified. A name is
+	 * required when `class_name` is not set, since there is no class name to
+	 * derive the default from.
 	 */
 	name?: string;
 
@@ -112,7 +178,17 @@ export type ContainerApp = {
 	/**
 	 * The path to a Dockerfile, or an image URI for the Cloudflare registry.
 	 */
-	image: string;
+	image?: string;
+
+	/**
+	 * Named images available to a Durable Object-managed container through
+	 * `ctx.container.images`.
+	 *
+	 * Only supported when `scheduling_policy` is `"durable_object"`.
+	 * When omitted, run `wrangler deploy` to provision the application before
+	 * uploading versions. Version deployments use its existing application.
+	 */
+	images?: Record<string, DurableObjectContainerImage>;
 
 	/**
 	 * Build context of the application.
@@ -129,15 +205,34 @@ export type ContainerApp = {
 
 	/**
 	 * The class name of the Durable Object the container is connected to.
+	 *
+	 * @optional Instead of naming the Durable Object here, you can reference this
+	 * container from the Durable Object's `exports` entry via its `container`
+	 * field. Exactly one of the two directions must be configured.
 	 */
-	class_name: string;
+	class_name?: string;
+
+	/**
+	 * Specify the observability behavior of this container application.
+	 *
+	 * When set, this overrides the root `observability` config for this container.
+	 * Durable Object-managed Containers only support enabling or disabling logs.
+	 * Their settings are application-wide, and omitted settings preserve the
+	 * existing application rather than inheriting root Worker observability.
+	 */
+	observability?: ContainerObservability;
 
 	/**
 	 * The scheduling policy of the application
 	 * @optional
+	 * `"durable_object"` makes each Durable Object instance own its Container.
+	 * In that mode, `name`, `class_name`, `scheduling_policy`, `images`,
+	 * application-wide log `observability`, `ssh`, and `authorized_keys` are
+	 * supported on this entry.
+	 *
 	 * @default "default"
 	 */
-	scheduling_policy?: "default" | "moon" | "regional";
+	scheduling_policy?: "default" | "durable_object" | "moon" | "regional";
 
 	/**
 	 * The instance type to be used for the container.
@@ -338,9 +433,115 @@ export type DurableObjectMigration = {
 		from: string;
 		to: string;
 	}[];
+	/** The Durable Objects being transferred from another Worker. */
+	transferred_classes?: {
+		from: string;
+		from_script: string;
+		to: string;
+	}[];
 	/** The Durable Objects being removed. */
 	deleted_classes?: string[];
 };
+
+/**
+ * Storage backend for a declarative Durable Object export. See
+ * {@link DurableObjectExport}.
+ */
+export type DurableObjectExportStorage = "sqlite" | "legacy-kv";
+
+/**
+ * A single declarative Durable Object export entry in the `exports` config
+ * map. `type` is reserved for the export kind. `state` carries the Durable
+ * Object lifecycle and defaults to `"created"` (live) when omitted.
+ *
+ * Mutually exclusive with {@link DurableObjectMigration} at the config-
+ * validation boundary.
+ *
+ *  - `created` (default, live): `storage` is required.
+ *  - `deleted` (tombstone): retire a provisioned namespace whose class has
+ *    been removed from code.
+ *  - `renamed` (tombstone): rewrite a provisioned namespace's class name to
+ *    `renamed_to`. The target name must also appear as a live (state
+ *    `"created"`) `durable-object` entry in the same map.
+ *  - `transferred` (tombstone): hand ownership of the namespace to another
+ *    script in the same account (`transferred_to`). Two-phase commit;
+ *    the target must first deploy an `expecting-transfer` entry naming this
+ *    script via `transfer_from`.
+ *  - `expecting-transfer` (live): receiving side of a two-phase transfer;
+ *    `storage` and `transfer_from` are both required.
+ *
+ * The live states may additionally attach a container via `container`, which
+ * names an entry in the top-level `containers` array. Tombstones cannot.
+ */
+export type DurableObjectExport =
+	| {
+			type: "durable-object";
+			state?: "created";
+			storage: DurableObjectExportStorage;
+			/**
+			 * Attach a container to this Durable Object. Must match the `name` of an
+			 * entry in the top-level `containers` array, and requires
+			 * `storage: "sqlite"`.
+			 *
+			 * @optional
+			 */
+			container?: string;
+	  }
+	| { type: "durable-object"; state: "deleted" }
+	| { type: "durable-object"; state: "renamed"; renamed_to: string }
+	| {
+			type: "durable-object";
+			state: "transferred";
+			transferred_to: string;
+	  }
+	| {
+			type: "durable-object";
+			state: "expecting-transfer";
+			storage: DurableObjectExportStorage;
+			transfer_from: string;
+			/**
+			 * Attach a container to this Durable Object. Must match the `name` of an
+			 * entry in the top-level `containers` array, and requires
+			 * `storage: "sqlite"`.
+			 *
+			 * @optional
+			 */
+			container?: string;
+	  };
+
+export interface WorkerEntrypointExport {
+	type: "worker";
+	cache?: {
+		/** Whether cache is enabled for this entrypoint. */
+		enabled: boolean;
+	};
+}
+
+/**
+ * A single declarative Workflow export entry in the `exports` config map. The
+ * map key is the exported class name (the class extending `WorkflowEntrypoint`);
+ * `name` is the workflow's stable identity, used for instance and storage
+ * namespacing, and is required. The remaining settings match the ones accepted
+ * by `workflows` bindings.
+ */
+export interface WorkflowExport extends Pick<
+	WorkflowBinding,
+	"limits" | "concurrency" | "schedules" | "default_retention"
+> {
+	type: "workflow";
+	name: string;
+}
+
+export type ConfiguredExport =
+	| DurableObjectExport
+	| WorkerEntrypointExport
+	| WorkflowExport;
+
+/**
+ * The declarative `exports` map keyed by export name. Durable Object exports
+ * are mutually exclusive with `migrations` at the wrangler config layer.
+ */
+export type Exports = Record<string, ConfiguredExport>;
 
 /**
  * The `EnvironmentInheritable` interface declares all the configuration fields for an environment
@@ -503,18 +704,31 @@ interface EnvironmentInheritable {
 	migrations: DurableObjectMigration[];
 
 	/**
-	 * "Cron" definitions to trigger a Worker's "scheduled" function.
+	 * Declarative exports configuration — a map of class name to export configuration.
 	 *
-	 * Lets you call Workers periodically, much like a cron job.
+	 * The configuration of Durable Objects via `exports` is mutually exclusive with `migrations`.
 	 *
-	 * More details here https://developers.cloudflare.com/workers/platform/cron-triggers
+	 * @default {}
+	 * @inheritable
+	 */
+	exports: Exports;
+
+	/**
+	 * Definitions that trigger a Worker from a schedule or a Cloudflare event.
+	 *
+	 * More details about cron triggers: https://developers.cloudflare.com/workers/platform/cron-triggers
+	 *
+	 * More details about Artifacts events: https://developers.cloudflare.com/artifacts/guides/event-subscriptions/
 	 *
 	 * For reference, see https://developers.cloudflare.com/workers/wrangler/configuration/#triggers
 	 *
 	 * @default {crons:[]}
 	 * @inheritable
 	 */
-	triggers: { crons: string[] | undefined };
+	triggers: {
+		crons?: string[];
+		events?: ArtifactsEventTrigger[];
+	};
 
 	/**
 	 * Specify limits for runtime behavior.
@@ -657,6 +871,13 @@ interface EnvironmentInheritable {
 	observability: Observability | undefined;
 
 	/**
+	 * Specify the Cloudflare Access authentication behavior of the Worker.
+	 *
+	 * @inheritable
+	 */
+	access: Access | undefined;
+
+	/**
 	 * Specify the cache behavior of the Worker.
 	 *
 	 * @inheritable
@@ -712,6 +933,55 @@ export type DurableObjectBindings = {
 	environment?: string;
 }[];
 
+export type DurableObjectCodeUpdateStrategy = {
+	/** How Durable Object code updates should be applied. */
+	mode: "immediate" | "deferred";
+	/**
+	 * Maximum time, in seconds, to wait for Durable Objects to hibernate.
+	 * Defaults to 300 (5 minutes) and cannot exceed 86400 (24 hours).
+	 * @minimum 0
+	 * @maximum 86400
+	 * @multipleOf 0.001
+	 * @default 300
+	 */
+	max_delay?: number;
+};
+
+export type DurableObjectsConfig = {
+	bindings: DurableObjectBindings;
+	code_update_strategy?: DurableObjectCodeUpdateStrategy;
+};
+
+export type RawDurableObjectsConfig = Omit<DurableObjectsConfig, "bindings"> & {
+	bindings?: DurableObjectBindings;
+};
+
+export const ARTIFACTS_EVENT_TYPES = [
+	"cf.artifacts.repo.created",
+	"cf.artifacts.repo.deleted",
+	"cf.artifacts.repo.forked",
+	"cf.artifacts.repo.imported",
+	"cf.artifacts.repo.pushed",
+	"cf.artifacts.repo.cloned",
+	"cf.artifacts.repo.fetched",
+	"cf.artifacts.repo.token.created",
+	"cf.artifacts.repo.token.revoked",
+] as const;
+
+export type ArtifactsEventType = (typeof ARTIFACTS_EVENT_TYPES)[number];
+
+export type ArtifactsEventTrigger = {
+	type: ArtifactsEventType;
+	filter?: {
+		namespace?: string;
+		repo_name?: string;
+	};
+	targets: {
+		type: "workflow";
+		workflow_name: string;
+	}[];
+};
+
 export type WorkflowBinding = {
 	/** The name of the binding used to refer to the Workflow */
 	binding: string;
@@ -721,16 +991,49 @@ export type WorkflowBinding = {
 	class_name: string;
 	/** The script where the Workflow is defined (if it's external to this Worker) */
 	script_name?: string;
-	/** Whether the Workflow should be remote or not in local development */
-	remote?: boolean;
 	/** Optional limits for the Workflow */
 	limits?: {
 		/** Maximum number of steps a Workflow instance can execute */
 		steps?: number;
 	};
+	/** Optional concurrency configuration for the Workflow */
+	concurrency?: {
+		/** Maximum number of Workflow instances that can run concurrently */
+		limit?: number;
+	};
 	/** Optional cron schedule(s) for automatically triggering workflow instances */
 	schedules?: string | string[];
+	/**
+	 * Optional default retention for instances of this Workflow, applied when an instance does not
+	 * set its own retention. Accepts milliseconds or a duration string such as `"3 days"`, and is
+	 * validated by the Workflows API at deploy time.
+	 */
+	default_retention?: {
+		/** How long to retain instances that completed successfully or were terminated */
+		success_retention?: number | string;
+		/** How long to retain errored instances */
+		error_retention?: number | string;
+	};
 };
+
+type ConnectHandlerConfigBase = {
+	/** The port to listen on. */
+	port: number;
+	/** The address to bind to. Defaults to `127.0.0.1`. */
+	address?: string;
+};
+
+type TcpConnectHandlerConfig = ConnectHandlerConfigBase & { protocol: "tcp" };
+
+type UdpConnectHandlerConfig = ConnectHandlerConfigBase & {
+	protocol: "udp";
+	/** The idle timeout in milliseconds after which a peer flow is closed. */
+	idle_timeout_ms?: number;
+	/** The maximum number of pending datagram bytes per peer flow. */
+	max_pending_bytes?: number;
+};
+
+type ConnectHandlerConfig = TcpConnectHandlerConfig | UdpConnectHandlerConfig;
 
 /**
  * The `EnvironmentNonInheritable` interface declares all the configuration fields for an environment
@@ -784,7 +1087,7 @@ export interface EnvironmentNonInheritable {
 	};
 
 	/**
-	 * A list of durable objects that your Worker should be bound to.
+	 * Durable Object bindings and code update strategy for your Worker.
 	 *
 	 * For more information about Durable Objects, see the documentation at
 	 * https://developers.cloudflare.com/workers/learning/using-durable-objects
@@ -797,9 +1100,7 @@ export interface EnvironmentNonInheritable {
 	 * @default {bindings:[]}
 	 * @nonInheritable
 	 */
-	durable_objects: {
-		bindings: DurableObjectBindings;
-	};
+	durable_objects: DurableObjectsConfig;
 
 	/**
 	 * A list of workflows that your Worker should be bound to.
@@ -902,7 +1203,7 @@ export interface EnvironmentNonInheritable {
 			binding: string;
 
 			/** The name of this Queue. */
-			queue: string;
+			queue?: string;
 
 			/** The number of seconds to wait before delivering a message */
 			delivery_delay?: number;
@@ -943,6 +1244,20 @@ export interface EnvironmentNonInheritable {
 	};
 
 	/**
+	 * Specifies raw sockets that this Worker should listen on.
+	 * Each entry opens a listening socket on the
+	 * given port that delivers incoming connections directly to the Worker's
+	 * `connect(socket, env, ctx)` handler.
+	 *
+	 * NOTE: This field is not automatically inherited from the top level environment,
+	 * and so must be specified in every named environment.
+	 *
+	 * @default []
+	 * @nonInheritable
+	 */
+	connect: ConnectHandlerConfig[];
+
+	/**
 	 * Specifies R2 buckets that are bound to this Worker environment.
 	 *
 	 * NOTE: This field is not automatically inherited from the top level environment,
@@ -964,6 +1279,16 @@ export interface EnvironmentNonInheritable {
 		jurisdiction?: string;
 		/** Whether the R2 bucket should be remote or not in local development */
 		remote?: boolean;
+		/** Settings that only apply to local development */
+		local_dev?: {
+			/**
+			 * EXPERIMENTAL: AWS SigV4 credentials for the local S3-compatible
+			 * endpoint. When set, the bucket is served at
+			 * `/cdn-cgi/local/r2/s3/<bucket-name>` during local development.
+			 * Ignored when the bucket runs remotely.
+			 */
+			experimental_s3_credentials?: LocalS3Credentials;
+		};
 	}[];
 
 	/**
@@ -1086,26 +1411,6 @@ export interface EnvironmentNonInheritable {
 		/** Whether the Agent Memory binding should be remote in local development */
 		remote?: boolean;
 	}[];
-
-	/**
-	 * Cloudflare Web Search binding. There is exactly one shared web corpus, so the
-	 * binding is zero-config -- only the variable name is required, declared as a
-	 * single object (not an array).
-	 *
-	 * NOTE: This field is not automatically inherited from the top level environment,
-	 * and so must be specified in every named environment.
-	 *
-	 * @default {}
-	 * @nonInheritable
-	 */
-	websearch:
-		| {
-				/** The binding name used to refer to Web Search in the Worker. */
-				binding: string;
-				/** Whether the Web Search binding should be remote or not in local development */
-				remote?: boolean;
-		  }
-		| undefined;
 
 	/**
 	 * Specifies Hyperdrive configs that are bound to this Worker environment.
@@ -1380,7 +1685,7 @@ export interface EnvironmentNonInheritable {
 		/** The binding name used to refer to the bound service. */
 		binding: string;
 		/** The namespace to bind to. */
-		namespace: string;
+		namespace?: string;
 		/** Details about the outbound Worker which will handle outbound requests from your namespace */
 		outbound?: DispatchNamespaceOutbound;
 		/** Whether the Dispatch Namespace should be remote or not in local development */
@@ -1482,9 +1787,9 @@ export interface EnvironmentNonInheritable {
 		binding: string;
 
 		/** The Flagship app ID to bind to. */
-		app_id: string;
+		app_id?: string;
 
-		/** Set to `true` to suppress the remote binding warning in local dev. Flagship bindings are always remote. */
+		/** Set to `true` to evaluate flags against the remote Flagship app during local dev, instead of the local simulator. */
 		remote?: boolean;
 	}[];
 
@@ -1578,7 +1883,9 @@ export interface EnvironmentNonInheritable {
  * All the properties are optional, and will be replaced with defaults in the configuration that
  * is used in the rest of the codebase.
  */
-export type RawEnvironment = Partial<Environment>;
+export type RawEnvironment = Partial<Omit<Environment, "durable_objects">> & {
+	durable_objects?: RawDurableObjectsConfig;
+};
 
 /**
  * A bundling resolver rule, defining the modules type for paths that match the specified globs.
@@ -1655,6 +1962,17 @@ export interface Observability {
 	enabled?: boolean;
 	/** The sampling rate */
 	head_sampling_rate?: number;
+	/**
+	 * Whether query strings are removed from request URLs in logs and traces.
+	 *
+	 * @default false
+	 */
+	redact_query_string?: boolean;
+	/** Real-time Issues settings for this Worker. */
+	issues?: {
+		/** Whether real-time Issues are enabled. */
+		enabled?: boolean;
+	};
 	logs?: {
 		enabled?: boolean;
 		/** The sampling rate */
@@ -1693,9 +2011,21 @@ export interface Observability {
 	};
 }
 
+export interface Access {
+	/** Local dev simulation of Cloudflare Access authentication */
+	dev?: {
+		/** The Access application audience tag (aud) */
+		aud: string;
+		/** Mock identity object returned by ctx.access.getIdentity() */
+		identity?: Record<string, unknown>;
+	};
+}
+
 export interface CacheOptions {
 	/** If cache is enabled for this Worker */
 	enabled: boolean;
+	/** Whether cached assets may be reused across Worker versions. */
+	cross_version_cache?: boolean;
 }
 
 export type DockerConfiguration = {
@@ -1720,16 +2050,18 @@ export type ContainerEngine =
  *
  * The `previews` block contains any intentionally divergent configuration intended solely for Previews, including:
  * - All non-inheritable properties (environment variables and bindings like KV, D1, R2, etc.)
- * - Select inheritable properties: `logpush`, `observability`, `limits`, `cache`
+ * - Select inheritable properties: `logpush`, `observability`, `limits`, `placement`, `cache`
  *
  * @inheritable
  */
 export interface PreviewsConfig
 	extends
-		Partial<EnvironmentNonInheritable>,
+		Partial<Omit<EnvironmentNonInheritable, "durable_objects">>,
 		Partial<
 			Pick<
 				EnvironmentInheritable,
-				"logpush" | "observability" | "limits" | "cache"
+				"logpush" | "observability" | "limits" | "placement" | "cache"
 			>
-		> {}
+		> {
+	durable_objects?: { bindings: DurableObjectBindings };
+}

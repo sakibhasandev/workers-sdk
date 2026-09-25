@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { getInstalledPackageVersion } from "@cloudflare/autoconfig";
 import {
 	runInTempDir,
 	writeRedirectedWranglerConfig,
@@ -6,9 +7,7 @@ import {
 } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, it, test, vi } from "vitest";
-import { getInstalledPackageVersion } from "../../autoconfig/frameworks/utils/packages";
 import { clearOutputFilePath } from "../../output";
-import { fetchSecrets } from "../../utils/fetch-secrets";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { clearDialogs } from "../helpers/mock-dialogs";
@@ -33,19 +32,10 @@ import {
 	mockGetScriptWithTags,
 	mockLastDeploymentRequest,
 	mockPatchScriptSettings,
+	mockServiceScriptData,
 } from "./helpers";
 
 vi.mock("command-exists");
-vi.mock("../../check/commands", async (importOriginal) => {
-	return {
-		...(await importOriginal()),
-		analyseBundle() {
-			return `{}`;
-		},
-	};
-});
-
-vi.mock("../../utils/fetch-secrets");
 
 vi.mock("../../package-manager", async (importOriginal) => ({
 	...(await importOriginal()),
@@ -58,8 +48,11 @@ vi.mock("../../package-manager", async (importOriginal) => ({
 	},
 }));
 
-vi.mock("../../autoconfig/run");
-vi.mock("../../autoconfig/frameworks/utils/packages");
+vi.mock("@cloudflare/autoconfig", async (importOriginal) => ({
+	...(await importOriginal()),
+	runAutoConfig: vi.fn(),
+	getInstalledPackageVersion: vi.fn(),
+}));
 vi.mock("@cloudflare/cli-shared-helpers/command");
 
 describe("deploy", () => {
@@ -86,9 +79,12 @@ describe("deploy", () => {
 		msw.use(
 			http.get("*/accounts/:accountId/r2/buckets/:bucketName", async () => {
 				return HttpResponse.json(createFetchResult({}));
-			})
+			}),
+			http.get(
+				"*/accounts/:accountId/workers/scripts/:scriptName/secrets",
+				() => HttpResponse.json(createFetchResult([]))
+			)
 		);
-		vi.mocked(fetchSecrets).mockResolvedValue([]);
 		vi.mocked(getInstalledPackageVersion).mockReturnValue(undefined);
 	});
 
@@ -141,6 +137,7 @@ describe("deploy", () => {
 		});
 	});
 	describe("--keep-vars", () => {
+		beforeEach(() => mockGetSettings({ result: { bindings: [] } }));
 		it("should send keepVars when keep-vars is passed in", async ({
 			expect,
 		}) => {
@@ -241,6 +238,10 @@ describe("deploy", () => {
 				expectedMainModule: "index.js",
 				expectedDispatchNamespace: "test-dispatch-namespace",
 			});
+			mockServiceScriptData({
+				script: { id: "test-name" },
+				dispatchNamespace: "test-dispatch-namespace",
+			});
 
 			await runWrangler(
 				"deploy --dispatch-namespace test-dispatch-namespace index.js"
@@ -265,6 +266,8 @@ describe("deploy", () => {
 				observability: {
 					enabled: true,
 					head_sampling_rate: 0.5,
+					redact_query_string: true,
+					issues: { enabled: true },
 				},
 			});
 			await fs.promises.writeFile("index.js", `export default {};`);
@@ -273,6 +276,8 @@ describe("deploy", () => {
 				expectedObservability: {
 					enabled: true,
 					head_sampling_rate: 0.5,
+					redact_query_string: true,
+					issues: { enabled: true },
 				},
 			});
 
@@ -519,7 +524,6 @@ describe("deploy", () => {
 			mockGetScriptWithTags(null);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -569,7 +573,6 @@ describe("deploy", () => {
 			mockGetScriptWithTags(["some-tag"]);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -599,7 +602,6 @@ describe("deploy", () => {
 			mockGetScriptWithTags(["some-tag", "cf:service=test-name"]);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -656,7 +658,6 @@ describe("deploy", () => {
 			]);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -717,7 +718,6 @@ describe("deploy", () => {
 			]);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -774,7 +774,6 @@ describe("deploy", () => {
 			]);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -824,7 +823,6 @@ describe("deploy", () => {
 			mockGetScriptWithTags(["some-tag", "cf:service=undefined"]);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -860,7 +858,6 @@ describe("deploy", () => {
 			]);
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 
 			writeWranglerConfig({
@@ -979,7 +976,6 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 			mockUploadWorkerRequest({
 				env: "test",
-				useServiceEnvironments: false,
 			});
 
 			await runWrangler("deploy -e test");
@@ -1034,7 +1030,6 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 			mockUploadWorkerRequest({
 				env: "test",
-				useServiceEnvironments: false,
 			});
 
 			await runWrangler("deploy");
@@ -1124,6 +1119,10 @@ describe("deploy", () => {
 					"workers/tag": "v2.0.0",
 				},
 				expectedDispatchNamespace: "test-dispatch-namespace",
+			});
+			mockServiceScriptData({
+				script: { id: "test-name" },
+				dispatchNamespace: "test-dispatch-namespace",
 			});
 
 			await runWrangler(

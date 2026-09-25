@@ -23,24 +23,24 @@ import {
 	ApplicationsService,
 	CreateApplicationRolloutRequest,
 	DeploymentMutationError,
+	Diff,
 	InstanceType,
+	configRolloutStepsToAPI,
 	resolveImageName,
 	RolloutsService,
 	SchedulingPolicy,
+} from "@cloudflare/containers-shared";
+import {
+	sortObjectRecursive,
+	stripUndefined,
 } from "@cloudflare/containers-shared";
 import {
 	FatalError,
 	formatConfigSnippet,
 	UserError,
 } from "@cloudflare/workers-utils";
-import { configRolloutStepsToAPI } from "../containers/deploy";
 import { createCommand } from "../core/create-command";
 import { getOrSelectAccountId } from "../user";
-import { Diff } from "../utils/diff";
-import {
-	sortObjectRecursive,
-	stripUndefined,
-} from "../utils/sortObjectRecursive";
 import {
 	cloudchamberScope,
 	fillOpenAPIConfiguration,
@@ -63,7 +63,7 @@ import type {
 	Observability as ObservabilityConfiguration,
 	UserDeploymentConfiguration,
 } from "@cloudflare/containers-shared";
-import type { ApplicationAffinityHardwareGeneration } from "@cloudflare/containers-shared/src/client/models/ApplicationAffinityHardwareGeneration";
+import type { ApplicationAffinityHardwareGeneration } from "@cloudflare/containers-shared";
 import type {
 	Config,
 	ContainerApp,
@@ -123,12 +123,17 @@ function createApplicationToModifyApplication(
 
 function applicationToCreateApplication(
 	accountId: string,
-	application: Application
+	application: Application,
+	config: Config
 ): CreateApplicationRequest {
 	const app: CreateApplicationRequest = {
 		configuration: {
 			...application.configuration,
-			image: resolveImageName(accountId, application.configuration.image),
+			image: resolveImageName(
+				accountId,
+				application.configuration.image,
+				config
+			),
 		},
 		constraints: application.constraints,
 		max_instances: application.max_instances,
@@ -195,6 +200,7 @@ function observabilityToConfiguration(
 function containerAppToInstanceType(
 	containerApp: ContainerApp
 ): Partial<UserDeploymentConfiguration> {
+	// eslint-disable-next-line @typescript-eslint/no-deprecated -- kept for backward compatibility, reads deprecated `configuration` from API response
 	let configuration = (containerApp.configuration ??
 		{}) as Partial<UserDeploymentConfiguration>;
 
@@ -251,6 +257,7 @@ function containerAppToCreateApplication(
 	containerApp: ContainerApp,
 	observability: Observability | undefined,
 	existingApp: Application | undefined,
+	config: Config,
 	skipDefaults = false
 ): CreateApplicationRequest {
 	const observabilityConfiguration = observabilityToConfiguration(
@@ -259,6 +266,7 @@ function containerAppToCreateApplication(
 	);
 	const instanceType = containerAppToInstanceType(containerApp);
 	const configuration: UserDeploymentConfiguration = {
+		// eslint-disable-next-line @typescript-eslint/no-deprecated -- kept for backward compatibility, reads deprecated `configuration` from API response
 		...(containerApp.configuration as UserDeploymentConfiguration),
 		...instanceType,
 		observability: observabilityConfiguration,
@@ -278,8 +286,9 @@ function containerAppToCreateApplication(
 		configuration: {
 			...configuration,
 			// De-sugar image name
-			image: resolveImageName(accountId, configuration.image),
+			image: resolveImageName(accountId, configuration.image, config),
 		},
+		// eslint-disable-next-line @typescript-eslint/no-deprecated -- kept for backward compatibility, `instances` is deprecated in favor of `max_instances`
 		instances: containerApp.instances ?? 0,
 		scheduling_policy:
 			(containerApp.scheduling_policy as SchedulingPolicy) ??
@@ -372,7 +381,9 @@ export async function apply(
 	log(dim("Container application changes\n"));
 
 	for (const appConfigNoDefaults of config.containers) {
+		// eslint-disable-next-line @typescript-eslint/no-deprecated -- kept for backward compatibility, populates deprecated `configuration` for API compatibility
 		appConfigNoDefaults.configuration ??= {};
+		// eslint-disable-next-line @typescript-eslint/no-deprecated -- kept for backward compatibility, populates deprecated `configuration` for API compatibility
 		appConfigNoDefaults.configuration.image = appConfigNoDefaults.image;
 		const application =
 			applicationByNames[
@@ -387,6 +398,7 @@ export async function apply(
 			appConfigNoDefaults,
 			config.observability,
 			application,
+			config,
 			args.skipDefaults
 		);
 
@@ -394,7 +406,9 @@ export async function apply(
 			// we need to sort the objects (by key) because the diff algorithm works with
 			// lines
 			const prevApp = sortObjectRecursive<CreateApplicationRequest>(
-				stripUndefined(applicationToCreateApplication(accountId, application))
+				stripUndefined(
+					applicationToCreateApplication(accountId, application, config)
+				)
 			);
 
 			// fill up fields that their defaults were changed over-time,
@@ -405,8 +419,10 @@ export async function apply(
 
 			if (
 				prevApp.durable_objects !== undefined &&
+				// eslint-disable-next-line @typescript-eslint/no-deprecated -- kept for backward compatibility, reads deprecated `durable_objects` from config
 				appConfigNoDefaults.durable_objects !== undefined &&
 				prevApp.durable_objects.namespace_id !==
+					// eslint-disable-next-line @typescript-eslint/no-deprecated -- kept for backward compatibility, reads deprecated `durable_objects` from config
 					appConfigNoDefaults.durable_objects.namespace_id
 			) {
 				throw new UserError(
@@ -438,6 +454,7 @@ export async function apply(
 				config.configPath
 			);
 
+			// eslint-disable-next-line @typescript-eslint/no-deprecated -- Diff is used here for formatted config string diffing, not JSON objects
 			const diff = new Diff(prev, now);
 			if (diff.changes === 0) {
 				updateStatus(`no changes ${brandColor(application.name)}`);

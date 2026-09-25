@@ -17,9 +17,42 @@ function parseSourceArgument(
 		modelName?: string;
 		workerName?: string;
 		workflowName?: string;
+		zoneId?: string;
+		domain?: string;
 	}
 ): EventSource {
 	switch (source as EventSourceType) {
+		case EventSourceType.ARTIFACTS:
+			return { type: EventSourceType.ARTIFACTS };
+
+		case EventSourceType.ARTIFACTS_REPO:
+			return { type: EventSourceType.ARTIFACTS_REPO };
+
+		case EventSourceType.BROWSER_RUN:
+			return { type: EventSourceType.BROWSER_RUN };
+
+		case EventSourceType.EMAIL_SENDING:
+			if (!args.zoneId) {
+				throw new UserError(
+					`--zone-id is required when using source '${EventSourceType.EMAIL_SENDING}'`,
+					{ telemetryMessage: "queues subscription create missing zone id" }
+				);
+			}
+			if (!args.domain) {
+				throw new UserError(
+					`--domain is required when using source '${EventSourceType.EMAIL_SENDING}'`,
+					{ telemetryMessage: "queues subscription create missing domain" }
+				);
+			}
+			return {
+				type: EventSourceType.EMAIL_SENDING,
+				zone_id: args.zoneId,
+				domain: args.domain,
+			};
+
+		case EventSourceType.IMAGES:
+			return { type: EventSourceType.IMAGES };
+
 		case EventSourceType.KV:
 			return { type: EventSourceType.KV };
 
@@ -85,6 +118,7 @@ export const queuesSubscriptionCreateCommand = createCommand({
 		owner: "Product: Queues",
 		status: "stable",
 	},
+	behaviour: { supportTemporary: true },
 	positionalArgs: ["queue"],
 	args: {
 		queue: {
@@ -124,12 +158,23 @@ export const queuesSubscriptionCreateCommand = createCommand({
 			describe: "Workflow name (required for workflows.workflow source)",
 			type: "string",
 		},
+		"zone-id": {
+			describe: "Zone ID (required for email.sending source)",
+			type: "string",
+		},
+		domain: {
+			describe:
+				"Sending domain — zone apex or verified subdomain (required for email.sending source)",
+			type: "string",
+		},
 	},
 	async handler(args, { config }) {
 		const source = parseSourceArgument(args.source, {
 			modelName: args.modelName,
 			workerName: args.workerName,
 			workflowName: args.workflowName,
+			zoneId: args.zoneId,
+			domain: args.domain,
 		});
 
 		const events = args.events

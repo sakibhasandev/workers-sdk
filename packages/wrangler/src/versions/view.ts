@@ -2,6 +2,7 @@ import { logRaw } from "@cloudflare/cli-shared-helpers";
 import { UserError } from "@cloudflare/workers-utils";
 import { convertWorkerMetadataBindingsToFlatBindings } from "../api/startDevWorker/utils";
 import { createCommand } from "../core/create-command";
+import { logger } from "../logger";
 import * as metrics from "../metrics";
 import { requireAuth } from "../user";
 import { printBindings } from "../utils/print-bindings";
@@ -18,7 +19,9 @@ export const versionsViewCommand = createCommand({
 		status: "stable",
 	},
 	behaviour: {
+		supportTemporary: true,
 		printBanner: (args) => !args.json,
+		suggestSkillsAfterHandler: (args) => !args.json,
 	},
 	args: {
 		"version-id": {
@@ -112,7 +115,9 @@ export const versionsViewCommand = createCommand({
 		);
 
 		if (bindings.length > 0) {
-			printBindings(convertWorkerMetadataBindingsToFlatBindings(bindings));
+			printBindings(convertWorkerMetadataBindingsToFlatBindings(bindings), {
+				log: logger.log,
+			});
 		}
 	},
 });

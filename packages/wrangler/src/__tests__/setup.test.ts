@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
+import * as run from "@cloudflare/autoconfig";
 import * as cliPackages from "@cloudflare/cli-shared-helpers/packages";
 import { runInTempDir, seed } from "@cloudflare/workers-utils/test-helpers";
 import { afterEach, assert, describe, test, vi } from "vitest";
-import * as run from "../autoconfig/run";
 import { clearOutputFilePath } from "../output";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { runWrangler } from "./helpers/run-wrangler";
@@ -42,7 +42,8 @@ describe("wrangler setup", () => {
 			  -e, --env             Environment to use for operations, and for selecting .env and .dev.vars files  [string]
 			      --env-file        Path to an .env file to load - can be specified multiple times - values from earlier files are overridden by values in later files  [array]
 			  -h, --help            Show help  [boolean]
-			      --install-skills  Install Cloudflare agents skills, if not already present, without asking the user for confirmation  [boolean] [default: false]
+			      --install-skills  Install Cloudflare skills for detected AI coding agents before running the command  [boolean] [default: false]
+			      --profile         Use a specific auth profile  [string]
 			  -v, --version         Show version number  [boolean]
 
 			OPTIONS
@@ -165,7 +166,7 @@ describe("wrangler setup", () => {
 		assert(autoconfigOutputEntry);
 
 		if (autoconfigOutputEntry.summary?.wranglerConfig) {
-			// Let's normalize the wrangler config values that are
+			// Let's normalize the Wrangler config values that are
 			// randomly generated or change over time
 			autoconfigOutputEntry.summary.wranglerConfig.name = "test-name";
 			autoconfigOutputEntry.summary.wranglerConfig.compatibility_date =
@@ -188,15 +189,11 @@ describe("wrangler setup", () => {
 			      "directory": "public",
 			    },
 			    "compatibility_date": "YYYY-MM-DD",
-			    "compatibility_flags": [
-			      "nodejs_compat",
-			    ],
 			    "name": "test-name",
 			    "observability": {
 			      "enabled": true,
 			    },
 			  },
-			  "wranglerInstall": true,
 			}
 		`);
 	});
@@ -260,10 +257,7 @@ describe("wrangler setup", () => {
 				    },
 				    "assets": {
 				      "directory": "<DIR>"
-				    },
-				    "compatibility_flags": [
-				      "nodejs_compat"
-				    ]
+				    }
 				  }
 
 				✋  Autoconfig process run in dry-run mode, existing now.

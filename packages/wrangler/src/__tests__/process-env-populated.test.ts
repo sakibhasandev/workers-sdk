@@ -58,6 +58,30 @@ describe("isProcessEnvPopulated", () => {
 		expect(isProcessEnvPopulated("2026-01-01")).toBe(false);
 	});
 
+	test("date where nodejs_compat is on by default, without the flag", ({
+		expect,
+	}) => {
+		expect(isProcessEnvPopulated("2026-08-04")).toBe(true);
+	});
+
+	test("date where nodejs_compat is on by default, opted out with no_nodejs_compat", ({
+		expect,
+	}) => {
+		expect(isProcessEnvPopulated("2026-08-04", ["no_nodejs_compat"])).toBe(
+			false
+		);
+	});
+
+	test("date where nodejs_compat is on by default, with disable flag", ({
+		expect,
+	}) => {
+		expect(
+			isProcessEnvPopulated("2026-08-04", [
+				"nodejs_compat_do_not_populate_process_env",
+			])
+		).toBe(false);
+	});
+
 	test("future date, with enable flag but without nodejs_compat", ({
 		expect,
 	}) => {
@@ -77,7 +101,7 @@ describe("isProcessEnvPopulated", () => {
 			assert(false, "Unreachable");
 		} catch (e) {
 			expect(e).toMatchInlineSnapshot(
-				`[Error: Can't both enable and disable a flag]`
+				`[Error: Conflicting compatibility flags: "nodejs_compat_populate_process_env" and "nodejs_compat_do_not_populate_process_env" cannot both be set. Remove one of these flags from your configuration.]`
 			);
 		}
 	});

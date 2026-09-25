@@ -1,4 +1,7 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { getInstalledPackageVersion } from "@cloudflare/autoconfig";
 import { getSubdomainValues } from "@cloudflare/deploy-helpers";
+import { DEFAULT_COMPAT_DATE } from "@cloudflare/workers-utils";
 import {
 	runInTempDir,
 	writeWranglerConfig,
@@ -9,12 +12,11 @@ import { http, HttpResponse } from "msw";
  * TODO: remove this `expect` import
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getInstalledPackageVersion } from "../../autoconfig/frameworks/utils/packages";
 import { clearOutputFilePath } from "../../output";
-import { fetchSecrets } from "../../utils/fetch-secrets";
+import { detectAgent } from "../../utils/detect-agent";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
-import { clearDialogs, mockConfirm } from "../helpers/mock-dialogs";
+import { clearDialogs, mockConfirm, mockPrompt } from "../helpers/mock-dialogs";
 import { mockGetZones } from "../helpers/mock-get-zone-from-host";
 import { useMockIsTTY } from "../helpers/mock-istty";
 import { mockUploadWorkerRequest } from "../helpers/mock-upload-worker";
@@ -37,16 +39,6 @@ import {
 } from "./helpers";
 
 vi.mock("command-exists");
-vi.mock("../../check/commands", async (importOriginal) => {
-	return {
-		...(await importOriginal()),
-		analyseBundle() {
-			return `{}`;
-		},
-	};
-});
-
-vi.mock("../../utils/fetch-secrets");
 
 vi.mock("../../package-manager", async (importOriginal) => ({
 	...(await importOriginal()),
@@ -59,8 +51,11 @@ vi.mock("../../package-manager", async (importOriginal) => ({
 	},
 }));
 
-vi.mock("../../autoconfig/run");
-vi.mock("../../autoconfig/frameworks/utils/packages");
+vi.mock("@cloudflare/autoconfig", async (importOriginal) => ({
+	...(await importOriginal()),
+	runAutoConfig: vi.fn(),
+	getInstalledPackageVersion: vi.fn(),
+}));
 vi.mock("@cloudflare/cli-shared-helpers/command");
 
 describe("deploy", () => {
@@ -86,13 +81,17 @@ describe("deploy", () => {
 		msw.use(
 			http.get("*/accounts/:accountId/r2/buckets/:bucketName", async () => {
 				return HttpResponse.json(createFetchResult({}));
-			})
+			}),
+			http.get(
+				"*/accounts/:accountId/workers/scripts/:scriptName/secrets",
+				() => HttpResponse.json(createFetchResult([]))
+			)
 		);
-		vi.mocked(fetchSecrets).mockResolvedValue([]);
 		vi.mocked(getInstalledPackageVersion).mockReturnValue(undefined);
 	});
 
 	afterEach(() => {
+		vi.mocked(detectAgent).mockReturnValue({ isAgent: false, id: null });
 		vi.unstubAllGlobals();
 		clearDialogs();
 		clearOutputFilePath();
@@ -533,12 +532,11 @@ describe("deploy", () => {
 			writeWorkerSource();
 			mockUploadWorkerRequest({
 				env: "dev",
-				useOldUploadApi: true,
 			});
 			mockGetWorkerSubdomain({ enabled: true, env: "dev" });
 			mockUpdateWorkerSubdomain({ enabled: false, env: "dev" });
 
-			await runWrangler("deploy ./index --env dev --legacy-env false");
+			await runWrangler("deploy ./index --env dev");
 
 			expect(std.out).toMatchInlineSnapshot(`
 				"
@@ -546,8 +544,8 @@ describe("deploy", () => {
 				──────────────────
 				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Uploaded test-name (dev) (TIMINGS)
-				No targets deployed for test-name (dev) (TIMINGS)
+				Uploaded test-name-dev (TIMINGS)
+				No targets deployed for test-name-dev (TIMINGS)
 				Current Version ID: Galaxy-Class"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
@@ -571,7 +569,7 @@ describe("deploy", () => {
 			mockGetWorkerSubdomain({ enabled: true, env: "dev" });
 			mockUpdateWorkerSubdomain({ enabled: false, env: "dev" });
 
-			await runWrangler("deploy ./index --env dev --legacy-env false");
+			await runWrangler("deploy ./index --env dev");
 
 			expect(std.out).toMatchInlineSnapshot(`
 				"
@@ -579,9 +577,9 @@ describe("deploy", () => {
 				──────────────────
 				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Uploaded test-name (dev) (TIMINGS)
-				No targets deployed for test-name (dev) (TIMINGS)
-				Current Version ID: undefined"
+				Uploaded test-name-dev (TIMINGS)
+				No targets deployed for test-name-dev (TIMINGS)
+				Current Version ID: Galaxy-Class"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
@@ -599,13 +597,12 @@ describe("deploy", () => {
 			writeWorkerSource();
 			mockUploadWorkerRequest({
 				env: "dev",
-				useOldUploadApi: true,
 			});
 			mockGetWorkerSubdomain({ enabled: false, env: "dev" });
 			mockSubDomainRequest();
 			mockUpdateWorkerSubdomain({ enabled: true, env: "dev" });
 
-			await runWrangler("deploy ./index --env dev --legacy-env false");
+			await runWrangler("deploy ./index --env dev");
 
 			expect(std.out).toMatchInlineSnapshot(`
 				"
@@ -613,9 +610,9 @@ describe("deploy", () => {
 				──────────────────
 				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Uploaded test-name (dev) (TIMINGS)
-				Deployed test-name (dev) triggers (TIMINGS)
-				  https://dev.test-name.test-sub-domain.workers.dev
+				Uploaded test-name-dev (TIMINGS)
+				Deployed test-name-dev triggers (TIMINGS)
+				  https://test-name-dev.test-sub-domain.workers.dev
 				Current Version ID: Galaxy-Class"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
@@ -635,13 +632,12 @@ describe("deploy", () => {
 			writeWorkerSource();
 			mockUploadWorkerRequest({
 				env: "dev",
-				useOldUploadApi: true,
 			});
 			mockGetWorkerSubdomain({ enabled: false, env: "dev" });
 			mockSubDomainRequest();
 			mockUpdateWorkerSubdomain({ enabled: true, env: "dev" });
 
-			await runWrangler("deploy ./index --env dev --legacy-env false");
+			await runWrangler("deploy ./index --env dev");
 
 			expect(std.out).toMatchInlineSnapshot(`
 				"
@@ -649,9 +645,9 @@ describe("deploy", () => {
 				──────────────────
 				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Uploaded test-name (dev) (TIMINGS)
-				Deployed test-name (dev) triggers (TIMINGS)
-				  https://dev.test-name.test-sub-domain.workers.dev
+				Uploaded test-name-dev (TIMINGS)
+				Deployed test-name-dev triggers (TIMINGS)
+				  https://test-name-dev.test-sub-domain.workers.dev
 				Current Version ID: Galaxy-Class"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
@@ -672,12 +668,11 @@ describe("deploy", () => {
 				env: "dev",
 				expectedCompatibilityDate: "2022-01-12",
 				expectedCompatibilityFlags: ["no_global_navigator"],
-				useOldUploadApi: true,
 			});
 			mockSubDomainRequest();
 			mockGetWorkerSubdomain({ enabled: true, env: "dev" });
 
-			await runWrangler("deploy ./index --env dev --legacy-env false");
+			await runWrangler("deploy ./index --env dev");
 
 			expect(std.out).toMatchInlineSnapshot(`
 				"
@@ -685,9 +680,9 @@ describe("deploy", () => {
 				──────────────────
 				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Uploaded test-name (dev) (TIMINGS)
-				Deployed test-name (dev) triggers (TIMINGS)
-				  https://dev.test-name.test-sub-domain.workers.dev
+				Uploaded test-name-dev (TIMINGS)
+				Deployed test-name-dev triggers (TIMINGS)
+				  https://test-name-dev.test-sub-domain.workers.dev
 				Current Version ID: Galaxy-Class"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
@@ -711,12 +706,11 @@ describe("deploy", () => {
 				env: "dev",
 				expectedCompatibilityDate: "2022-01-13",
 				expectedCompatibilityFlags: ["global_navigator"],
-				useOldUploadApi: true,
 			});
 			mockGetWorkerSubdomain({ enabled: true, env: "dev" });
 			mockSubDomainRequest();
 
-			await runWrangler("deploy ./index --env dev --legacy-env false");
+			await runWrangler("deploy ./index --env dev");
 
 			expect(std.out).toMatchInlineSnapshot(`
 				"
@@ -724,9 +718,9 @@ describe("deploy", () => {
 				──────────────────
 				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Uploaded test-name (dev) (TIMINGS)
-				Deployed test-name (dev) triggers (TIMINGS)
-				  https://dev.test-name.test-sub-domain.workers.dev
+				Uploaded test-name-dev (TIMINGS)
+				Deployed test-name-dev triggers (TIMINGS)
+				  https://test-name-dev.test-sub-domain.workers.dev
 				Current Version ID: Galaxy-Class"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
@@ -755,7 +749,7 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 
 			await runWrangler(
-				"deploy ./index --env dev --legacy-env false --compatibility-date 2022-01-14 --compatibility-flags url_standard"
+				"deploy ./index --env dev --compatibility-date 2022-01-14 --compatibility-flags url_standard"
 			);
 
 			expect(std.out).toMatchInlineSnapshot(`
@@ -764,10 +758,10 @@ describe("deploy", () => {
 				──────────────────
 				Total Upload: xx KiB / gzip: xx KiB
 				Worker Startup Time: 100 ms
-				Uploaded test-name (dev) (TIMINGS)
-				Deployed test-name (dev) triggers (TIMINGS)
-				  https://dev.test-name.test-sub-domain.workers.dev
-				Current Version ID: undefined"
+				Uploaded test-name-dev (TIMINGS)
+				Deployed test-name-dev triggers (TIMINGS)
+				  https://test-name-dev.test-sub-domain.workers.dev
+				Current Version ID: Galaxy-Class"
 			`);
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
@@ -785,7 +779,7 @@ describe("deploy", () => {
 			}
 
 			expect(err?.message.replaceAll(/\d/g, "X")).toMatchInlineSnapshot(`
-				"A compatibility_date is required when publishing. Add the following to your Wrangler configuration file:
+				"A compatibility_date is required when uploading a Worker. Add the following to your Wrangler configuration file:
 				    \`\`\`
 				    {"compatibility_date":"XXXX-XX-XX"}
 				    \`\`\`
@@ -798,20 +792,18 @@ describe("deploy", () => {
 			expect,
 		}) => {
 			setIsTTY(false);
-			vi.setSystemTime(new Date(2020, 11, 1));
 
 			writeWorkerSource();
 
 			await expect(
 				async () => await runWrangler("deploy ./index.js --name my-worker")
-			).rejects.toThrowErrorMatchingInlineSnapshot(`
-				[Error: A compatibility_date is required when publishing. Add the following to your Wrangler configuration file:
-				    \`\`\`
-				    {"compatibility_date":"2020-12-01"}
-				    \`\`\`
-				    Or you could pass it in your terminal as \`--compatibility-date 2020-12-01\`
-				See https://developers.cloudflare.com/workers/platform/compatibility-dates for more information.]
-			`);
+			).rejects
+				.toThrow(`A compatibility_date is required when uploading a Worker. Add the following to your Wrangler configuration file:
+    \`\`\`
+    {"compatibility_date":"${DEFAULT_COMPAT_DATE}"}
+    \`\`\`
+    Or you could pass it in your terminal as \`--compatibility-date ${DEFAULT_COMPAT_DATE}\`
+See https://developers.cloudflare.com/workers/platform/compatibility-dates for more information.`);
 		});
 
 		it("should enable the workers.dev domain if workers_dev is undefined and subdomain is not already available", async ({
@@ -866,6 +858,37 @@ describe("deploy", () => {
 			expect(std.err).toMatchInlineSnapshot(`""`);
 		});
 
+		it("should get the workers.dev URL from the Worker resource", async ({
+			expect,
+		}) => {
+			vi.stubEnv("WRANGLER_OUTPUT_FILE_PATH", "output.json");
+			writeWranglerConfig({ workers_dev: true });
+			writeWorkerSource();
+			mockUploadWorkerRequest();
+			mockGetWorkerSubdomain({ enabled: false });
+			mockUpdateWorkerSubdomain({ enabled: true });
+			await runWrangler("deploy ./index");
+
+			expect(std.out).toContain("Uploaded test-name");
+			expect(std.out).toContain("Current Version ID");
+			expect(std.out).toContain("Deployed test-name triggers");
+			expect(std.out).toContain(
+				"https://test-name.test-sub-domain.workers.dev"
+			);
+			expect(std.out).not.toContain("No targets deployed");
+			expect(std.err).toBe("");
+
+			const outputEntries = readFileSync("output.json", "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line));
+			expect(
+				outputEntries.find((entry) => entry.type === "deploy")
+			).toMatchObject({
+				targets: ["https://test-name.test-sub-domain.workers.dev"],
+			});
+		});
+
 		it("should fail to deploy to the workers.dev domain if email is unverified", async ({
 			expect,
 		}) => {
@@ -910,7 +933,7 @@ describe("deploy", () => {
 			});
 			writeWorkerSource();
 			mockUploadWorkerRequest();
-			mockGetWorkerSubdomain({ enabled: false });
+			mockGetWorkerSubdomain({ enabled: false, subdomain: false });
 			mockSubDomainRequest("does-not-exist", false);
 
 			mockConfirm({
@@ -923,6 +946,345 @@ describe("deploy", () => {
 				[Error: You can either deploy your worker to one or more routes by specifying them in your wrangler.toml file, or register a workers.dev subdomain here:
 				https://dash.cloudflare.com/some-account-id/workers/onboarding]
 			`);
+		});
+
+		describe("brand-new account / first deploy (no workers.dev subdomain yet)", () => {
+			// Pretend the Worker does not exist yet so `preUploadApiChecks` treats
+			// this as a first-ever upload. This is the scenario where the worker
+			// upload API rejects the request with error 10063 until a workers.dev
+			// subdomain has been registered for the account.
+			function mockWorkerDoesNotExist() {
+				msw.use(
+					http.get("*/accounts/:accountId/workers/services/:scriptName", () =>
+						HttpResponse.json(
+							createFetchResult(null, false, [
+								{ code: 10090, message: "workers.api.error.service_not_found" },
+							])
+						)
+					)
+				);
+			}
+
+			it("registers a workers.dev subdomain before uploading a new Worker", async ({
+				expect,
+			}) => {
+				writeWranglerConfig();
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				// The account-level subdomain lookup reports "not registered" until we
+				// register one before upload.
+				mockSubDomainRequest("test-sub-domain", false, true);
+				mockUploadWorkerRequest({ useOldUploadApi: true });
+
+				mockConfirm({
+					text: "Would you like to register a workers.dev subdomain now?",
+					result: true,
+				});
+				mockPrompt({
+					text: "What would you like your workers.dev subdomain to be? It will be accessible at https://<subdomain>.workers.dev",
+					result: "test-sub-domain",
+				});
+				mockConfirm({
+					text: "Creating a workers.dev subdomain for your account at https://test-sub-domain.workers.dev. Ok to proceed?",
+					result: true,
+				});
+				msw.use(
+					// During registration wrangler checks subdomain availability; the
+					// API returns 10032 ("subdomain_unavailable") when the subdomain
+					// does not yet exist and so can be registered.
+					http.get(
+						"*/accounts/:accountId/workers/subdomains/:subdomain",
+						() =>
+							HttpResponse.json(
+								createFetchResult(null, false, [
+									{ code: 10032, message: "subdomain_unavailable" },
+								])
+							),
+						{ once: true }
+					),
+					http.put(
+						"*/accounts/:accountId/workers/subdomain",
+						async ({ request }) => {
+							expect(await request.json()).toEqual({
+								subdomain: "test-sub-domain",
+							});
+							return HttpResponse.json(
+								createFetchResult({ subdomain: "test-sub-domain" })
+							);
+						},
+						{ once: true }
+					)
+				);
+
+				await runWrangler("deploy ./index");
+
+				expect(std.out).toMatchInlineSnapshot(`
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					Success! It may take a few minutes for DNS records to update.
+					Visit https://dash.cloudflare.com/some-account-id/workers/subdomain to edit your workers.dev subdomain
+					Total Upload: xx KiB / gzip: xx KiB
+					Worker Startup Time: 100 ms
+					Uploaded test-name (TIMINGS)
+					Deployed test-name triggers (TIMINGS)
+					  https://test-name.test-sub-domain.workers.dev
+					Current Version ID: Galaxy-Class"
+				`);
+				expect(std.warn).toMatchInlineSnapshot(`
+					"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mYou need to register a workers.dev subdomain before publishing to workers.dev[0m
+
+					"
+				`);
+			});
+
+			it("fails when workers.dev subdomain registration is unauthorized", async ({
+				expect,
+			}) => {
+				writeFileSync(
+					"package.json",
+					JSON.stringify({ name: "agent-project-name" })
+				);
+				writeWranglerConfig({ name: undefined as unknown as string });
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				mockSubDomainRequest("agent-project-name", false, false);
+				mockUploadWorkerRequest({
+					expectedScriptName: "agent-project-name",
+					useOldUploadApi: true,
+				});
+				vi.mocked(detectAgent).mockReturnValue({
+					isAgent: true,
+					id: "test-agent",
+				});
+				msw.use(
+					http.get("*/accounts/:accountId/workers/subdomains/:subdomain", () =>
+						HttpResponse.json(
+							createFetchResult(null, false, [
+								{ code: 10032, message: "subdomain_unavailable" },
+							])
+						)
+					),
+					http.put("*/accounts/:accountId/workers/subdomain", () =>
+						HttpResponse.json(
+							createFetchResult(null, false, [
+								{ code: 10000, message: "Authentication error" },
+							]),
+							{ status: 403 }
+						)
+					)
+				);
+
+				await expect(runWrangler("deploy ./index")).rejects.toThrow(
+					'Wrangler could not automatically register "agent-project-name" as your `workers.dev` subdomain.'
+				);
+			});
+
+			it("uses the project name without prompting when run by an agent", async ({
+				expect,
+			}) => {
+				writeFileSync(
+					"package.json",
+					JSON.stringify({ name: "agent-project-name" })
+				);
+				writeWranglerConfig({ name: undefined as unknown as string });
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				mockSubDomainRequest("agent-project-name", true, false);
+				mockSubDomainRequest("agent-project-name", false, true);
+				mockUploadWorkerRequest({
+					expectedScriptName: "agent-project-name",
+					useOldUploadApi: true,
+				});
+				mockGetWorkerSubdomain({
+					enabled: true,
+					expectedScriptName: "agent-project-name",
+					subdomain: "agent-project-name",
+				});
+				vi.mocked(detectAgent).mockReturnValue({
+					isAgent: true,
+					id: "test-agent",
+				});
+				msw.use(
+					http.get(
+						"*/accounts/:accountId/workers/subdomains/:subdomain",
+						() =>
+							HttpResponse.json(
+								createFetchResult(null, false, [
+									{ code: 10032, message: "subdomain_unavailable" },
+								])
+							),
+						{ once: true }
+					),
+					http.put(
+						"*/accounts/:accountId/workers/subdomain",
+						async ({ request }) => {
+							expect(await request.json()).toEqual({
+								subdomain: "agent-project-name",
+							});
+							return HttpResponse.json(
+								createFetchResult({ subdomain: "agent-project-name" })
+							);
+						},
+						{ once: true }
+					)
+				);
+
+				await runWrangler("deploy ./index");
+
+				expect(std.out).toContain(
+					'Using the project name "agent-project-name" as the Worker name.'
+				);
+				expect(std.out).toContain(
+					"Visit https://dash.cloudflare.com/some-account-id/workers/subdomain to edit your workers.dev subdomain"
+				);
+				expect(std.out).toContain(
+					"https://agent-project-name.agent-project-name.workers.dev"
+				);
+			});
+
+			it("fails before uploading when the user declines to register a subdomain", async ({
+				expect,
+			}) => {
+				writeWranglerConfig();
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				mockSubDomainRequest("does-not-exist", false);
+
+				mockConfirm({
+					text: "Would you like to register a workers.dev subdomain now?",
+					result: false,
+				});
+
+				// Note: the upload request is deliberately not mocked. The deploy must
+				// fail during pre-upload checks, before any upload is attempted
+				// (previously the upload request itself failed with a cryptic 10063
+				// "You need a workers.dev subdomain in order to proceed" error).
+				await expect(runWrangler("deploy ./index")).rejects
+					.toThrowErrorMatchingInlineSnapshot(`
+					[Error: You can either deploy your worker to one or more routes by specifying them in your wrangler.toml file, or register a workers.dev subdomain here:
+					https://dash.cloudflare.com/some-account-id/workers/onboarding]
+				`);
+			});
+
+			it("uploads a new Worker without prompting when the account already has a subdomain", async ({
+				expect,
+			}) => {
+				writeWranglerConfig();
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				// Fetched before upload to confirm that registration is not required.
+				mockSubDomainRequest("test-sub-domain");
+				mockUploadWorkerRequest({ useOldUploadApi: true });
+
+				await runWrangler("deploy ./index");
+
+				expect(std.out).toMatchInlineSnapshot(`
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					Total Upload: xx KiB / gzip: xx KiB
+					Worker Startup Time: 100 ms
+					Uploaded test-name (TIMINGS)
+					Deployed test-name triggers (TIMINGS)
+					  https://test-name.test-sub-domain.workers.dev
+					Current Version ID: Galaxy-Class"
+				`);
+				expect(std.warn).toMatchInlineSnapshot(`""`);
+			});
+
+			it("uploads a new Worker when granular auth prevents the account subdomain lookup", async ({
+				expect,
+			}) => {
+				writeWranglerConfig();
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				mockUploadWorkerRequest({ useOldUploadApi: true });
+				msw.use(
+					http.get("*/accounts/:accountId/workers/subdomain", () =>
+						HttpResponse.json(
+							createFetchResult(null, false, [
+								{ code: 10000, message: "Authentication error" },
+							]),
+							{ status: 403 }
+						)
+					)
+				);
+
+				await runWrangler("deploy ./index");
+
+				expect(std.out).toContain("Uploaded test-name");
+				expect(std.out).toContain(
+					"https://test-name.test-sub-domain.workers.dev"
+				);
+				expect(std.out).toContain("Current Version ID");
+				expect(std.err).toBe("");
+			});
+
+			it("does not check for a workers.dev subdomain when a new Worker only targets routes", async ({
+				expect,
+			}) => {
+				writeWranglerConfig({
+					routes: ["http://example.com/*"],
+				});
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				// A brand-new Worker is uploaded via the old upload API.
+				mockUploadWorkerRequest({ useOldUploadApi: true });
+				mockGetWorkerSubdomain({ enabled: false });
+				mockGetZones(expect, "example.com", [{ id: "example-id" }]);
+				mockGetZoneWorkerRoutes(expect, "example-id");
+				mockPublishRoutesRequest({ routes: ["http://example.com/*"] });
+				// The account-level workers.dev subdomain endpoint is deliberately not
+				// mocked: a routes-only deploy does not publish to workers.dev, so the
+				// pre-upload check must be skipped entirely. MSW throws on any
+				// unhandled request, so a regression that reintroduced the original
+				// `!workerExists`-only gate (fetching the subdomain here) would fail.
+				await runWrangler("deploy index.js");
+
+				expect(std.out).toMatchInlineSnapshot(`
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					Total Upload: xx KiB / gzip: xx KiB
+					Worker Startup Time: 100 ms
+					Uploaded test-name (TIMINGS)
+					Deployed test-name triggers (TIMINGS)
+					  http://example.com/*
+					Current Version ID: Galaxy-Class"
+				`);
+				expect(std.err).toMatchInlineSnapshot(`""`);
+				expect(std.warn).toMatchInlineSnapshot(`""`);
+			});
+
+			it("does not check for a workers.dev subdomain when a new Worker sets workers_dev = false", async ({
+				expect,
+			}) => {
+				writeWranglerConfig({
+					workers_dev: false,
+				});
+				writeWorkerSource();
+				mockWorkerDoesNotExist();
+				// A brand-new Worker is uploaded via the old upload API.
+				mockUploadWorkerRequest({ useOldUploadApi: true });
+				mockGetWorkerSubdomain({ enabled: false });
+				// As above, the account-level subdomain endpoint must never be hit
+				// when the deploy does not target workers.dev.
+				await runWrangler("deploy ./index");
+
+				expect(std.out).toMatchInlineSnapshot(`
+					"
+					 ⛅️ wrangler x.x.x
+					──────────────────
+					Total Upload: xx KiB / gzip: xx KiB
+					Worker Startup Time: 100 ms
+					Uploaded test-name (TIMINGS)
+					No targets deployed for test-name (TIMINGS)
+					Current Version ID: Galaxy-Class"
+				`);
+				expect(std.err).toMatchInlineSnapshot(`""`);
+				expect(std.warn).toMatchInlineSnapshot(`""`);
+			});
 		});
 
 		it("should not deploy to workers.dev if there are any routes defined", async ({
@@ -969,19 +1331,16 @@ describe("deploy", () => {
 			writeWorkerSource();
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetWorkerSubdomain({
 				enabled: false,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetZones(expect, "production.example.com", [{ id: "example-id" }]);
 			mockGetZoneWorkerRoutes(expect, "example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			await runWrangler("deploy index.js --env production");
 
@@ -1014,19 +1373,16 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetWorkerSubdomain({
 				enabled: false,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetZones(expect, "production.example.com", [{ id: "example-id" }]);
 			mockGetZoneWorkerRoutes(expect, "example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			await runWrangler("deploy index.js --env production");
 
@@ -1098,23 +1454,19 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetWorkerSubdomain({
 				enabled: false,
 				previews_enabled: true,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockUpdateWorkerSubdomain({
 				enabled: true,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			await runWrangler("deploy index.js --env production");
 
@@ -1149,23 +1501,19 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetWorkerSubdomain({
 				enabled: false,
 				previews_enabled: true,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockUpdateWorkerSubdomain({
 				enabled: true,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			await runWrangler("deploy index.js --env production");
 
@@ -1200,19 +1548,16 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetWorkerSubdomain({
 				enabled: false,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetZones(expect, "production.example.com", [{ id: "example-id" }]);
 			mockGetZoneWorkerRoutes(expect, "example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			await runWrangler("deploy index.js --env production");
 
@@ -1246,19 +1591,16 @@ describe("deploy", () => {
 			mockSubDomainRequest();
 			mockUploadWorkerRequest({
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetWorkerSubdomain({
 				enabled: false,
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			mockGetZones(expect, "production.example.com", [{ id: "example-id" }]);
 			mockGetZoneWorkerRoutes(expect, "example-id");
 			mockPublishRoutesRequest({
 				routes: ["http://production.example.com/*"],
 				env: "production",
-				useServiceEnvironments: false,
 			});
 			await runWrangler("deploy index.js --env production");
 
@@ -1473,6 +1815,28 @@ describe("deploy", () => {
 
 				"
 			`);
+		});
+
+		it("should use the Worker preview URL suffix in mixed-state warnings", async ({
+			expect,
+		}) => {
+			writeWranglerConfig({
+				workers_dev: false,
+				preview_urls: true,
+			});
+			writeWorkerSource();
+			mockUploadWorkerRequest();
+			mockGetWorkerSubdomain({ enabled: true, previews_enabled: true });
+			mockUpdateWorkerSubdomain({ enabled: false, previews_enabled: true });
+			await runWrangler("deploy ./index");
+
+			expect(std.out).toContain("Uploaded test-name");
+			expect(std.warn).toContain(
+				"You are disabling the 'workers.dev' subdomain for this Worker, but Preview URLs are still enabled."
+			);
+			expect(std.warn).toContain(
+				"https://<VERSION_PREFIX>-test-name.test-sub-domain.workers.dev"
+			);
 		});
 
 		it("should warn when workers_dev=true,preview_urls=false", async ({

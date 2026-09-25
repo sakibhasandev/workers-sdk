@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { getBindings } from "@cloudflare/workers-utils";
 import { Response } from "undici";
-import { getBindings } from "../../deployment-bundle/bindings";
 import { createWorkerUploadForm } from "../../deployment-bundle/create-worker-upload-form";
 import { loadSourceMaps } from "../../deployment-bundle/source-maps";
 import { parseConfigPlacement } from "../../utils/placement";
@@ -48,7 +48,7 @@ function createWorkerBundleFormData(
 	let placement: CfPlacement | undefined;
 
 	if (config !== undefined) {
-		placement = parseConfigPlacement(config);
+		placement = parseConfigPlacement(config.placement);
 	} else {
 		placement = undefined;
 	}
@@ -59,6 +59,7 @@ function createWorkerBundleFormData(
 			main: mainModule,
 			modules: workerBundle.modules,
 			migrations: undefined,
+			exports: undefined,
 			compatibility_date: config?.compatibility_date,
 			compatibility_flags: config?.compatibility_flags,
 			keepVars: undefined,

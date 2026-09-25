@@ -1,6 +1,9 @@
 import { logRaw, updateStatus } from "@cloudflare/cli-shared-helpers";
 import { blue } from "@cloudflare/cli-shared-helpers/colors";
-import { mergeObjectProperties, transformFile } from "@cloudflare/codemod";
+import {
+	mergeObjectProperties,
+	transformFile,
+} from "@cloudflare/shared-ast-primitives";
 import { runFrameworkGenerator } from "frameworks/index";
 import { getWorkerdCompatibilityDate } from "helpers/compatDate";
 import { usesTypescript } from "helpers/files";
@@ -12,7 +15,12 @@ import type { C3Context } from "types";
 const { npm } = detectPackageManager();
 
 const generate = async (ctx: C3Context) => {
-	await runFrameworkGenerator(ctx, [ctx.project.name, "--template=latest"]);
+	await runFrameworkGenerator(ctx, [
+		ctx.project.name,
+		"--template=latest",
+		// Analog's npm Vite overrides can fail as deps shift; remove once fixed upstream.
+		...(npm === "npm" ? ["--skipViteOverrides"] : []),
+	]);
 	logRaw("");
 };
 
@@ -20,7 +28,7 @@ const configure = async (ctx: C3Context) => {
 	usesTypescript(ctx);
 	const filePath = `vite.config.${usesTypescript(ctx) ? "ts" : "js"}`;
 
-	const compatDate = getWorkerdCompatibilityDate(ctx.project.path);
+	const compatDate = getWorkerdCompatibilityDate();
 
 	updateStatus(`Updating configuration in ${blue(filePath)}`);
 
@@ -69,6 +77,7 @@ const config: TemplateConfig = {
 	frameworkCli: "create-analog",
 	displayName: "Analog",
 	platform: "workers",
+	languages: ["ts"],
 	copyFiles: {
 		path: "./templates",
 	},

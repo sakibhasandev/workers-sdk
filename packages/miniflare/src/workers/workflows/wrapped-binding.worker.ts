@@ -1,7 +1,13 @@
 import type {
 	WorkflowBinding,
 	WorkflowInstanceRestartOptions,
+	WorkflowInstanceTerminateOptions,
 } from "@cloudflare/workflows-shared/src/binding";
+import type {
+	WorkflowSubscription,
+	WorkflowSubscriptionOptions,
+} from "@cloudflare/workflows-shared/src/subscription";
+import type { WorkflowIntrospectionOperation } from "@cloudflare/workflows-shared/src/types";
 
 class WorkflowImpl implements Workflow {
 	constructor(private binding: WorkflowBinding) {}
@@ -32,8 +38,31 @@ class WorkflowImpl implements Workflow {
 		});
 	}
 
+	async deleteBatch(instanceIds: string[]): Promise<WorkflowBatchDeleteResult> {
+		return this.binding.deleteBatch({ instances: instanceIds });
+	}
+
 	async unsafeGetBindingName(): Promise<string> {
 		return this.binding.unsafeGetBindingName();
+	}
+
+	async unsafeStartIntrospection(): Promise<string> {
+		return this.binding.unsafeStartIntrospection();
+	}
+
+	async unsafeStopIntrospection(sessionId: string): Promise<void> {
+		return this.binding.unsafeStopIntrospection(sessionId);
+	}
+
+	async unsafeSetIntrospectionOperations(
+		sessionId: string,
+		operations: WorkflowIntrospectionOperation[]
+	): Promise<void> {
+		return this.binding.unsafeSetIntrospectionOperations(sessionId, operations);
+	}
+
+	async unsafeGetIntrospectionInstances(sessionId: string): Promise<string[]> {
+		return this.binding.unsafeGetIntrospectionInstances(sessionId);
 	}
 
 	async unsafeAbort(instanceId: string, reason?: string): Promise<void> {
@@ -84,9 +113,16 @@ class InstanceImpl implements WorkflowInstance {
 		await instance.resume();
 	}
 
-	public async terminate(): Promise<void> {
+	public async terminate(
+		options?: WorkflowInstanceTerminateOptions
+	): Promise<void> {
 		using instance = await this.getInstance();
-		await instance.terminate();
+		// TODO(vaish): remove cast once @cloudflare/workers-types ships terminate options
+		await (
+			instance.terminate as (
+				options?: WorkflowInstanceTerminateOptions
+			) => Promise<void>
+		)(options);
 	}
 
 	public async restart(
@@ -96,10 +132,22 @@ class InstanceImpl implements WorkflowInstance {
 		await instance.restart(options);
 	}
 
+	public async delete(): Promise<void> {
+		await this.binding.deleteInstance(this.id);
+	}
+
 	public async status(): Promise<InstanceStatus> {
 		using instance = await this.getInstance();
 		using res = (await instance.status()) as InstanceStatus & Disposable;
 		return structuredClone(res);
+	}
+
+	public async subscribe(
+		options?: WorkflowSubscriptionOptions
+	): Promise<WorkflowSubscription> {
+		using instance = await this.getInstance();
+		// @ts-expect-error `subscribe` not yet included in workers-types.
+		return await instance.subscribe(options);
 	}
 
 	public async sendEvent(args: {

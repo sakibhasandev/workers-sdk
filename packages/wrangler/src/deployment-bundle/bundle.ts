@@ -12,6 +12,7 @@ import { getFlag } from "../experimental-flags";
 import { getBasePath } from "../paths";
 import { applyMiddlewareLoaderFacade } from "./apply-middleware";
 import {
+	BuildFailure,
 	isBuildFailure,
 	rewriteNodeCompatBuildFailure,
 	rewriteUnresolvedModuleBuildFailure,
@@ -316,7 +317,7 @@ export async function bundleWorker(
 		inject.push(...(result.inject ?? []));
 	}
 
-	if (watch) {
+	if (watch && bundle) {
 		// `esbuild` doesn't support returning `watch*` options from `onStart()`
 		// plugin callbacks. Instead, we define an empty virtual module that is
 		// imported in this injected module. Importing that module registers watchers.
@@ -563,16 +564,6 @@ export async function bundleWorker(
 			entryDirectory: entry.projectRoot,
 		},
 	};
-}
-
-class BuildFailure extends Error {
-	constructor(
-		message: string,
-		readonly errors: esbuild.Message[],
-		readonly warnings: esbuild.Message[]
-	) {
-		super(message);
-	}
 }
 
 /**

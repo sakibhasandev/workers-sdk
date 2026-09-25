@@ -48,6 +48,10 @@ describe("createWorkerUploadForm — basic structure", () => {
 						name: "index.js.map",
 						content: '{"version":3}',
 					},
+					{
+						name: "chunk.js.map",
+						content: '{"version":3,"file":"chunk.js"}',
+					},
 				],
 			}),
 			{}
@@ -55,6 +59,9 @@ describe("createWorkerUploadForm — basic structure", () => {
 		const mapPart = form.get("index.js.map") as File;
 		expect(mapPart).not.toBeNull();
 		expect(mapPart.type).toBe("application/source-map");
+		const chunkMapPart = form.get("chunk.js.map") as File;
+		expect(chunkMapPart).not.toBeNull();
+		expect(chunkMapPart.type).toBe("application/source-map");
 	});
 
 	it("should include additional ESM modules as form parts", ({ expect }) => {
@@ -93,9 +100,7 @@ describe("createWorkerUploadForm — basic structure", () => {
 				}),
 				{}
 			)
-		).toThrowError(
-			"More than one module can only be specified when type = 'esm'"
-		);
+		).toThrow("More than one module can only be specified when type = 'esm'");
 	});
 });
 
@@ -159,6 +164,14 @@ describe("createWorkerUploadForm — optional metadata fields", () => {
 			expected: true,
 		},
 		{
+			label: "Durable Objects code update strategy",
+			overrides: {
+				code_update_strategy: { mode: "deferred", max_delay: 45.678 },
+			},
+			key: "code_update_strategy",
+			expected: { mode: "deferred", max_delay: 45.678 },
+		},
+		{
 			label: "placement",
 			overrides: { placement: { mode: "smart" } },
 			key: "placement",
@@ -187,6 +200,76 @@ describe("createWorkerUploadForm — optional metadata fields", () => {
 			overrides: { cache: { enabled: true } },
 			key: "cache_options",
 			expected: { enabled: true },
+		},
+		{
+			label: "cache with cross version cache",
+			overrides: { cache: { enabled: false, cross_version_cache: true } },
+			key: "cache_options",
+			expected: { enabled: false, cross_version_cache: true },
+		},
+		{
+			label: "exports",
+			overrides: {
+				exports: {
+					default: { type: "worker", cache: { enabled: false } },
+					Admin: { type: "worker", cache: { enabled: true } },
+				},
+			},
+			key: "exports",
+			expected: {
+				default: { type: "worker", cache: { enabled: false } },
+				Admin: { type: "worker", cache: { enabled: true } },
+			},
+		},
+		{
+			label: "mixed exports",
+			overrides: {
+				exports: {
+					Counter: { type: "durable-object", storage: "sqlite" },
+					Admin: { type: "worker", cache: { enabled: true } },
+				},
+			},
+			key: "exports",
+			expected: {
+				Counter: { type: "durable-object", storage: "sqlite" },
+				Admin: { type: "worker", cache: { enabled: true } },
+			},
+		},
+		{
+			label: "durable object exports with an attached container",
+			overrides: {
+				exports: {
+					Counter: {
+						type: "durable-object",
+						storage: "sqlite",
+						container: "my-container",
+					},
+				},
+			},
+			key: "exports",
+			expected: {
+				Counter: {
+					type: "durable-object",
+					storage: "sqlite",
+					container: "my-container",
+				},
+			},
+		},
+		{
+			label: "containers linked by class_name",
+			overrides: {
+				containers: [{ name: "my-container", class_name: "Counter" }],
+			},
+			key: "containers",
+			expected: [{ name: "my-container", class_name: "Counter" }],
+		},
+		{
+			label: "containers linked from the exports side",
+			overrides: {
+				containers: [{ name: "my-container" }],
+			},
+			key: "containers",
+			expected: [{ name: "my-container" }],
 		},
 		{
 			label: "annotations",
@@ -239,6 +322,22 @@ describe("createWorkerUploadForm — unsafe metadata", () => {
 		);
 		const metadata = getMetadata(form);
 		expect(metadata.custom_key).toBe("custom_value");
+	});
+
+	it("should prefer an unsafe code update strategy override", ({ expect }) => {
+		const form = createWorkerUploadForm(
+			createEsmWorker({
+				code_update_strategy: { mode: "deferred", max_delay: 300 },
+			}),
+			{},
+			{
+				unsafe: {
+					metadata: { code_update_strategy: { mode: "immediate" } },
+				},
+			}
+		);
+		const metadata = getMetadata(form);
+		expect(metadata.code_update_strategy).toEqual({ mode: "immediate" });
 	});
 });
 

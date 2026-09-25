@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { SELF } from "cloudflare:test";
+import { exports } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 
 // Mock URL for the remote worker - all outbound fetches will be intercepted
 const MOCK_REMOTE_URL = "http://mock-remote.test";
+const PREVIEW_COOKIE_NAME = "__Host-token";
 
 function removeUUID(str: string) {
 	return str.replace(
@@ -83,8 +84,8 @@ afterEach(() => {
 
 describe("Preview Worker", () => {
 	it("should obtain token from exchange_url", async ({ expect }) => {
-		const resp = await SELF.fetch(
-			`https://preview.devprod.cloudflare.dev/exchange?exchange_url=${encodeURIComponent(
+		const resp = await exports.default.fetch(
+			`https://preview.cloudflarepreviews.com/exchange?exchange_url=${encodeURIComponent(
 				`${MOCK_REMOTE_URL}/exchange`
 			)}`,
 			{
@@ -103,8 +104,8 @@ describe("Preview Worker", () => {
 	});
 	it("should reject invalid exchange_url", async ({ expect }) => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
-		const resp = await SELF.fetch(
-			`https://preview.devprod.cloudflare.dev/exchange?exchange_url=not_an_exchange_url`,
+		const resp = await exports.default.fetch(
+			`https://preview.cloudflarepreviews.com/exchange?exchange_url=not_an_exchange_url`,
 			{ method: "POST" }
 		);
 		expect(resp.status).toBe(400);
@@ -117,8 +118,8 @@ describe("Preview Worker", () => {
 		const token = randomBytes(4096).toString("hex");
 		expect(token.length).toBe(8192);
 
-		let resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/.update-preview-token?token=${encodeURIComponent(
+		let resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/.update-preview-token?token=${encodeURIComponent(
 				token
 			)}&remote=${encodeURIComponent(
 				MOCK_REMOTE_URL
@@ -135,17 +136,17 @@ describe("Preview Worker", () => {
 		expect(
 			removeUUID(resp.headers.get("set-cookie") ?? "")
 		).toMatchInlineSnapshot(
-			'"token=00000000-0000-0000-0000-000000000000; Domain=random-data.preview.devprod.cloudflare.dev; HttpOnly; Secure; Partitioned; SameSite=None"'
+			'"__Host-token=00000000-0000-0000-0000-000000000000; Path=/; HttpOnly; Secure; Partitioned; SameSite=None"'
 		);
 		const tokenId = (resp.headers.get("set-cookie") ?? "")
 			.split(";")[0]
 			.split("=")[1];
-		resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev`,
+		resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com`,
 			{
 				method: "GET",
 				headers: {
-					cookie: `token=${tokenId}`,
+					cookie: `${PREVIEW_COOKIE_NAME}=${tokenId}`,
 				},
 			}
 		);
@@ -157,8 +158,8 @@ describe("Preview Worker", () => {
 		});
 	});
 	it("should be redirected with cookie", async ({ expect }) => {
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/.update-preview-token?token=TEST_TOKEN&remote=${encodeURIComponent(
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/.update-preview-token?token=TEST_TOKEN&remote=${encodeURIComponent(
 				MOCK_REMOTE_URL
 			)}&suffix=${encodeURIComponent("/hello?world")}`,
 			{
@@ -172,13 +173,26 @@ describe("Preview Worker", () => {
 		expect(
 			removeUUID(resp.headers.get("set-cookie") ?? "")
 		).toMatchInlineSnapshot(
-			'"token=00000000-0000-0000-0000-000000000000; Domain=random-data.preview.devprod.cloudflare.dev; HttpOnly; Secure; Partitioned; SameSite=None"'
+			'"__Host-token=00000000-0000-0000-0000-000000000000; Path=/; HttpOnly; Secure; Partitioned; SameSite=None"'
 		);
 	});
 
+	it.for([
+		"preview.cloudflarepreviews.com",
+		"random-datapreview.cloudflarepreviews.com",
+	])("should reject token updates on %s", async (hostname, { expect }) => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const resp = await exports.default.fetch(
+			`https://${hostname}/.update-preview-token?token=TEST_TOKEN&remote=${encodeURIComponent(MOCK_REMOTE_URL)}`
+		);
+
+		expect(resp.status).toBe(400);
+		expect(resp.headers.get("set-cookie")).toBeNull();
+	});
+
 	async function getToken() {
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/.update-preview-token?token=TEST_TOKEN&remote=${encodeURIComponent(
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/.update-preview-token?token=TEST_TOKEN&remote=${encodeURIComponent(
 				MOCK_REMOTE_URL
 			)}&suffix=${encodeURIComponent("/hello?world")}`,
 			{
@@ -190,8 +204,8 @@ describe("Preview Worker", () => {
 	}
 	it("should reject invalid remote url", async ({ expect }) => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/.update-preview-token?token=TEST_TOKEN&remote=not_a_remote_url&suffix=${encodeURIComponent("/hello?world")}`
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/.update-preview-token?token=TEST_TOKEN&remote=not_a_remote_url&suffix=${encodeURIComponent("/hello?world")}`
 		);
 		expect(resp.status).toBe(400);
 		expect(await resp.text()).toMatchInlineSnapshot(
@@ -201,12 +215,12 @@ describe("Preview Worker", () => {
 
 	it("should convert cookie to header", async ({ expect }) => {
 		const tokenId = await getToken();
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev`,
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com`,
 			{
 				method: "GET",
 				headers: {
-					cookie: `token=${tokenId}; Domain=random-data.preview.devprod.cloudflare.dev; HttpOnly; Secure; Partitioned; SameSite=None`,
+					cookie: `${PREVIEW_COOKIE_NAME}=${tokenId}`,
 				},
 			}
 		);
@@ -219,14 +233,33 @@ describe("Preview Worker", () => {
 			]),
 		});
 	});
+	it("should reject a token replayed on another preview hostname", async ({
+		expect,
+	}) => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const tokenId = await getToken();
+		const resp = await exports.default.fetch(
+			`https://other-preview.preview.cloudflarepreviews.com`,
+			{
+				headers: {
+					cookie: `${PREVIEW_COOKIE_NAME}=${tokenId}`,
+				},
+			}
+		);
+
+		expect(resp.status).toBe(400);
+		expect(await resp.json()).toMatchObject({
+			message: "Token and remote not found",
+		});
+	});
 	it("should not follow redirects", async ({ expect }) => {
 		const tokenId = await getToken();
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/redirect`,
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/redirect`,
 			{
 				method: "GET",
 				headers: {
-					cookie: `token=${tokenId}; Domain=random-data.preview.devprod.cloudflare.dev; HttpOnly; Secure; Partitioned; SameSite=None`,
+					cookie: `${PREVIEW_COOKIE_NAME}=${tokenId}`,
 				},
 				redirect: "manual",
 			}
@@ -240,12 +273,12 @@ describe("Preview Worker", () => {
 	});
 	it("should return method", async ({ expect }) => {
 		const tokenId = await getToken();
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/method`,
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/method`,
 			{
 				method: "PUT",
 				headers: {
-					cookie: `token=${tokenId}; Domain=random-data.preview.devprod.cloudflare.dev; HttpOnly; Secure; Partitioned; SameSite=None`,
+					cookie: `${PREVIEW_COOKIE_NAME}=${tokenId}`,
 				},
 				redirect: "manual",
 			}
@@ -255,13 +288,13 @@ describe("Preview Worker", () => {
 	});
 	it("should return header", async ({ expect }) => {
 		const tokenId = await getToken();
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/header`,
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/header`,
 			{
 				method: "PUT",
 				headers: {
 					"X-Custom-Header": "custom",
-					cookie: `token=${tokenId}; Domain=random-data.preview.devprod.cloudflare.dev; HttpOnly; Secure; Partitioned; SameSite=None`,
+					cookie: `${PREVIEW_COOKIE_NAME}=${tokenId}`,
 				},
 				redirect: "manual",
 			}
@@ -271,12 +304,12 @@ describe("Preview Worker", () => {
 	});
 	it("should return status", async ({ expect }) => {
 		const tokenId = await getToken();
-		const resp = await SELF.fetch(
-			`https://random-data.preview.devprod.cloudflare.dev/status`,
+		const resp = await exports.default.fetch(
+			`https://random-data.preview.cloudflarepreviews.com/status`,
 			{
 				method: "PUT",
 				headers: {
-					cookie: `token=${tokenId}; Domain=random-data.preview.devprod.cloudflare.dev; HttpOnly; Secure; Partitioned; SameSite=None`,
+					cookie: `${PREVIEW_COOKIE_NAME}=${tokenId}`,
 				},
 				redirect: "manual",
 			}
@@ -287,11 +320,29 @@ describe("Preview Worker", () => {
 });
 
 describe("Raw HTTP preview", () => {
+	it("should proxy a user Worker path named like the token update endpoint", async ({
+		expect,
+	}) => {
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com/.update-preview-token`,
+			{
+				headers: {
+					"X-CF-Token": "TEST_TOKEN",
+					"X-CF-Remote": MOCK_REMOTE_URL,
+				},
+			}
+		);
+
+		expect(await resp.json()).toMatchObject({
+			url: `${MOCK_REMOTE_URL}/.update-preview-token`,
+		});
+	});
+
 	it("should allow arbitrary headers in cross-origin requests", async ({
 		expect,
 	}) => {
-		const resp = await SELF.fetch(
-			`https://0000.rawhttp.devprod.cloudflare.dev`,
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com`,
 			{
 				method: "OPTIONS",
 				headers: {
@@ -307,8 +358,8 @@ describe("Raw HTTP preview", () => {
 	it("should allow arbitrary methods in cross-origin requests", async ({
 		expect,
 	}) => {
-		const resp = await SELF.fetch(
-			`https://0000.rawhttp.devprod.cloudflare.dev`,
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com`,
 			{
 				method: "OPTIONS",
 				headers: {
@@ -323,8 +374,8 @@ describe("Raw HTTP preview", () => {
 
 	it("should preserve multiple cookies", async ({ expect }) => {
 		const token = randomBytes(4096).toString("hex");
-		const resp = await SELF.fetch(
-			`https://0000.rawhttp.devprod.cloudflare.dev/cookies`,
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com/cookies`,
 			{
 				method: "GET",
 				headers: {
@@ -343,8 +394,8 @@ describe("Raw HTTP preview", () => {
 
 	it("should pass headers to the user-worker", async ({ expect }) => {
 		const token = randomBytes(4096).toString("hex");
-		const resp = await SELF.fetch(
-			`https://0000.rawhttp.devprod.cloudflare.dev/`,
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com/`,
 			{
 				method: "GET",
 				headers: {
@@ -383,8 +434,8 @@ describe("Raw HTTP preview", () => {
 		expect,
 	}) => {
 		const token = randomBytes(4096).toString("hex");
-		const resp = await SELF.fetch(
-			`https://0000.rawhttp.devprod.cloudflare.dev/method`,
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com/method`,
 			{
 				method: "POST",
 				headers: {
@@ -403,8 +454,8 @@ describe("Raw HTTP preview", () => {
 		"should support %s method specified on the X-CF-Http-Method header",
 		async (method, { expect }) => {
 			const token = randomBytes(4096).toString("hex");
-			const resp = await SELF.fetch(
-				`https://0000.rawhttp.devprod.cloudflare.dev/method`,
+			const resp = await exports.default.fetch(
+				`https://0000.rawhttp.cloudflarepreviews.com/method`,
 				{
 					method: "POST",
 					headers: {
@@ -427,8 +478,8 @@ describe("Raw HTTP preview", () => {
 		expect,
 	}) => {
 		const token = randomBytes(4096).toString("hex");
-		const resp = await SELF.fetch(
-			`https://0000.rawhttp.devprod.cloudflare.dev/method`,
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com/method`,
 			{
 				method: "PUT",
 				headers: {
@@ -446,8 +497,8 @@ describe("Raw HTTP preview", () => {
 		expect,
 	}) => {
 		const token = randomBytes(4096).toString("hex");
-		const resp = await SELF.fetch(
-			`https://0000.rawhttp.devprod.cloudflare.dev/`,
+		const resp = await exports.default.fetch(
+			`https://0000.rawhttp.cloudflarepreviews.com/`,
 			{
 				method: "GET",
 				headers: {

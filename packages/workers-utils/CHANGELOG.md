@@ -1,5 +1,552 @@
 # @cloudflare/workers-utils
 
+## 0.43.0
+
+### Minor Changes
+
+- [#15822](https://github.com/cloudflare/workers-sdk/pull/15822) [`8f7916c`](https://github.com/cloudflare/workers-sdk/commit/8f7916cd72cd0f6a3bcef80abc8ad4509b13026a) Thanks [@GregBrimble](https://github.com/GregBrimble)! - Expose a helper for identifying live Durable Object exports
+
+  Use `isLiveDurableObjectExport()` to distinguish created and incoming-transfer exports from deleted, renamed, and transferred tombstones.
+
+## 0.42.0
+
+### Minor Changes
+
+- [#15792](https://github.com/cloudflare/workers-sdk/pull/15792) [`479e1e8`](https://github.com/cloudflare/workers-sdk/commit/479e1e8eaf05764da7950c42c38cff2a98f00e3f) Thanks [@flakey5](https://github.com/flakey5)! - Configure SSH for experimental Durable Object-managed Containers
+
+  Set `containers[].ssh` and `containers[].authorized_keys` when using `scheduling_policy: "durable_object"`. These are application-wide settings that follow the same rules as the existing Durable Object-managed Container settings: normal deployments create missing applications and update explicitly configured values, while omitted settings preserve the existing application configuration.
+
+  ```jsonc
+  // wrangler.jsonc
+  {
+    "containers": [
+      {
+        "name": "sandbox",
+        "class_name": "Sandbox",
+        "scheduling_policy": "durable_object",
+        "ssh": { "enabled": true },
+        "authorized_keys": [
+          { "name": "laptop", "public_key": "ssh-ed25519 AAAA..." }
+        ]
+      }
+    ]
+  }
+  ```
+
+- [#15786](https://github.com/cloudflare/workers-sdk/pull/15786) [`bdda4c3`](https://github.com/cloudflare/workers-sdk/commit/bdda4c3b3c028d3d4dab5ea4c5af8040ed7ed1d8) Thanks [@ThomasRubini](https://github.com/ThomasRubini)! - Support UDP connect handlers in local development
+
+  The experimental `connect` configuration now accepts `protocol: "udp"`, with optional `idle_timeout_ms` and `max_pending_bytes` settings. UDP datagrams are delivered to the Worker's `connect()` handler using workerd's value-mode socket streams, and can be tested with `Miniflare#dispatchConnect({ protocol: "udp" })`.
+
+- [#15779](https://github.com/cloudflare/workers-sdk/pull/15779) [`fc3cbaa`](https://github.com/cloudflare/workers-sdk/commit/fc3cbaa4150a3cf30502286452153806bf8800d2) Thanks [@Naapperas](https://github.com/Naapperas)! - Support `workflow` entries in the `exports` configuration map
+
+  A Worker can now declare the Workflows it defines in `exports`, keyed by the `WorkflowEntrypoint` class name:
+
+  ```jsonc
+  {
+    "exports": {
+      "MyWorkflow": {
+        "type": "workflow",
+        "name": "my-workflow",
+        "limits": { "steps": 100 },
+        "schedules": "0 * * * *"
+      }
+    }
+  }
+  ```
+
+  A `workflow` export accepts the same settings as a `workflows` binding: `limits`, `concurrency`, `schedules`, and `default_retention`. `wrangler deploy` and `wrangler versions upload` send these entries to the upload API by name, and `wrangler deploy` and `wrangler triggers deploy` provision the Workflow with its settings, just as they do for `workflows` bindings owned by the Worker. A Workflow may be declared both as a binding and as an export, as long as both declarations use the same class and do not set the same setting to different values. A binding to another Worker's Workflow cannot share a name with an export. `@cloudflare/config` adds the matching `exports.workflow()` helper. Local development does not yet act on these entries.
+
+### Patch Changes
+
+- [#15838](https://github.com/cloudflare/workers-sdk/pull/15838) [`15799d4`](https://github.com/cloudflare/workers-sdk/commit/15799d4b61adc6317a506d700846ebaeeb558095) Thanks [@oddharsh](https://github.com/oddharsh)! - Update `smol-toml` to 1.9.0 to fix slow parsing of very large TOML files
+
+  Parse time for TOML config files now grows linearly with their size, instead of with its square: a 40,000-line file that took 259 ms to parse now takes 17 ms, while typical `wrangler.toml` files parse in the same time as before. This addresses the `GHSA-r4xh-jqrq-34v2` advisory against earlier versions of the parser.
+
+  Some TOML syntax errors now point at the character that caused them. For example, a `wrangler.toml` containing `INVALID "FILE` is now reported as `illegal character in key` at the `"`, rather than `incomplete key-value` at the start of the line.
+
+## 0.41.2
+
+### Patch Changes
+
+- [#15806](https://github.com/cloudflare/workers-sdk/pull/15806) [`8fade73`](https://github.com/cloudflare/workers-sdk/commit/8fade73f63289d3e4b64004669bca7e06d19c0e3) Thanks [@NuroDev](https://github.com/NuroDev)! - Standardize Zod validation error output
+
+  Format validation errors with Zod's built-in `prettifyError()` helper so Miniflare, Wrangler, the Vite plugin, and the Vitest plugin show consistent messages and property paths.
+
+## 0.41.1
+
+### Patch Changes
+
+- [#15662](https://github.com/cloudflare/workers-sdk/pull/15662) [`59267fc`](https://github.com/cloudflare/workers-sdk/commit/59267fc79d1f7925a15369ca0125290df2404bfb) Thanks [@oddharsh](https://github.com/oddharsh)! - Update `smol-toml` to 1.8.0
+
+  This updates the bundled TOML parser that reads `wrangler.toml` to a version that addresses two advisories against 1.5.2: `GHSA-7w5x-hrqm-74c2` (a value followed by a comment with no trailing newline, such as `a=[1 #`, put the parser in an infinite loop) and `GHSA-v3rj-xjv7-4jmq` (thousands of consecutive comment lines overflowed the stack). On the old version, `wrangler deploy` against a `wrangler.toml` ending in `a=[1 #` never returned; it now fails with `Invalid TOML document: cannot find end of structure`.
+
+## 0.41.0
+
+### Minor Changes
+
+- [#15699](https://github.com/cloudflare/workers-sdk/pull/15699) [`45b3b81`](https://github.com/cloudflare/workers-sdk/commit/45b3b810809ee01cefbd53bea3a5ebc50bdb1c6c) Thanks [@skepticfx](https://github.com/skepticfx)! - Remove the experimental Container image environment binding
+
+  Durable Object-managed Containers now use `ctx.container.images` without Wrangler generating `env.EXPERIMENTAL_CLOUDFLARE_CONTAINER_IMAGES`. Update code using the experimental environment binding to read `ctx.container.images` and regenerate your Worker types.
+
+  Version deployments identify managed applications from native named images, and `--containers-rollout=none` preserves native Container metadata. Containers without named images must first be provisioned with `wrangler deploy`; `versions upload` verifies that their applications already exist. The old binding is no longer read or reserved, including on previously uploaded versions. `keep_vars` retains existing variables as usual; redeploy without it to remove an existing experimental binding.
+
+### Patch Changes
+
+- [#15707](https://github.com/cloudflare/workers-sdk/pull/15707) [`95af41d`](https://github.com/cloudflare/workers-sdk/commit/95af41d564f7476cdda8c5923208c3b8a3ec2a11) Thanks [@halfstack-dev](https://github.com/halfstack-dev)! - Support nested D1 migration layouts in `readD1Migrations()`
+
+  `readD1Migrations()` now accepts the same `migrationsDir` / `migrationsPattern` options Wrangler uses, so Vitest can apply Drizzle-style nested files such as `0001_init/migration.sql`. Discovery is shared with Wrangler via `@cloudflare/workers-utils`, so the test path and `wrangler d1 migrations apply` stay aligned.
+
+  The original `readD1Migrations(migrationsPath)` signature still reads only top-level `*.sql` files in that directory.
+
+## 0.40.1
+
+### Patch Changes
+
+- [#15329](https://github.com/cloudflare/workers-sdk/pull/15329) [`c4c9b75`](https://github.com/cloudflare/workers-sdk/commit/c4c9b75c54a095dc4b7ac82e44330f5650a2e4ac) Thanks [@akshitsinha](https://github.com/akshitsinha)! - Evaluate Flagship flags locally during development
+
+  Flagship bindings now use the local Miniflare store by default in Wrangler and the Vite plugin, keeping development offline and isolated from production flags. Set `remote: true` on a binding to continue using its remote app.
+
+  Use `wrangler flagship flags pull <APP_ID>` to seed the store from a remote app. Flag management commands also accept `--local` to read and update the local store directly.
+
+## 0.40.0
+
+### Minor Changes
+
+- [#15684](https://github.com/cloudflare/workers-sdk/pull/15684) [`6874aa9`](https://github.com/cloudflare/workers-sdk/commit/6874aa978144469927831de59834e8cdc47a5114) Thanks [@Ankcorn](https://github.com/Ankcorn)! - Add support for configuring real-time Issues with `observability.issues.enabled`
+
+  Wrangler now validates and uploads the Issues setting alongside the existing logs and traces observability options. The experimental configuration format supports the equivalent `observability.issues.enabled` option.
+
+## 0.39.1
+
+### Patch Changes
+
+- [#15669](https://github.com/cloudflare/workers-sdk/pull/15669) [`9515011`](https://github.com/cloudflare/workers-sdk/commit/9515011dc5ecdc5abf3a0c685d80f78e307fb513) Thanks [@Shubham-Padkonde](https://github.com/Shubham-Padkonde)! - Reject Windows drive prefixes when converting file paths to URL paths
+
+  `toUrlPath()` now throws for drive-prefixed paths as documented. Previously it used `console.assert()`, which only logged the invalid input and returned a path containing the drive prefix.
+
+## 0.39.0
+
+### Minor Changes
+
+- [#15597](https://github.com/cloudflare/workers-sdk/pull/15597) [`a83d7ac`](https://github.com/cloudflare/workers-sdk/commit/a83d7ac4d4d52811e11b61753aa60c10ca5c8c78) Thanks [@skepticfx](https://github.com/skepticfx)! - Configure application-wide logs for experimental Durable Object-managed Containers
+
+  Set `containers[].observability.enabled` or `containers[].observability.logs.enabled` when using `scheduling_policy: "durable_object"`. Normal deployments create missing applications and update explicitly configured log settings without a Container rollout. Omitted settings preserve the application configuration; root Worker observability is not inherited for this policy.
+
+  Version uploads may initialize missing applications but preserve existing settings. Deploying or rolling back Worker versions also preserves existing application settings, and `--containers-rollout=none` skips their updates.
+
+- [#15597](https://github.com/cloudflare/workers-sdk/pull/15597) [`a83d7ac`](https://github.com/cloudflare/workers-sdk/commit/a83d7ac4d4d52811e11b61753aa60c10ca5c8c78) Thanks [@skepticfx](https://github.com/skepticfx)! - Support per-image build options for experimental Durable Object-managed Containers
+
+  Set `build_context` and `build_vars` alongside `dockerfile` in a Container's named `images` entries. Context paths resolve relative to the Wrangler configuration file and default to the Dockerfile's directory. Build variables are passed as Docker build arguments. Entries using the same Dockerfile with different contexts or variables are built separately.
+
+  ```jsonc
+  {
+    "containers": [
+      {
+        "class_name": "Sandbox",
+        "scheduling_policy": "durable_object",
+        "images": {
+          "app": {
+            "dockerfile": "./docker/Dockerfile",
+            "build_context": ".",
+            "build_vars": { "APP_ENV": "production" }
+          }
+        }
+      }
+    ]
+  }
+  ```
+
+- [#15638](https://github.com/cloudflare/workers-sdk/pull/15638) [`fa79b26`](https://github.com/cloudflare/workers-sdk/commit/fa79b26ef442303797013c70078c7acdd2c79247) Thanks [@G4brym](https://github.com/G4brym)! - Support AI Search bindings in Worker Previews
+
+  `wrangler preview` now accepts `ai_search` and `ai_search_namespaces` entries in the `previews` block and includes them in Preview deployment bindings. This lets Workers that use AI Search instance or namespace bindings attach existing resources to Preview deployments, including preview-specific instance or namespace names.
+
+  These bindings are non-inheritable: declare them explicitly under `previews`. They attach to existing AI Search resources; preview does not provision new isolated instances or namespaces.
+
+- [#15453](https://github.com/cloudflare/workers-sdk/pull/15453) [`ca71205`](https://github.com/cloudflare/workers-sdk/commit/ca71205bb45d9182e6c748e7097baed67739a891) Thanks [@G4brym](https://github.com/G4brym)! - Remove the gated Web Search binding and Wrangler command
+
+  The unreleased search binding and its experimental command have been removed from Wrangler, Miniflare, and configuration APIs.
+
+- [#15597](https://github.com/cloudflare/workers-sdk/pull/15597) [`a83d7ac`](https://github.com/cloudflare/workers-sdk/commit/a83d7ac4d4d52811e11b61753aa60c10ca5c8c78) Thanks [@skepticfx](https://github.com/skepticfx)! - Allow experimental Durable Object-managed Containers to link by name through exports
+
+  Containers using `scheduling_policy: "durable_object"` can now specify `name` and link from `exports.<Class>.container` without repeating `class_name`. Deploy and version upload resolve that link for image preparation, Worker metadata, and Container application creation.
+
+### Patch Changes
+
+- [#15179](https://github.com/cloudflare/workers-sdk/pull/15179) [`cb0955f`](https://github.com/cloudflare/workers-sdk/commit/cb0955f274102afb30b8502193edf66c0d3cb4d6) Thanks [@rioaguspermana](https://github.com/rioaguspermana)! - Treat 502, 503, and 504 as gateway errors during asset upload retries
+
+  Pages and Workers asset uploads now retry more patiently when the Cloudflare API responds with a 502, 503 or 504 gateway error, reducing concurrency and waiting longer between attempts instead of failing the deploy quickly.
+
+## 0.38.1
+
+### Patch Changes
+
+- [#15606](https://github.com/cloudflare/workers-sdk/pull/15606) [`60d40f8`](https://github.com/cloudflare/workers-sdk/commit/60d40f88e6109ef31aa13a9feb15f5d64b3ffe1d) Thanks [@emily-shen](https://github.com/emily-shen)! - refactor: separate container config from worker/generic config access
+
+## 0.38.0
+
+### Minor Changes
+
+- [#15480](https://github.com/cloudflare/workers-sdk/pull/15480) [`36aed7f`](https://github.com/cloudflare/workers-sdk/commit/36aed7f0f2db5056af9df917cf6c22a2be950b1e) Thanks [@skepticfx](https://github.com/skepticfx)! - Add Durable Object-managed Containers to top-level container configuration
+
+  Wrangler now accepts `scheduling_policy: "durable_object"` in the top-level `containers` array and creates its namespace-backed application after the Worker upload resolves the Durable Object namespace ID. The namespace ID is also the application ID, so repeated deploys idempotently ensure the same application without name-based lookup, modification, or a Containers rollout.
+
+  Durable Object-managed entries accept `class_name`, `scheduling_policy`, an optional `name`, and an optional named `images` map. Scheduler-only fields are rejected. Each image provides either a local `dockerfile` or a digest-pinned managed-registry `image`. Wrangler builds or resolves each image, waits while Cloudflare prepares it for the Containers runtime, and uploads the resulting references with the Worker version for access through `ctx.container.images` and `env.EXPERIMENTAL_CLOUDFLARE_CONTAINER_IMAGES`. Local development support for these entries is deferred to a follow-up.
+
+  Existing scheduler-backed entries and Durable Object migrations continue to work unchanged.
+
+  With `--containers-rollout=none`, existing Workers retain their deployed Container metadata and image binding even when local `containers` is omitted or empty; local scheduler edits are also ignored. The upload stops if the deployed versions cannot be recovered. Existing Workers for Platforms dispatch scripts reject this flag before upload because their API does not expose enough metadata to preserve Container associations safely. First deployments can still skip Container preparation and rollout. Without this flag, removing managed Containers, including by omitting `containers` entirely, clears the experimental image binding even with `keep_vars`.
+
+  `versions deploy` validates the selected versions before changing traffic and creates their Durable Object-managed applications only after deployment succeeds. Both `deploy` and `versions deploy` report partial completion if application creation fails afterward, with instructions to retry the same command.
+
+  `EXPERIMENTAL_CLOUDFLARE_CONTAINER_IMAGES` is a temporary, reserved Wrangler binding until native Container image metadata is available. Its class keys identify managed applications during `versions deploy`, including classes with empty image maps. User configuration cannot declare a binding with this name; existing versions that already use it are treated as Container configuration.
+
+### Patch Changes
+
+- [#15554](https://github.com/cloudflare/workers-sdk/pull/15554) [`bff525d`](https://github.com/cloudflare/workers-sdk/commit/bff525d66dd3785481148353d782dd33c3a644ed) Thanks [@XiaoZ-0218](https://github.com/XiaoZ-0218)! - Add the missing `transferred_classes` migration to the config schema
+
+  `DurableObjectMigration` described `new_classes`, `new_sqlite_classes`, `renamed_classes` and `deleted_classes`, but not `transferred_classes`. `normalizeAndValidateConfig` has always validated that key, and the deploy path forwards it to the API along with the rest of the step, so Transfer migrations worked — but `config-schema.json` is generated from the type, so an editor resolving `$schema` reported a valid, documented migration as an unknown key.
+
+  Adding the field to the type puts it in the generated schema. No runtime change.
+
+## 0.37.0
+
+### Minor Changes
+
+- [#15470](https://github.com/cloudflare/workers-sdk/pull/15470) [`a849e0d`](https://github.com/cloudflare/workers-sdk/commit/a849e0d6d2253034fc158d5442c5124e77a39bd9) Thanks [@edmundhung](https://github.com/edmundhung)! - Move named tunnel resolution into workers-utils
+
+  Wrangler continues to expose the same behavior while delegating the implementation to the shared utility.
+
+## 0.36.0
+
+### Minor Changes
+
+- [#15390](https://github.com/cloudflare/workers-sdk/pull/15390) [`fd17fc5`](https://github.com/cloudflare/workers-sdk/commit/fd17fc5c5fb86423e37ff5b142391e03cd7dbf59) Thanks [@jamesopstad](https://github.com/jamesopstad)! - Add shared local env loading helpers with Vite-compatible `.env` file resolution and Wrangler-compatible parsing and expansion. Mode-specific `.dev.vars` files are selected exclusively and are not merged with `.env` files or process values.
+
+## 0.35.0
+
+### Minor Changes
+
+- [#15454](https://github.com/cloudflare/workers-sdk/pull/15454) [`dbbb795`](https://github.com/cloudflare/workers-sdk/commit/dbbb795c47ff663857b605b484c63730e1e3ff45) Thanks [@jamesopstad](https://github.com/jamesopstad)! - Move binding utilities into `@cloudflare/workers-utils`
+
+  Binding conversion, printing, and local-development validation are now exported from `@cloudflare/workers-utils` so they can be shared by Wrangler, the Cloudflare Vite plugin, and other consumers.
+
+  The corresponding exports have been removed from `@cloudflare/deploy-helpers`. Consumers should import them directly from `@cloudflare/workers-utils` instead.
+
+  Wrangler's `unstable_printBindings` API now accepts the bindings and an options object instead of five positional parameters.
+
+- [#15379](https://github.com/cloudflare/workers-sdk/pull/15379) [`ea28cc3`](https://github.com/cloudflare/workers-sdk/commit/ea28cc33e5d39031e9bf512e17f3a57cccbd3f46) Thanks [@ibbykhazanchi](https://github.com/ibbykhazanchi)! - Add query string redaction to Workers observability configuration
+
+  Set `observability.redact_query_string` in `wrangler.json` or `observability.redactQueryString` in the experimental `cloudflare.config.ts` format to remove query strings from request URLs in logs and traces.
+
+### Patch Changes
+
+- [#15406](https://github.com/cloudflare/workers-sdk/pull/15406) [`b3f2628`](https://github.com/cloudflare/workers-sdk/commit/b3f26289a735279e463fb4802d4a4481cfaaac71) Thanks [@james-elicx](https://github.com/james-elicx)! - Reduce the installed bundle sizes of Wrangler and Miniflare
+
+  Wrangler now resolves bundled workspace dependencies from source during monorepo builds so unused exports can be removed. Miniflare, its shared CLI and container dependencies now use granular `@cloudflare/workers-utils` entry points instead of loading the package barrel, reducing the raw Wrangler and Miniflare artifacts by 6.16 MiB (31.4%) and 1.06 MiB (22.9%) respectively without changing runtime behavior or installed dependencies.
+
+## 0.34.0
+
+### Minor Changes
+
+- [#14995](https://github.com/cloudflare/workers-sdk/pull/14995) [`59872c4`](https://github.com/cloudflare/workers-sdk/commit/59872c41d4417d9b8c2efddb4b35662453efcaae) Thanks [@ThomasRubini](https://github.com/ThomasRubini)! - Add `connect` trigger for raw sockets
+
+  You can now configure a Worker to receive raw socket connections during `wrangler dev`, delivered directly to the Worker's `connect(socket, env, ctx)` handler:
+
+  ```jsonc
+  {
+    "connect": [{ "protocol": "tcp", "port": 5432 }]
+  }
+  ```
+
+  Each entry opens a listening socket on `127.0.0.1` (or the given `address`) that forwards incoming connections straight to the Worker, bypassing the local dev HTTP entry point. This requires the `experimental` compatibility flag. Only `"tcp"` is supported at the moment.
+
+  `@cloudflare/config` also supports declaring this trigger via `triggers.connect(...)`, which lowers to the `connect` field above:
+
+  ```ts
+  import { defineWorker, triggers } from "@cloudflare/config";
+
+  export default defineWorker({
+    triggers: [
+      triggers.connect({ protocol: "tcp", port: 5432, address: "127.0.0.1" }),
+    ],
+  });
+  ```
+
+- [#15172](https://github.com/cloudflare/workers-sdk/pull/15172) [`c68f9cb`](https://github.com/cloudflare/workers-sdk/commit/c68f9cb866a2eae4416d20f584f733527189f18a) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - Add container support to worker previews
+
+  Worker previews now support containers through a new `previews.containers` configuration block. Container configuration doesn't inherit, so declare containers explicitly in the `previews` block to enable them for previews. This mirrors how `previews.durable_objects` works today. Wrangler names each preview container application `{worker_name}_{preview_slug}_{class_name}`, normalising and shortening the result to what the API accepts. Either change appends a short digest of the composed name, so two names that would otherwise land on one stay distinct. An entry cannot set its own `name`, because application names are unique to an account and a fixed name would collide between two previews of the same Worker. A Durable Object class is backed by at most one container application, so the validator rejects two entries that share a `class_name`. Wrangler skips container applications bound to Durable Object classes that another Worker implements through `script_name`, because the implementing Worker owns its own container application. A binding is not required: a Durable Object declared through `migrations` or `exports` and reached only over `ctx.exports` can still back a container. Every entry must set `class_name`. A `previews.containers` entry whose `class_name` matches no Durable Object class at all is rejected before the preview deployment is created, so a typo fails loudly instead of producing a preview with no container.
+
+  Wrangler creates the container applications on `wrangler preview`. Deleting a preview tears them down server side, so `wrangler preview delete` doesn't remove them.
+
+  Container build and deploy progress prints to stdout. `wrangler preview --json` suppresses wrangler's own output so it doesn't interleave with the payload, and warnings and errors still go to stderr. Docker's build output and the progress spinner write to stdout directly and bypass that suppression, so parse `--json` from a non interactive shell, where the spinner is skipped, and prefer a prebuilt `image` over a Dockerfile.
+
+### Patch Changes
+
+- [#15251](https://github.com/cloudflare/workers-sdk/pull/15251) [`5c10e39`](https://github.com/cloudflare/workers-sdk/commit/5c10e398979c0a054f58dcf2751012cc99e977d2) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Fix ESM-only packages missing from deploy metadata
+
+  ESM-only package dependencies (such as `@cloudflare/think`) were silently omitted from the package dependency metadata reported during `wrangler deploy` and `wrangler versions upload`. These packages are now correctly detected and included.
+
+- [#15284](https://github.com/cloudflare/workers-sdk/pull/15284) [`39dcea6`](https://github.com/cloudflare/workers-sdk/commit/39dcea6c9362e2d651e3108fa769dbbc32db5a7b) Thanks [@emily-shen](https://github.com/emily-shen)! - Move deploy output writing into shared deploy helpers
+
+## 0.33.1
+
+### Patch Changes
+
+- [#15088](https://github.com/cloudflare/workers-sdk/pull/15088) [`fb6b51b`](https://github.com/cloudflare/workers-sdk/commit/fb6b51b87bf73edca9866bdf2d0810d7bf491108) Thanks [@Neal006](https://github.com/Neal006)! - Report malformed container SSH keys and a non-object `containers.configuration` as config errors instead of crashing
+
+  Previously, a `containers` entry with a malformed `authorized_keys` or `trusted_user_ca_keys` entry (a missing or non-string `public_key`, or an entry that is not an object), or a `containers.configuration` set to `null`, made Wrangler exit with a stack trace and "If you think this is a bug, please open an issue" rather than pointing at the field.
+
+  These configurations now produce an ordinary configuration error naming the offending field and array index, such as `containers.authorized_keys[0].public_key must be a string`. A `public_key` that is not an ED25519 key is also now reported with correct grammar.
+
+- [#15010](https://github.com/cloudflare/workers-sdk/pull/15010) [`1b73c87`](https://github.com/cloudflare/workers-sdk/commit/1b73c879c168dcc78b0f2657d04bc784b8af7da3) Thanks [@LeSingh1](https://github.com/LeSingh1)! - Report an invalid `queues.consumers` value as a configuration error instead of crashing
+
+  Previously, setting `queues.consumers` to something other than an array (for example `null` or a string) could crash Wrangler or produce a flood of confusing extra errors. You now get a single clear message telling you the field must be an array.
+
+## 0.33.0
+
+### Minor Changes
+
+- [#15123](https://github.com/cloudflare/workers-sdk/pull/15123) [`d0c976c`](https://github.com/cloudflare/workers-sdk/commit/d0c976c04ad890fcef56305ded11f1405e89273e) Thanks [@dependabot](https://github.com/apps/dependabot)! - Add `NODEJS_COMPAT_DEFAULT_ON_DATE`, `NODEJS_COMPAT_V2_SWITCH_OVER_DATE`, `isNodejsCompatDefaultOn()` and `resolveNodejsCompat()`
+
+  These expose the compatibility dates on which workerd started enabling `nodejs_compat` by default and on which `nodejs_compat` started implying `nodejs_compat_v2`, along with the resolution of both flags from a compatibility date and a set of compatibility flags, so that the tools which generate or interpret Wrangler configurations do not each reimplement it.
+
+## 0.32.0
+
+### Minor Changes
+
+- [#14924](https://github.com/cloudflare/workers-sdk/pull/14924) [`0aa8fa5`](https://github.com/cloudflare/workers-sdk/commit/0aa8fa5e12bc64facb4e9fece321a762269d0357) Thanks [@ariesclark](https://github.com/ariesclark)! - Add shared support for the `DO_NOT_TRACK` environment variable
+
+  Add utilities for recognizing `DO_NOT_TRACK=1` and incorporating it when resolving Wrangler's telemetry preference.
+
+## 0.31.2
+
+### Patch Changes
+
+- [#15013](https://github.com/cloudflare/workers-sdk/pull/15013) [`8cf78c8`](https://github.com/cloudflare/workers-sdk/commit/8cf78c83cb4c64be8b458d7bd618b47e7c6e7d25) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Update undici from 7.28.0 to 7.29.0
+
+- [#15011](https://github.com/cloudflare/workers-sdk/pull/15011) [`6946da1`](https://github.com/cloudflare/workers-sdk/commit/6946da1123f3c8484af80ec4f5426c5fe0bbdb34) Thanks [@LeSingh1](https://github.com/LeSingh1)! - Validate `observability.logs.head_sampling_rate` and `observability.traces.head_sampling_rate` are between 0 and 1
+
+  The 0–1 range check was only applied to the top level `observability.head_sampling_rate`. The two nested fields were type-checked as numbers but never bounds-checked, so a value such as `10` (a common mix-up with a percentage) was accepted locally and sent to the API.
+
+  ```jsonc
+  {
+    "observability": {
+      "logs": { "enabled": true, "head_sampling_rate": 10 }
+    }
+  }
+  ```
+
+  All three fields now report `must be a value between 0 and 1.` consistently.
+
+## 0.31.1
+
+### Patch Changes
+
+- [#15009](https://github.com/cloudflare/workers-sdk/pull/15009) [`b5c083b`](https://github.com/cloudflare/workers-sdk/commit/b5c083bf601d71bad82ccc044df55ba4584085e2) Thanks [@LeSingh1](https://github.com/LeSingh1)! - Use the inherited Worker name when generating container names in named environments
+
+  When `containers` is declared inside a named environment and the container has no explicit `name`, the default container name was built from the environment's own `name` field. `name` is inheritable, so an environment that doesn't redeclare it left that value `undefined`, producing the error `Must have either a top level "name" and "containers.class_name" field defined, or have field "containers.name" defined.` even though a top level `name` was set — and, if the error was ignored, a container named `undefined-<class_name>-<env>`.
+
+  ```jsonc
+  {
+    "name": "my-worker",
+    "env": {
+      "staging": {
+        "containers": [{ "class_name": "MyContainer", "image": "./Dockerfile" }]
+      }
+    }
+  }
+  ```
+
+  `wrangler deploy --env staging` on the configuration above now generates `my-worker-mycontainer-staging`, matching the documented `worker_name-class_name[-env_name]` default. A `name` declared on the environment still takes precedence over the top level one.
+
+## 0.31.0
+
+### Minor Changes
+
+- [#14586](https://github.com/cloudflare/workers-sdk/pull/14586) [`5a56dda`](https://github.com/cloudflare/workers-sdk/commit/5a56ddaf8548fe79787482506b3d5e0233c329c6) Thanks [@emily-shen](https://github.com/emily-shen)! - Move `formatZodError` from `miniflare` to `@cloudflare/workers-utils`
+
+  The `formatZodError` and `_forceColour` helpers are no longer exported from `miniflare`; they are now exported from `@cloudflare/workers-utils`.
+
+## 0.30.0
+
+### Minor Changes
+
+- [#14785](https://github.com/cloudflare/workers-sdk/pull/14785) [`5e6556a`](https://github.com/cloudflare/workers-sdk/commit/5e6556a0c788679b6ac149ba3018a2cfd7cc73e9) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Add `toUrlPath` and `UrlPath` exports
+
+  `toUrlPath(filePath)` converts a file-system path into a URL-safe path by replacing backslashes with forward slashes and rejecting Windows drive-letter prefixes (e.g. `C:`). `UrlPath` is the branded string type it returns, letting callers prove at the type level that a string has been normalized for use in URLs.
+
+## 0.29.0
+
+### Minor Changes
+
+- [#14877](https://github.com/cloudflare/workers-sdk/pull/14877) [`552bcfc`](https://github.com/cloudflare/workers-sdk/commit/552bcfc8d44f8625b09dfd5d821c132b626cb7bb) Thanks [@jasoncabot](https://github.com/jasoncabot)! - Respect and surface the `Retry-After` header on Cloudflare API responses
+
+  Previously, if a Wrangler command (e.g. `wrangler versions upload`, `wrangler deploy`) hit the Cloudflare API's rate limit, the resulting error gave no indication of how long to wait before trying again, and 429 responses weren't retried at all (only `5xx` errors were, with a fixed linear backoff).
+
+  Now:
+
+  - `429 Too Many Requests` responses are automatically retried, alongside the existing `5xx` retry behaviour.
+  - If a retried response includes a `Retry-After` header, Wrangler waits for that duration instead of the default backoff, and logs a message indicating how long it's waiting. To avoid blocking for an excessive amount of time, waits longer than 60 seconds fail fast instead — the surfaced `Retry-After` value lets the caller schedule its own retry.
+  - If a retryable error is ultimately surfaced to the user (e.g. because retries were exhausted), the error message includes a note with the `Retry-After` duration, and the `command-failed` entry written to the Wrangler output file (`WRANGLER_OUTPUT_FILE_PATH`/`WRANGLER_OUTPUT_FILE_DIRECTORY`) gains a `retry_after_ms` field. This lets scripts and CI/CD pipelines calling Wrangler repeatedly (for example, `wrangler versions upload` on every commit) read the wait duration directly instead of regex-parsing stderr.
+
+  `APIError.isRetryable()` is unchanged (still `5xx` only); `retryOnAPIFailure()` separately retries 429s. `retryAfterMs`, when present, is honoured for any retried error, not just 429s.
+
+  `retryAfterMs` is also now populated on `APIError`s raised from direct R2 object requests, the Browser Rendering API, and errors surfaced from commands using the official `cloudflare` SDK client.
+
+## 0.28.0
+
+### Minor Changes
+
+- [#14595](https://github.com/cloudflare/workers-sdk/pull/14595) [`2b390d7`](https://github.com/cloudflare/workers-sdk/commit/2b390d7831ff27aa13cdf05aa8e11e4c0086f924) Thanks [@colinhacks](https://github.com/colinhacks)! - Recognise nub as a package manager
+
+  wrangler now detects nub — from its `npm_config_user_agent` and an installed `nub` binary — and autoconfig detects nub projects by their `nub.lock`, alongside npm, pnpm, yarn, and bun.
+
+### Patch Changes
+
+- [#14746](https://github.com/cloudflare/workers-sdk/pull/14746) [`a6c214f`](https://github.com/cloudflare/workers-sdk/commit/a6c214fb311215b1ed09b273171b7995033fb7d7) Thanks [@samarth70](https://github.com/samarth70)! - Return a clear error when `observability` is set to `null`
+
+  `validateObservability` guarded only against `undefined`, so a `null` value (valid in JSON/JSONC config) passed the `typeof value === "object"` check and then threw `TypeError: Cannot read properties of null (reading 'enabled')` while validating the config. It now rejects `null` with the same `"observability" should be an object but got null.` diagnostic that the sibling `cache` validator already produces.
+
+## 0.27.0
+
+### Minor Changes
+
+- [#14630](https://github.com/cloudflare/workers-sdk/pull/14630) [`42df9bb`](https://github.com/cloudflare/workers-sdk/commit/42df9bbf07e37032a3e61027e33d504d74a25ccd) Thanks [@penalosa](https://github.com/penalosa)! - Extract the Cloudflare CLI auth layer into a product-agnostic `@cloudflare/workers-auth` core
+
+  The OAuth login/logout/refresh, credential storage, config cache, and account-selection machinery is now shared behind an `AuthProduct` descriptor, with a thin per-CLI entrypoint on top. `@cloudflare/workers-auth/wrangler` (`createWranglerAuth`) preserves wrangler's existing behaviour, and a new `@cloudflare/workers-auth/cf` (`createCfAuth`) adds the `cf` CLI: its own OAuth app registration (client id, callback port, branded consent pages, scoped-token-only auth), a dedicated scope catalog, JSON config files under `~/.config/cloudflare`, and an isolated config-cache namespace so `cf` login/logout never purges wrangler's cache.
+
+  As part of the extraction, `@cloudflare/workers-utils` now exports the shared `createConfigCache` (with a `namespace` option), `openInBrowser`, and the `isInteractive` / `isNonInteractiveOrCI` / `isCI` TTY-and-CI detection helpers (each taking the caller's logger as a parameter rather than relying on a singleton). These read a bundled `ci-info`, so consumers that need to fake CI in their tests should mock this package's helpers rather than `ci-info` directly.
+
+## 0.26.0
+
+### Minor Changes
+
+- [#14591](https://github.com/cloudflare/workers-sdk/pull/14591) [`0283a1f`](https://github.com/cloudflare/workers-sdk/commit/0283a1fcdc635244f731010422e513e8b4ab0be3) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Export `getInstalledPackageVersion`, `getPackagePath`, and `isPackageInstalled` utilities
+
+  Package resolution helpers that were previously internal to `@cloudflare/autoconfig` are now exported from `@cloudflare/workers-utils` so they can be shared across packages without pulling in the full autoconfig dependency.
+
+  `getPackagePath` now also consistently returns a directory path. Previously the fallback resolution strategy could return a file path (the package entry point) instead of its containing directory.
+
+## 0.25.1
+
+### Patch Changes
+
+- [#14530](https://github.com/cloudflare/workers-sdk/pull/14530) [`aad35b7`](https://github.com/cloudflare/workers-sdk/commit/aad35b79d07df1bb764a4a5912d6b4328a34474b) Thanks [@Partha-Shankar](https://github.com/Partha-Shankar)! - Validate optional configuration fields for D1 database bindings
+
+  Enforce type checks for the optional D1 database properties `database_name`, `migrations_dir`, `migrations_table`, and `database_internal_env` to ensure consistency with other binding types.
+
+- [#14492](https://github.com/cloudflare/workers-sdk/pull/14492) [`1ac96a1`](https://github.com/cloudflare/workers-sdk/commit/1ac96a14b7fb022acada114ab8793fe8a4ba79a5) Thanks [@penalosa](https://github.com/penalosa)! - Replace the CommonJS `xdg-app-paths` dependency with a vendored pure-ESM implementation
+
+  `xdg-app-paths` (and its `xdg-portable`/`os-paths` dependencies) are CommonJS only, which caused "Dynamic require of 'path' is not supported" errors when the surrounding code was bundled to ESM. The global config/cache directory resolution is now provided by a small, dependency-free pure-ESM module in `@cloudflare/workers-utils` that reproduces the previous path resolution exactly (verified against the real package in unit tests), so existing config and credential locations are unchanged. This also drops the transitive `fsevents` optional dependency that `xdg-app-paths` pulled in.
+
+  Miniflare and create-cloudflare now consume the shared helpers from `@cloudflare/workers-utils` instead of maintaining their own copies, importing node-only leaf entry points (`@cloudflare/workers-utils/fs-helpers`, `@cloudflare/workers-utils/global-wrangler-config-path`) where ESM bundling is required.
+
+- [#14570](https://github.com/cloudflare/workers-sdk/pull/14570) [`1ca8d8f`](https://github.com/cloudflare/workers-sdk/commit/1ca8d8f0bbd012a1d65cabadf7b6987b252775e9) Thanks [@penalosa](https://github.com/penalosa)! - Upgrade `signal-exit` from v3 to v4
+
+  The bundled `signal-exit` dependency was CJS-only. Upgrading to v4 (which ships a dual ESM/CJS build) unblocks ESM output. Exit-cleanup behaviour is unchanged, though v4 no longer registers handlers for a few signals that are no longer supported by the OS (`SIGUNUSED` on Linux; `SIGABRT`/`SIGALRM` on Windows).
+
+## 0.25.0
+
+### Minor Changes
+
+- [#14474](https://github.com/cloudflare/workers-sdk/pull/14474) [`aa5d580`](https://github.com/cloudflare/workers-sdk/commit/aa5d5801450b7e4417bfdbd477f86de3a4bc6933) Thanks [@WillTaylorDev](https://github.com/WillTaylorDev)! - Add cache options for WorkerEntrypoint exports
+
+  You can now set cache options on `WorkerEntrypoint` exports and configure cross-version cache behavior globally:
+
+  ```jsonc
+  // wrangler.json
+  {
+    "cache": { "enabled": true, "cross_version_cache": true },
+    "exports": {
+      "default": {
+        "type": "worker",
+        "cache": { "enabled": false }
+      },
+      "Admin": {
+        "type": "worker",
+        "cache": { "enabled": true }
+      }
+    }
+  }
+  ```
+
+  Wrangler sends the `exports` config to the deploy and version upload APIs alongside the global `cache.enabled` and `cache.cross_version_cache` settings. The platform resolves those global settings plus cache overrides on exports and validates which entrypoint names are cacheable.
+
+## 0.24.0
+
+### Minor Changes
+
+- [#14295](https://github.com/cloudflare/workers-sdk/pull/14295) [`cfd6205`](https://github.com/cloudflare/workers-sdk/commit/cfd6205fe86f6afd74b5881f09524c93c83b8359) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Move `unstable_getWorkerNameFromProject` from wrangler to `@cloudflare/workers-utils`
+
+  The `unstable_getWorkerNameFromProject` export has been removed from the `wrangler` package. This function is now available as `getWorkerNameFromProject` (without the `unstable_` prefix) from `@cloudflare/workers-utils`. If you were importing this function from `wrangler`, update your import to use `@cloudflare/workers-utils` instead.
+
+- [#14295](https://github.com/cloudflare/workers-sdk/pull/14295) [`cfd6205`](https://github.com/cloudflare/workers-sdk/commit/cfd6205fe86f6afd74b5881f09524c93c83b8359) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Add PackageManager type and constants
+
+  Added the `PackageManager` interface and package manager constants (`NpmPackageManager`, `PnpmPackageManager`, `YarnPackageManager`, `BunPackageManager`).
+
+## 0.23.2
+
+### Patch Changes
+
+- [#14347](https://github.com/cloudflare/workers-sdk/pull/14347) [`673b09e`](https://github.com/cloudflare/workers-sdk/commit/673b09e0fa26368125fb527596a8eb5d31c27302) Thanks [@jamesopstad](https://github.com/jamesopstad)! - Update undici from 7.24.8 to 7.28.0
+
+- [#14269](https://github.com/cloudflare/workers-sdk/pull/14269) [`5dfb788`](https://github.com/cloudflare/workers-sdk/commit/5dfb788595a2104b4b0922cfce3d69a2f1d881eb) Thanks [@mattjohnsonpint](https://github.com/mattjohnsonpint)! - Support `dev.plugin` on typed services bindings
+
+  Wrangler only honored `dev.plugin` on `unsafe.bindings` entries, so users authoring a service binding via `services[]` could not wire it to a local Miniflare plugin during `wrangler dev` — they had to fall back to `unsafe.bindings` and accept a "directly supported by wrangler" warning. Typed services bindings now accept the same `dev: { plugin, options? }` shape, route the binding through Miniflare's external-plugin pathway in `wrangler dev`, and strip the field at deploy time. Validation rejects malformed `dev` shapes.
+
+## 0.23.1
+
+### Patch Changes
+
+- [#14282](https://github.com/cloudflare/workers-sdk/pull/14282) [`ecfdd5a`](https://github.com/cloudflare/workers-sdk/commit/ecfdd5a6c60b9c6f99c28f9294da656933c2a5fd) Thanks [@edmundhung](https://github.com/edmundhung)! - Fix `wrangler dev` asset fallback with custom routes
+
+  `wrangler dev` now applies Workers Assets fallback behavior consistently when routes are configured, including SPA fallback and `404-page` handling.
+
+## 0.23.0
+
+### Minor Changes
+
+- [#14089](https://github.com/cloudflare/workers-sdk/pull/14089) [`c6c61b5`](https://github.com/cloudflare/workers-sdk/commit/c6c61b59431443b2bcda25f3af7624dd2ce19b9b) Thanks [@alsuren](https://github.com/alsuren)! - Add `migrations_pattern` to D1 database bindings
+
+  The D1 binding now accepts an optional `migrations_pattern` field, allowing you to point `wrangler d1 migrations apply` and `wrangler d1 migrations list` at migration files in nested layouts (e.g. ORM-generated folders like `migrations/0000_init/migration.sql`).
+
+  `migrations_pattern` is a glob (relative to the wrangler config file) and defaults to `${migrations_dir}/*.sql`, which preserves today's behaviour. Files that do not match the pattern are not executed.
+
+  ```jsonc
+  {
+    "d1_databases": [
+      {
+        "binding": "DB",
+        "database_name": "my-db",
+        "database_id": "...",
+        "migrations_dir": "migrations",
+        "migrations_pattern": "migrations/*/migration.sql"
+      }
+    ]
+  }
+  ```
+
+  When no migrations match the configured pattern but files matching the common `migrations/*/migration.sql` (drizzle-style) layout do exist, Wrangler logs a hint suggesting `migrations_pattern` as an opt-in.
+
+  `wrangler d1 migrations create` now returns an actionable error if the generated migration filename would not match the configured pattern.
+
+- [#14164](https://github.com/cloudflare/workers-sdk/pull/14164) [`b502d54`](https://github.com/cloudflare/workers-sdk/commit/b502d5445b9e9e030020a3d65c0334507393aa64) Thanks [@G4brym](https://github.com/G4brym)! - Rename the `web_search` binding kind to `websearch`
+
+  Pre-launch rename of the public binding type from `web_search` to `websearch` so the on-the-wire shape matches the product name (Web Search). The wrangler config key, the binding-type string sent to the Cloudflare API, and the miniflare option key all move from `web_search` / `webSearch` to `websearch`.
+
+  Update your wrangler config:
+
+  ```diff
+  - "web_search": { "binding": "WEBSEARCH" }
+  + "websearch": { "binding": "WEBSEARCH" }
+  ```
+
+  The runtime `WebSearch` type exposed on `env.WEBSEARCH` is unchanged.
+
+- [#14146](https://github.com/cloudflare/workers-sdk/pull/14146) [`c4f45e8`](https://github.com/cloudflare/workers-sdk/commit/c4f45e8b8694c60fb1808f7fbb130e4b4893d20c) Thanks [@dario-piotrowicz](https://github.com/dario-piotrowicz)! - Simplify `constructWranglerConfig` to accept a single worker instead of an array
+
+  The `constructWranglerConfig` function now accepts a single `APIWorkerConfig` object instead of `APIWorkerConfig | APIWorkerConfig[]`. The multi-environment array support has been removed since the array use-case was removed and now the only call site already passes a single worker object. This is a breaking change to the function's public signature.
+
 ## 0.22.1
 
 ### Patch Changes

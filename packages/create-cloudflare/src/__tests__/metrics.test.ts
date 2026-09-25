@@ -58,7 +58,7 @@ describe("createReporter", () => {
 			promise: () => deferred.promise,
 		});
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session started",
 				deviceId,
@@ -77,7 +77,7 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(1);
+		expect(sendEvent).toHaveBeenCalledTimes(1);
 
 		deferred.resolve("test result");
 
@@ -85,7 +85,7 @@ describe("createReporter", () => {
 
 		await expect(operation).resolves.toBe("test result");
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session completed",
 				deviceId,
@@ -105,7 +105,7 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(2);
+		expect(sendEvent).toHaveBeenCalledTimes(2);
 	});
 
 	test("sends event with logs enabled if CREATE_CLOUDFLARE_TELEMETRY_DEBUG is set to `1`", async ({
@@ -125,7 +125,7 @@ describe("createReporter", () => {
 			promise: () => deferred.promise,
 		});
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session started",
 				deviceId,
@@ -144,7 +144,7 @@ describe("createReporter", () => {
 			},
 			true
 		);
-		expect(sendEvent).toBeCalledTimes(1);
+		expect(sendEvent).toHaveBeenCalledTimes(1);
 
 		deferred.resolve("test result");
 
@@ -152,7 +152,7 @@ describe("createReporter", () => {
 
 		await expect(operation).resolves.toBe("test result");
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session completed",
 				deviceId,
@@ -172,7 +172,7 @@ describe("createReporter", () => {
 			},
 			true
 		);
-		expect(sendEvent).toBeCalledTimes(2);
+		expect(sendEvent).toHaveBeenCalledTimes(2);
 	});
 
 	test("sends no event if no sparrow source key", async ({ expect }) => {
@@ -192,12 +192,12 @@ describe("createReporter", () => {
 
 		expect(reporter.isEnabled).toBe(false);
 
-		expect(sendEvent).toBeCalledTimes(0);
+		expect(sendEvent).toHaveBeenCalledTimes(0);
 
 		deferred.resolve("test result");
 
 		await expect(operation).resolves.toBe("test result");
-		expect(sendEvent).toBeCalledTimes(0);
+		expect(sendEvent).toHaveBeenCalledTimes(0);
 	});
 
 	test("sends no event if the c3 permission is disabled", async ({
@@ -224,12 +224,12 @@ describe("createReporter", () => {
 
 		expect(reporter.isEnabled).toBe(false);
 
-		expect(sendEvent).toBeCalledTimes(0);
+		expect(sendEvent).toHaveBeenCalledTimes(0);
 
 		deferred.resolve("test result");
 
 		await expect(operation).resolves.toBe("test result");
-		expect(sendEvent).toBeCalledTimes(0);
+		expect(sendEvent).toHaveBeenCalledTimes(0);
 	});
 
 	test("sends no event if the CREATE_CLOUDFLARE_TELEMETRY_DISABLED env is set to '1'", async ({
@@ -251,12 +251,48 @@ describe("createReporter", () => {
 
 		expect(reporter.isEnabled).toBe(false);
 
-		expect(sendEvent).toBeCalledTimes(0);
+		expect(sendEvent).toHaveBeenCalledTimes(0);
 
 		deferred.resolve("test result");
 
 		await expect(operation).resolves.toBe("test result");
-		expect(sendEvent).toBeCalledTimes(0);
+		expect(sendEvent).toHaveBeenCalledTimes(0);
+	});
+
+	test("sends no event if the DO_NOT_TRACK env is set to '1'", async ({
+		expect,
+	}) => {
+		vi.stubEnv("DO_NOT_TRACK", "1");
+
+		const deferred = promiseWithResolvers<string>();
+		const reporter = createReporter();
+		const operation = reporter.collectAsyncMetrics({
+			eventPrefix: "c3 session",
+			props: {
+				args: {
+					projectName: "app",
+				},
+			},
+			promise: () => deferred.promise,
+		});
+
+		expect(reporter.isEnabled).toBe(false);
+
+		expect(sendEvent).toHaveBeenCalledTimes(0);
+
+		deferred.resolve("test result");
+
+		await expect(operation).resolves.toBe("test result");
+		expect(sendEvent).toHaveBeenCalledTimes(0);
+	});
+
+	test("DO_NOT_TRACK='1' takes precedence over CREATE_CLOUDFLARE_TELEMETRY_DISABLED='0'", ({
+		expect,
+	}) => {
+		vi.stubEnv("DO_NOT_TRACK", "1");
+		vi.stubEnv("CREATE_CLOUDFLARE_TELEMETRY_DISABLED", "0");
+
+		expect(createReporter().isEnabled).toBe(false);
 	});
 
 	test("sends started and cancelled event to sparrow if the promise reject with a CancelError", async ({
@@ -274,7 +310,7 @@ describe("createReporter", () => {
 			promise: () => deferred.promise,
 		});
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session started",
 				deviceId,
@@ -293,14 +329,14 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(1);
+		expect(sendEvent).toHaveBeenCalledTimes(1);
 
 		deferred.reject(new CancelError("test cancel"));
 		vi.advanceTimersByTime(1234);
 
 		await expect(operation).rejects.toThrow(CancelError);
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session cancelled",
 				deviceId,
@@ -320,7 +356,7 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(2);
+		expect(sendEvent).toHaveBeenCalledTimes(2);
 	});
 
 	test("sends started and errored event to sparrow if the promise reject with a non CancelError", async ({
@@ -336,7 +372,7 @@ describe("createReporter", () => {
 			promise: () => deferred.promise,
 		});
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session started",
 				deviceId,
@@ -355,14 +391,14 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(1);
+		expect(sendEvent).toHaveBeenCalledTimes(1);
 
 		deferred.reject(new Error("test error"));
 		vi.advanceTimersByTime(1234);
 
 		await expect(process).rejects.toThrow(Error);
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session errored",
 				deviceId,
@@ -387,7 +423,7 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(2);
+		expect(sendEvent).toHaveBeenCalledTimes(2);
 	});
 
 	test("sends cancelled event if a SIGINT signal is received", async ({
@@ -406,7 +442,7 @@ describe("createReporter", () => {
 			promise: () => deferred.promise,
 		});
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session started",
 				deviceId,
@@ -425,14 +461,14 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(1);
+		expect(sendEvent).toHaveBeenCalledTimes(1);
 
 		process.emit("SIGINT", "SIGINT");
 		vi.advanceTimersByTime(1234);
 
 		await expect(run).rejects.toThrow(CancelError);
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session cancelled",
 				deviceId,
@@ -453,7 +489,7 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(2);
+		expect(sendEvent).toHaveBeenCalledTimes(2);
 	});
 
 	test("sends cancelled event if a SIGTERM signal is received", async ({
@@ -471,7 +507,7 @@ describe("createReporter", () => {
 			promise: () => deferred.promise,
 		});
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session started",
 				deviceId,
@@ -490,14 +526,14 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(1);
+		expect(sendEvent).toHaveBeenCalledTimes(1);
 
 		process.emit("SIGTERM", "SIGTERM");
 		vi.advanceTimersByTime(1234);
 
 		await expect(run).rejects.toThrow(CancelError);
 
-		expect(sendEvent).toBeCalledWith(
+		expect(sendEvent).toHaveBeenCalledWith(
 			{
 				event: "c3 session cancelled",
 				deviceId,
@@ -518,7 +554,7 @@ describe("createReporter", () => {
 			},
 			false
 		);
-		expect(sendEvent).toBeCalledTimes(2);
+		expect(sendEvent).toHaveBeenCalledTimes(2);
 	});
 });
 
@@ -531,6 +567,8 @@ describe("runTelemetryCommand", () => {
 
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.clearAllMocks();
+		vi.unstubAllEnvs();
 	});
 
 	test("run telemetry status when c3permission is disabled", async ({
@@ -571,6 +609,36 @@ describe("runTelemetryCommand", () => {
 		`);
 	});
 
+	test("run telemetry status when DO_NOT_TRACK is enabled", ({ expect }) => {
+		vi.stubEnv("DO_NOT_TRACK", "1");
+
+		runTelemetryCommand("status");
+
+		expect(readMetricsConfig).not.toHaveBeenCalled();
+		expect(writeMetricsConfig).not.toHaveBeenCalled();
+		expect(normalizeOutput(std.out)).toMatchInlineSnapshot(`
+			"Status: Disabled (set by DO_NOT_TRACK)
+
+			"
+		`);
+	});
+
+	test("run telemetry status when CREATE_CLOUDFLARE_TELEMETRY_DISABLED is enabled", ({
+		expect,
+	}) => {
+		vi.stubEnv("CREATE_CLOUDFLARE_TELEMETRY_DISABLED", "1");
+
+		runTelemetryCommand("status");
+
+		expect(readMetricsConfig).not.toHaveBeenCalled();
+		expect(writeMetricsConfig).not.toHaveBeenCalled();
+		expect(normalizeOutput(std.out)).toMatchInlineSnapshot(`
+			"Status: Disabled (set by CREATE_CLOUDFLARE_TELEMETRY_DISABLED)
+
+			"
+		`);
+	});
+
 	test("run telemetry enable when c3permission is disabled", async ({
 		expect,
 	}) => {
@@ -583,7 +651,7 @@ describe("runTelemetryCommand", () => {
 
 		runTelemetryCommand("enable");
 
-		expect(writeMetricsConfig).toBeCalledWith({
+		expect(writeMetricsConfig).toHaveBeenCalledWith({
 			c3permission: {
 				enabled: true,
 				date: new Date(),
@@ -609,11 +677,63 @@ describe("runTelemetryCommand", () => {
 
 		runTelemetryCommand("enable");
 
-		expect(writeMetricsConfig).not.toBeCalled();
+		expect(writeMetricsConfig).not.toHaveBeenCalled();
 		expect(normalizeOutput(std.out)).toMatchInlineSnapshot(`
 			"Status: Enabled
 
 			Create-Cloudflare is now collecting telemetry about your usage. Thank you for helping us improve the experience!
+			"
+		`);
+	});
+
+	test("run telemetry enable when DO_NOT_TRACK is enabled", ({ expect }) => {
+		vi.stubEnv("DO_NOT_TRACK", "1");
+		vi.mocked(readMetricsConfig).mockReturnValueOnce({
+			c3permission: {
+				enabled: false,
+				date: new Date(),
+			},
+		});
+
+		runTelemetryCommand("enable");
+
+		expect(writeMetricsConfig).toHaveBeenCalledWith({
+			c3permission: {
+				enabled: true,
+				date: new Date(),
+			},
+		});
+		expect(normalizeOutput(std.out)).toMatchInlineSnapshot(`
+			"Status: Disabled (set by DO_NOT_TRACK)
+
+			Telemetry has been enabled in Create-Cloudflare's global configuration, but remains disabled while DO_NOT_TRACK is set.
+			"
+		`);
+	});
+
+	test("run telemetry enable when CREATE_CLOUDFLARE_TELEMETRY_DISABLED is enabled", ({
+		expect,
+	}) => {
+		vi.stubEnv("CREATE_CLOUDFLARE_TELEMETRY_DISABLED", "1");
+		vi.mocked(readMetricsConfig).mockReturnValueOnce({
+			c3permission: {
+				enabled: false,
+				date: new Date(),
+			},
+		});
+
+		runTelemetryCommand("enable");
+
+		expect(writeMetricsConfig).toHaveBeenCalledWith({
+			c3permission: {
+				enabled: true,
+				date: new Date(),
+			},
+		});
+		expect(normalizeOutput(std.out)).toMatchInlineSnapshot(`
+			"Status: Disabled (set by CREATE_CLOUDFLARE_TELEMETRY_DISABLED)
+
+			Telemetry has been enabled in Create-Cloudflare's global configuration, but remains disabled while CREATE_CLOUDFLARE_TELEMETRY_DISABLED is set.
 			"
 		`);
 	});
@@ -630,7 +750,7 @@ describe("runTelemetryCommand", () => {
 
 		runTelemetryCommand("disable");
 
-		expect(writeMetricsConfig).toBeCalledWith({
+		expect(writeMetricsConfig).toHaveBeenCalledWith({
 			c3permission: {
 				enabled: false,
 				date: new Date(),
@@ -656,7 +776,7 @@ describe("runTelemetryCommand", () => {
 
 		runTelemetryCommand("disable");
 
-		expect(writeMetricsConfig).not.toBeCalled();
+		expect(writeMetricsConfig).not.toHaveBeenCalled();
 		expect(normalizeOutput(std.out)).toMatchInlineSnapshot(`
 			"Status: Disabled
 

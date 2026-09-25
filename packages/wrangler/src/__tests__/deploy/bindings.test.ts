@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import { getInstalledPackageVersion } from "@cloudflare/autoconfig";
 import {
 	runInTempDir,
 	writeWranglerConfig,
@@ -9,9 +10,7 @@ import { sync } from "command-exists";
 import { http, HttpResponse } from "msw";
 import * as TOML from "smol-toml";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
-import { getInstalledPackageVersion } from "../../autoconfig/frameworks/utils/packages";
 import { clearOutputFilePath } from "../../output";
-import { fetchSecrets } from "../../utils/fetch-secrets";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { clearDialogs } from "../helpers/mock-dialogs";
@@ -32,16 +31,6 @@ import {
 import type { Mock } from "vitest";
 
 vi.mock("command-exists");
-vi.mock("../../check/commands", async (importOriginal) => {
-	return {
-		...(await importOriginal()),
-		analyseBundle() {
-			return `{}`;
-		},
-	};
-});
-
-vi.mock("../../utils/fetch-secrets");
 
 vi.mock("../../package-manager", async (importOriginal) => ({
 	...(await importOriginal()),
@@ -54,8 +43,11 @@ vi.mock("../../package-manager", async (importOriginal) => ({
 	},
 }));
 
-vi.mock("../../autoconfig/run");
-vi.mock("../../autoconfig/frameworks/utils/packages");
+vi.mock("@cloudflare/autoconfig", async (importOriginal) => ({
+	...(await importOriginal()),
+	runAutoConfig: vi.fn(),
+	getInstalledPackageVersion: vi.fn(),
+}));
 vi.mock("@cloudflare/cli-shared-helpers/command");
 
 describe("deploy", () => {
@@ -81,7 +73,17 @@ describe("deploy", () => {
 		msw.use(
 			http.get("*/accounts/:accountId/r2/buckets/:bucketName", async () => {
 				return HttpResponse.json(createFetchResult({}));
-			})
+			}),
+			http.get("*/accounts/:accountId/workers/dispatch/namespaces", () =>
+				HttpResponse.json(
+					createFetchResult(
+						["Foo", "Bar"].map((namespace_name) => ({
+							namespace_id: `${namespace_name}-id`,
+							namespace_name,
+						}))
+					)
+				)
+			)
 		);
 		// Pretend all Agent Memory namespaces exist for the same reason.
 		msw.use(
@@ -90,9 +92,12 @@ describe("deploy", () => {
 				async () => {
 					return HttpResponse.json(createFetchResult({}));
 				}
+			),
+			http.get(
+				"*/accounts/:accountId/workers/scripts/:scriptName/secrets",
+				() => HttpResponse.json(createFetchResult([]))
 			)
 		);
-		vi.mocked(fetchSecrets).mockResolvedValue([]);
 		vi.mocked(getInstalledPackageVersion).mockReturnValue(undefined);
 	});
 
@@ -105,12 +110,6 @@ describe("deploy", () => {
 	describe("bindings", () => {
 		it("should allow bindings with different names", async ({ expect }) => {
 			writeWranglerConfig({
-				migrations: [
-					{
-						tag: "v1",
-						new_classes: ["SomeDurableObject", "AnotherDurableObject"],
-					},
-				],
 				durable_objects: {
 					bindings: [
 						{
@@ -313,8 +312,8 @@ describe("deploy", () => {
 				],
 				useOldUploadApi: true,
 			});
-			mockSubDomainRequest();
-			mockLegacyScriptData({ scripts: [] });
+			mockSubDomainRequest("test-sub-domain", true, false);
+			mockLegacyScriptData({});
 
 			await expect(runWrangler("deploy index.js")).resolves.toBeUndefined();
 			expect(std.out).toMatchInlineSnapshot(`
@@ -1439,7 +1438,7 @@ describe("deploy", () => {
 				);
 				mockSubDomainRequest();
 				mockLegacyScriptData({
-					scripts: [{ id: "test-name", migration_tag: "v1" }],
+					script: { id: "test-name", migration_tag: "v1" },
 				});
 				mockUploadWorkerRequest({
 					expectedBindings: [
@@ -1493,7 +1492,7 @@ describe("deploy", () => {
 				);
 				mockSubDomainRequest();
 				mockLegacyScriptData({
-					scripts: [{ id: "test-name", migration_tag: "v1" }],
+					script: { id: "test-name", migration_tag: "v1" },
 				});
 				mockUploadWorkerRequest({
 					expectedBindings: [
@@ -1594,7 +1593,7 @@ describe("deploy", () => {
 				);
 				mockSubDomainRequest();
 				mockLegacyScriptData({
-					scripts: [{ id: "test-name", migration_tag: "v1" }],
+					script: { id: "test-name", migration_tag: "v1" },
 				});
 				mockUploadWorkerRequest({
 					expectedType: "esm",
@@ -1652,7 +1651,7 @@ describe("deploy", () => {
 				fs.writeFileSync("index.js", scriptContent);
 				mockSubDomainRequest();
 				mockLegacyScriptData({
-					scripts: [{ id: "test-name", migration_tag: "v1" }],
+					script: { id: "test-name", migration_tag: "v1" },
 				});
 				mockUploadWorkerRequest({
 					expectedType: "esm",
@@ -1713,7 +1712,7 @@ describe("deploy", () => {
 				fs.writeFileSync("index.js", scriptContent);
 				mockSubDomainRequest();
 				mockLegacyScriptData({
-					scripts: [{ id: "test-name", migration_tag: "v1" }],
+					script: { id: "test-name", migration_tag: "v1" },
 				});
 				mockUploadWorkerRequest({
 					expectedType: "esm",
@@ -1771,6 +1770,28 @@ describe("deploy", () => {
 					You can use Durable Objects defined in other Workers by specifying a \`script_name\` in your wrangler.toml file, where \`script_name\` is the name of the Worker that implements that Durable Object. For example:
 					{ name = EXAMPLE_DO_BINDING, class_name = ExampleDurableObject } ==> { name = EXAMPLE_DO_BINDING, class_name = ExampleDurableObject, script_name = example-do-binding-worker }
 					Alternatively, migrate your worker to ES Module syntax to implement a Durable Object in this Worker:
+					https://developers.cloudflare.com/workers/learning/migrating-to-module-workers/]
+				`);
+			});
+
+			it("should error when deploying service-worker worker with migrations", async ({
+				expect,
+			}) => {
+				writeWranglerConfig({
+					migrations: [
+						{
+							tag: "v1",
+							new_classes: ["ExampleDurableObject"],
+						},
+					],
+				});
+				writeWorkerSource({ type: "sw" });
+				mockSubDomainRequest();
+
+				await expect(runWrangler("deploy index.js")).rejects
+					.toThrowErrorMatchingInlineSnapshot(`
+					[Error: Durable Object migrations require ES Module format Workers, but yours is being built as service-worker format. Migrations cannot be applied to service-worker format Workers.
+					To use Durable Object migrations, deploy in ES Module format by adding a default export handler (e.g. "export default { fetch() {} }"), or remove "migrations" from your config if you don't need them. See:
 					https://developers.cloudflare.com/workers/learning/migrating-to-module-workers/]
 				`);
 			});
@@ -1952,6 +1973,55 @@ describe("deploy", () => {
 					  https://test-name.test-sub-domain.workers.dev
 					Current Version ID: Galaxy-Class"
 				`);
+				expect(std.err).toMatchInlineSnapshot(`""`);
+				expect(std.warn).toMatchInlineSnapshot(`""`);
+			});
+
+			it("should strip the local-dev `dev` field from a typed service binding at deploy time", async ({
+				expect,
+			}) => {
+				writeWranglerConfig({
+					services: [
+						{
+							binding: "ENTITLEMENTS",
+							service: "edge-entitlements",
+							entrypoint: "EntitlementsRPCService",
+							// @ts-expect-error - cross_account_grant and dev are not in the public config types
+							cross_account_grant: "entitlements-grant",
+							dev: {
+								plugin: {
+									package: "@cloudflare/workers-toolbox-plugins",
+									name: "entitlements",
+								},
+								options: {
+									entitlements: [
+										{
+											key: "containers.enabled",
+											targets: ["account"],
+											type: "bool",
+										},
+									],
+									mapping: { "*": { "containers.enabled": true } },
+								},
+							},
+						},
+					],
+				});
+				writeWorkerSource();
+				mockSubDomainRequest();
+				mockUploadWorkerRequest({
+					expectedBindings: [
+						{
+							type: "service",
+							name: "ENTITLEMENTS",
+							service: "edge-entitlements",
+							entrypoint: "EntitlementsRPCService",
+							cross_account_grant: "entitlements-grant",
+						},
+					],
+				});
+
+				await runWrangler("deploy index.js");
 				expect(std.err).toMatchInlineSnapshot(`""`);
 				expect(std.warn).toMatchInlineSnapshot(`""`);
 			});

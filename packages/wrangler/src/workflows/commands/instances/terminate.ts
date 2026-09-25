@@ -6,7 +6,11 @@ import {
 	localWorkflowArgs,
 	updateLocalInstanceStatus,
 } from "../../local";
-import { getInstanceIdFromArgs, updateInstanceStatus } from "../../utils";
+import {
+	getInstanceIdFromArgs,
+	jsonWorkflowArgs,
+	updateInstanceStatus,
+} from "../../utils";
 
 export const workflowsInstancesTerminateCommand = createCommand({
 	metadata: {
@@ -17,6 +21,7 @@ export const workflowsInstancesTerminateCommand = createCommand({
 	positionalArgs: ["name", "id"],
 	args: {
 		...localWorkflowArgs,
+		...jsonWorkflowArgs,
 		name: {
 			describe: "Name of the workflow",
 			type: "string",
@@ -28,18 +33,50 @@ export const workflowsInstancesTerminateCommand = createCommand({
 			type: "string",
 			demandOption: true,
 		},
+		rollback: {
+			describe: "Run registered rollback handlers before terminating",
+			type: "boolean",
+			default: false,
+		},
+	},
+
+	behaviour: {
+		printBanner: (args) => !args.json,
 	},
 
 	async handler(args, { config }) {
 		let id: string;
+		let result: unknown;
 
 		if (args.local) {
-			id = await getLocalInstanceIdFromArgs(args.port, args);
-			await updateLocalInstanceStatus(args.port, args.name, id, "terminate");
+			id = await getLocalInstanceIdFromArgs(args.port, args, {
+				quiet: args.json,
+			});
+			result = await updateLocalInstanceStatus(
+				args.port,
+				args.name,
+				id,
+				"terminate",
+				undefined,
+				args.rollback
+			);
 		} else {
 			const accountId = await requireAuth(config);
 			id = await getInstanceIdFromArgs(accountId, args, config);
-			await updateInstanceStatus(config, accountId, args.name, id, "terminate");
+			result = await updateInstanceStatus(
+				config,
+				accountId,
+				args.name,
+				id,
+				"terminate",
+				undefined,
+				args.rollback
+			);
+		}
+
+		if (args.json) {
+			logger.json(result);
+			return;
 		}
 
 		logger.info(

@@ -1,5 +1,61 @@
 # @cloudflare/workflows-shared
 
+## 0.14.0
+
+### Minor Changes
+
+- [#15441](https://github.com/cloudflare/workers-sdk/pull/15441) [`8997652`](https://github.com/cloudflare/workers-sdk/commit/8997652577fdbe97e39fb29bebd6777d3f82d3a3) Thanks [@mkuritsu](https://github.com/mkuritsu)! - Add experimental Workflow event subscriptions to local development
+
+  Local Workflow instances now implement `subscribe()`, returning a disposable RPC subscription that streams historical and live lifecycle events. Subscriptions support event cursors and type filters and include Workflow inputs, status transitions, step configuration, outputs, errors, retries, waits, and rollback activity where applicable.
+
+## 0.13.0
+
+### Minor Changes
+
+- [#14735](https://github.com/cloudflare/workers-sdk/pull/14735) [`30c2d47`](https://github.com/cloudflare/workers-sdk/commit/30c2d47965c51350aca6b2c70db8fc6496bdaa17) Thanks [@vaishnav-mk](https://github.com/vaishnav-mk)! - Add individual and batch Workflow instance deletion to the runtime and SDK.
+
+  - `WorkflowInstance.delete()` deletes one instance. Self-deletion stops the current execution.
+  - `env.MY_WORKFLOW.deleteBatch(instanceIds)` deletes up to 100 instances and returns `{ deleted, errors }` per input position.
+  - `wrangler workflows instances delete <name> [id..]` deletes instances remotely or with `--local`; IDs can also come from a JSON array passed with `--filename`, with a combined limit of 100.
+
+## 0.12.2
+
+### Patch Changes
+
+- [#14840](https://github.com/cloudflare/workers-sdk/pull/14840) [`03a4330`](https://github.com/cloudflare/workers-sdk/commit/03a4330eb11865ef20a7c993a6ebe1f1b10838ad) Thanks [@Kkartik14](https://github.com/Kkartik14)! - Fix local Workflows retaining abort listeners after waits complete
+
+  Workflow sleeps, retry delays, and event waits now share a typed abort-aware race that removes its listener when either side settles. This prevents long-running local Workflow instances from retaining a listener and its captured promise state for every completed wait until the instance is paused or evicted.
+
+## 0.12.1
+
+### Patch Changes
+
+- [#14707](https://github.com/cloudflare/workers-sdk/pull/14707) [`b38f494`](https://github.com/cloudflare/workers-sdk/commit/b38f494204e5e08e561b8f198ef928188e554868) Thanks [@emily-shen](https://github.com/emily-shen)! - Update zod to v4
+
+## 0.12.0
+
+### Minor Changes
+
+- [#14465](https://github.com/cloudflare/workers-sdk/pull/14465) [`2fedb1f`](https://github.com/cloudflare/workers-sdk/commit/2fedb1fc811efb3f7544c569e57383cabd4f14f8) Thanks [@vaishnav-mk](https://github.com/vaishnav-mk)! - Add rollback support when terminating Workflow instances
+
+  `WorkflowInstance.terminate({ rollback: true })` now runs registered rollback handlers before marking a local Workflow instance as terminated. Wrangler also supports this via `wrangler workflows instances terminate --rollback`, including local mode.
+
+  The rollback option is only sent for terminate operations and is rejected by the Local Explorer API for pause, resume, and restart actions.
+
+## 0.11.2
+
+### Patch Changes
+
+- [#14318](https://github.com/cloudflare/workers-sdk/pull/14318) [`f32e9c1`](https://github.com/cloudflare/workers-sdk/commit/f32e9c1fdbf8ab7c0e68afa613ec61e367be04cb) Thanks [@vaishnav-mk](https://github.com/vaishnav-mk)! - Add step context to Workflows rollback handlers
+
+  Rollback handlers now receive the original step context under `ctx`, making `ctx.step.name`, `ctx.step.count`, `ctx.attempt`, and the resolved step `config` available during rollback. The legacy `stepName` field remains available and is equivalent to `${ctx.step.name}-${ctx.step.count}`.
+
+  `rollbackConfig` is now limited to retry and timeout settings, matching the behavior supported by rollback handlers.
+
+- [#14314](https://github.com/cloudflare/workers-sdk/pull/14314) [`5c3bb11`](https://github.com/cloudflare/workers-sdk/commit/5c3bb118a99da70c5c1efb07df37f685e7044ba6) Thanks [@harryzcy](https://github.com/harryzcy)! - Bump esbuild to 0.28.1
+
+  This update includes several bug fixes from esbuild versions 0.27.3 through 0.28.1. See the [esbuild changelog](https://github.com/evanw/esbuild/blob/v0.28.1/CHANGELOG.md) for details.
+
 ## 0.11.1
 
 ### Patch Changes

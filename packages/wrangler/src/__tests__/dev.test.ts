@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import {
 	COMPLIANCE_REGION_CONFIG_UNKNOWN,
+	DEFAULT_COMPAT_DATE,
 	FatalError,
-	getTodaysCompatDate,
 } from "@cloudflare/workers-utils";
 import {
 	runInTempDir,
@@ -20,6 +20,7 @@ import { logger } from "../logger";
 import { sniffUserAgent } from "../package-manager";
 import { DEFAULT_WORKERS_TYPES_FILE_PATH } from "../type-generation/helpers";
 import * as generateRuntime from "../type-generation/runtime";
+import { detectAgent } from "../utils/detect-agent";
 import { mockAccountId, mockApiToken } from "./helpers/mock-account-id";
 import { mockConsoleMethods } from "./helpers/mock-console";
 import { useMockIsTTY } from "./helpers/mock-istty";
@@ -36,15 +37,30 @@ import type {
 	StartDevWorkerOptions,
 	Trigger,
 } from "../api";
+import type { StartDevOptions } from "../dev";
 import type { RawConfig } from "@cloudflare/workers-utils";
 import type { ExpectStatic } from "vitest";
 import type { Mock, MockInstance } from "vitest";
+
+const startDevMock = vi.hoisted(() => ({
+	calls: [] as StartDevOptions[],
+}));
 
 vi.mock("../api/startDevWorker/ConfigController", (importOriginal) =>
 	importOriginal()
 );
 vi.mock("node:child_process");
 vi.mock("../dev/hotkeys");
+vi.mock("../dev/start-dev", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../dev/start-dev")>();
+	return {
+		...actual,
+		startDev: vi.fn((args: StartDevOptions) => {
+			startDevMock.calls.push(args);
+			return actual.startDev(args);
+		}),
+	};
+});
 
 // Don't memoize in tests. If we did, it would memoize across test runs, which causes problems
 vi.mock("../utils/memoizeGetPort", () => {
@@ -87,7 +103,6 @@ async function expectedHostAndZone(
 				}
 			}),
 		env: undefined,
-		useServiceEnvironments: undefined,
 		sendMetrics: undefined,
 		configPath: config.config,
 	});
@@ -126,6 +141,7 @@ describe.sequential("wrangler dev", () => {
 
 	beforeEach(() => {
 		setIsTTY(true);
+		startDevMock.calls = [];
 		setSpy = vi.spyOn(ConfigController.prototype, "set");
 		spy = vi
 			.spyOn(ConfigController.prototype, "emitConfigUpdateEvent")
@@ -166,6 +182,62 @@ describe.sequential("wrangler dev", () => {
 		}
 		return { ...spy.mock.calls[0][0], input: setSpy.mock.calls[0][0] };
 	}
+
+	function getLatestStartDevArgs(): StartDevOptions {
+		const args = startDevMock.calls.at(-1);
+		assert(args);
+		return args;
+	}
+
+	describe("Local Explorer agent hint", () => {
+		beforeEach(() => {
+			writeWranglerConfig({
+				name: "test-worker",
+				main: "index.js",
+				compatibility_date: "2024-01-01",
+			});
+			fs.writeFileSync("index.js", `export default {};`);
+			vi.mocked(detectAgent).mockReturnValue({ isAgent: false, id: null });
+		});
+
+		it("asks startDev to print the hint for headless agent sessions", async ({
+			expect,
+		}) => {
+			setIsTTY(false);
+			vi.mocked(detectAgent).mockReturnValue({
+				isAgent: true,
+				id: "test-agent",
+			});
+
+			await runWranglerUntilConfig("dev");
+
+			expect(getLatestStartDevArgs().showLocalExplorerAgentHint).toBe(true);
+		});
+
+		it("does not ask startDev to print the hint for interactive agent sessions", async ({
+			expect,
+		}) => {
+			setIsTTY(true);
+			vi.mocked(detectAgent).mockReturnValue({
+				isAgent: true,
+				id: "test-agent",
+			});
+
+			await runWranglerUntilConfig("dev");
+
+			expect(getLatestStartDevArgs().showLocalExplorerAgentHint).toBe(false);
+		});
+
+		it("does not ask startDev to print the hint for non-agent sessions", async ({
+			expect,
+		}) => {
+			setIsTTY(false);
+
+			await runWranglerUntilConfig("dev");
+
+			expect(getLatestStartDevArgs().showLocalExplorerAgentHint).toBe(false);
+		});
+	});
 
 	describe("config file support", () => {
 		it("should support wrangler.toml", async ({ expect }) => {
@@ -224,7 +296,15 @@ describe.sequential("wrangler dev", () => {
 			await expect(
 				runWrangler("dev --remote index.js")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[Error: You must be logged in to use wrangler dev in remote mode. Try logging in, or run wrangler dev --local.]`
+				`
+				[Error: Could not start remote dev session. No credentials found, and the environment is non-interactive so browser login cannot be started.
+				Either:
+				 - Set a CLOUDFLARE_API_TOKEN environment variable
+				 - Run \`wrangler login\` in an interactive terminal first
+				 - Or use \`wrangler dev --local\` to develop locally (remote resources like KV, D1, etc. will use local simulators instead).
+
+				You can run \`wrangler whoami\` to check your current authentication status.]
+			`
 			);
 		});
 	});
@@ -282,14 +362,12 @@ describe.sequential("wrangler dev", () => {
 			fs.writeFileSync("index.js", `export default {};`);
 			await runWranglerUntilConfig("dev");
 
-			const currentDate = getTodaysCompatDate();
-
-			expect(std.warn.replaceAll(currentDate, "<current-date>"))
+			expect(std.warn.replaceAll(DEFAULT_COMPAT_DATE, "<default-date>"))
 				.toMatchInlineSnapshot(`
-					"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNo compatibility_date was specified. Using today's date: <current-date>.[0m
+					"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNo compatibility_date was specified. Using the default compatibility date: <default-date>.[0m
 
-					  ❯❯ Add one to your wrangler.toml file: compatibility_date = "<current-date>", or
-					  ❯❯ Pass it in your terminal: wrangler dev [<SCRIPT>] --compatibility-date=<current-date>
+					  ❯❯ Add one to your wrangler.toml file: compatibility_date = "<default-date>", or
+					  ❯❯ Pass it in your terminal: wrangler dev [<SCRIPT>] --compatibility-date=<default-date>
 
 					  See [4mhttps://developers.cloudflare.com/workers/platform/compatibility-dates/[0m for more information.
 
@@ -1680,7 +1758,7 @@ describe.sequential("wrangler dev", () => {
 	});
 
 	describe("durable_objects", () => {
-		it("should warn if there are remote Durable Objects, or missing migrations for local Durable Objects", async ({
+		it("should warn if there are remote Durable Objects, or a missing lifecycle for local Durable Objects", async ({
 			expect,
 		}) => {
 			writeWranglerConfig({
@@ -1727,22 +1805,80 @@ describe.sequential("wrangler dev", () => {
 				"[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mProcessing wrangler.toml configuration:[0m
 
 				    - In your wrangler.toml file, you have configured \`durable_objects\` exported by this Worker
-				  (CLASS_1, CLASS_3), but no \`migrations\` for them. This may not work as expected until you add a
-				  \`migrations\` section to your wrangler.toml file. Add the following configuration:
+				  (CLASS_1, CLASS_3), but no live \`exports\` entry for them. This may not work as expected until you
+				  add a live \`durable-object\` entry to \`exports\` for each. Add the following configuration:
 
 				      \`\`\`
-				      [[migrations]]
-				      tag = "v1"
-				      new_sqlite_classes = [ "CLASS_1", "CLASS_3" ]
+				      [exports.CLASS_1]
+				      type = "durable-object"
+				      storage = "sqlite"
+
+				      [exports.CLASS_3]
+				      type = "durable-object"
+				      storage = "sqlite"
 
 				      \`\`\`
-
-				      Refer to
-				  [4mhttps://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/[0m for more
-				  details.
 
 				"
 			`);
+		});
+
+		describe("declarative `exports`", () => {
+			it("starts dev when `exports` is set", async ({ expect }) => {
+				writeWranglerConfig({
+					name: "test-do-exports-dev",
+					main: "index.js",
+					durable_objects: {
+						bindings: [{ name: "DO", class_name: "MyDO" }],
+					},
+					exports: {
+						MyDO: { type: "durable-object", storage: "sqlite" },
+					},
+				});
+				fs.writeFileSync("index.js", `export default {};`);
+
+				const config = await runWranglerUntilConfig("dev");
+				expect(config.name).toBe("test-do-exports-dev");
+			});
+
+			it("resolves a container referenced from a durable object export", async ({
+				expect,
+			}) => {
+				writeWranglerConfig({
+					name: "test-container-exports-dev",
+					main: "index.js",
+					containers: [
+						{
+							name: "my-container",
+							max_instances: 1,
+							image: "registry.cloudflare.com/hello:world",
+						},
+					],
+					exports: {
+						MyContainerDO: {
+							type: "durable-object",
+							storage: "sqlite",
+							container: "my-container",
+						},
+					},
+				});
+				fs.writeFileSync("index.js", `export default {};`);
+
+				const config = await runWranglerUntilConfig("dev");
+				expect(config.containers).toEqual([
+					expect.objectContaining({
+						name: "my-container",
+						class_name: "MyContainerDO",
+					}),
+				]);
+				expect(config.containerDevPlan?.containerOptions).toEqual([
+					{
+						image_uri: "registry.cloudflare.com/some-account-id/hello:world",
+						class_name: "MyContainerDO",
+						image_tag: expect.stringMatching(/^cloudflare-dev\/mycontainerdo:/),
+					},
+				]);
+			});
 		});
 	});
 
@@ -2699,6 +2835,32 @@ describe.sequential("wrangler dev", () => {
 			`);
 		});
 
+		it("should warn in remote mode with named-image containers", async ({
+			expect,
+		}) => {
+			writeWranglerConfig({
+				...containerConfig,
+				containers: [
+					{
+						name: "managed-container",
+						class_name: "ContainerClass",
+						scheduling_policy: "durable_object",
+						images: { app: { dockerfile: "./Dockerfile" } },
+					},
+				],
+			});
+			fs.writeFileSync("Dockerfile", `FROM ubuntu`);
+			fs.writeFileSync("index.js", `export default {};`);
+
+			await expect(
+				runWrangler("dev --remote")
+			).rejects.toThrowErrorMatchingInlineSnapshot(
+				`[Error: Bailing early in tests]`
+			);
+
+			expect(std.warn).toContain("Containers are only supported in local mode");
+		});
+
 		it("should not warn when run in remote mode with disabled containers", async ({
 			expect,
 		}) => {
@@ -2949,6 +3111,8 @@ describe.sequential("wrangler dev", () => {
 				);
 				expect(typesContent).not.toContain("old-hash-value");
 				expect(typesContent).toContain("NEW_VAR");
+				expect(typesContent).toContain("// Begin runtime types");
+				expect(typesContent).toContain("/* eslint-disable */");
 			});
 
 			it("should not warn about types if the types file does not exist", async ({
@@ -3069,7 +3233,7 @@ describe.sequential("wrangler dev", () => {
 			await expect(
 				runWrangler("dev --tunnel --remote")
 			).rejects.toThrowErrorMatchingInlineSnapshot(
-				`[Error: --tunnel is only supported in local mode.]`
+				`[Error: --tunnel cannot be used with --remote. Tunnels expose your local dev server to the internet, which is only applicable in local mode. Remove --remote to use --tunnel, or remove --tunnel to use --remote.]`
 			);
 		});
 	});

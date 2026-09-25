@@ -7,8 +7,8 @@ import { fetchResult } from "../cfetch";
 import { isAuthenticationError } from "../core/handle-errors";
 import { logger } from "../logger";
 import { formatMessage } from "../utils/format-message";
-import { fetchAllAccounts } from "./fetch-accounts";
 import { fetchMembershipRoles } from "./membership";
+import { fetchAllAccounts, getCredentialStore } from "./user";
 import { DefaultScopeKeys, getAPIToken, getAuthFromEnv, getScopes } from ".";
 import type { Scope } from ".";
 import type {
@@ -67,6 +67,9 @@ export async function whoami(
 	const user = await getUserInfo(complianceConfig);
 	if (!user) {
 		logger.log("You are not authenticated. Please run `wrangler login`.");
+		logger.log(
+			"To deploy without logging in, run a command like `wrangler deploy --temporary` to use a temporary preview account."
+		);
 		return;
 	}
 	printUserEmail(user);
@@ -76,6 +79,10 @@ export async function whoami(
 	) {
 		logger.log(
 			"ℹ️  The API Token is read from the CLOUDFLARE_API_TOKEN environment variable."
+		);
+	} else if (user.authType === "OAuth Token") {
+		logger.log(
+			`🔐 Credentials are stored in: ${chalk.blue(getCredentialStore().describe())}`
 		);
 	}
 	printComplianceRegion(complianceConfig);
@@ -183,7 +190,7 @@ function printTokenPermissions(user: UserInfo) {
 	const expectedScopes = new Set(DefaultScopeKeys);
 	for (const [scope, access] of permissions) {
 		// We'll remove scopes from the set of scopes that we expect to see when we see them in the API response.
-		// Some scopes are dot-separated (e.g. "websearch.run") rather than colon-separated, in which case
+		// Some scopes are dot-separated (e.g. "challenge-widgets.write") rather than colon-separated, in which case
 		// the split above yields a single element with `access === undefined`.
 		const key = (access === undefined ? scope : `${scope}:${access}`) as Scope;
 		expectedScopes.delete(key);

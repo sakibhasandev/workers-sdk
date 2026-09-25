@@ -9,23 +9,54 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as EmailRouteImport } from './routes/email'
+import { Route as CronTriggersRouteImport } from './routes/cron-triggers'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ObservabilityIndexRouteImport } from './routes/observability/index'
+import { Route as CronTriggersIndexRouteImport } from './routes/cron-triggers/index'
 import { Route as WorkflowsWorkflowNameRouteImport } from './routes/workflows/$workflowName'
 import { Route as R2BucketNameRouteImport } from './routes/r2/$bucketName'
+import { Route as ObservabilityEventsRouteImport } from './routes/observability/events'
 import { Route as KvNamespaceIdRouteImport } from './routes/kv/$namespaceId'
+import { Route as EmailSendingRouteImport } from './routes/email/sending'
+import { Route as EmailRoutingRouteImport } from './routes/email/routing'
 import { Route as DoClassNameRouteImport } from './routes/do/$className'
 import { Route as D1DatabaseIdRouteImport } from './routes/d1/$databaseId'
+import { Route as CronTriggersConfiguredRouteImport } from './routes/cron-triggers/configured'
+import { Route as CronTriggersAdHocRouteImport } from './routes/cron-triggers/ad-hoc'
 import { Route as WorkflowsWorkflowNameIndexRouteImport } from './routes/workflows/$workflowName/index'
 import { Route as R2BucketNameIndexRouteImport } from './routes/r2/$bucketName/index'
+import { Route as EmailRoutingIndexRouteImport } from './routes/email/routing/index'
 import { Route as DoClassNameIndexRouteImport } from './routes/do/$className/index'
 import { Route as WorkflowsWorkflowNameInstanceIdRouteImport } from './routes/workflows/$workflowName/$instanceId'
+import { Route as EmailRoutingCaptureIdRouteImport } from './routes/email/routing/$captureId'
 import { Route as DoClassNameObjectIdRouteImport } from './routes/do/$className/$objectId'
 import { Route as R2BucketNameObjectSplatRouteImport } from './routes/r2/$bucketName/object.$'
 
+const EmailRoute = EmailRouteImport.update({
+  id: '/email',
+  path: '/email',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CronTriggersRoute = CronTriggersRouteImport.update({
+  id: '/cron-triggers',
+  path: '/cron-triggers',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ObservabilityIndexRoute = ObservabilityIndexRouteImport.update({
+  id: '/observability/',
+  path: '/observability/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CronTriggersIndexRoute = CronTriggersIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => CronTriggersRoute,
 } as any)
 const WorkflowsWorkflowNameRoute = WorkflowsWorkflowNameRouteImport.update({
   id: '/workflows/$workflowName',
@@ -37,10 +68,25 @@ const R2BucketNameRoute = R2BucketNameRouteImport.update({
   path: '/r2/$bucketName',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ObservabilityEventsRoute = ObservabilityEventsRouteImport.update({
+  id: '/observability/events',
+  path: '/observability/events',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const KvNamespaceIdRoute = KvNamespaceIdRouteImport.update({
   id: '/kv/$namespaceId',
   path: '/kv/$namespaceId',
   getParentRoute: () => rootRouteImport,
+} as any)
+const EmailSendingRoute = EmailSendingRouteImport.update({
+  id: '/sending',
+  path: '/sending',
+  getParentRoute: () => EmailRoute,
+} as any)
+const EmailRoutingRoute = EmailRoutingRouteImport.update({
+  id: '/routing',
+  path: '/routing',
+  getParentRoute: () => EmailRoute,
 } as any)
 const DoClassNameRoute = DoClassNameRouteImport.update({
   id: '/do/$className',
@@ -51,6 +97,16 @@ const D1DatabaseIdRoute = D1DatabaseIdRouteImport.update({
   id: '/d1/$databaseId',
   path: '/d1/$databaseId',
   getParentRoute: () => rootRouteImport,
+} as any)
+const CronTriggersConfiguredRoute = CronTriggersConfiguredRouteImport.update({
+  id: '/configured',
+  path: '/configured',
+  getParentRoute: () => CronTriggersRoute,
+} as any)
+const CronTriggersAdHocRoute = CronTriggersAdHocRouteImport.update({
+  id: '/ad-hoc',
+  path: '/ad-hoc',
+  getParentRoute: () => CronTriggersRoute,
 } as any)
 const WorkflowsWorkflowNameIndexRoute =
   WorkflowsWorkflowNameIndexRouteImport.update({
@@ -63,6 +119,11 @@ const R2BucketNameIndexRoute = R2BucketNameIndexRouteImport.update({
   path: '/',
   getParentRoute: () => R2BucketNameRoute,
 } as any)
+const EmailRoutingIndexRoute = EmailRoutingIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => EmailRoutingRoute,
+} as any)
 const DoClassNameIndexRoute = DoClassNameIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -74,6 +135,11 @@ const WorkflowsWorkflowNameInstanceIdRoute =
     path: '/$instanceId',
     getParentRoute: () => WorkflowsWorkflowNameRoute,
   } as any)
+const EmailRoutingCaptureIdRoute = EmailRoutingCaptureIdRouteImport.update({
+  id: '/$captureId',
+  path: '/$captureId',
+  getParentRoute: () => EmailRoutingRoute,
+} as any)
 const DoClassNameObjectIdRoute = DoClassNameObjectIdRouteImport.update({
   id: '/$objectId',
   path: '/$objectId',
@@ -87,25 +153,45 @@ const R2BucketNameObjectSplatRoute = R2BucketNameObjectSplatRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/cron-triggers': typeof CronTriggersRouteWithChildren
+  '/email': typeof EmailRouteWithChildren
+  '/cron-triggers/ad-hoc': typeof CronTriggersAdHocRoute
+  '/cron-triggers/configured': typeof CronTriggersConfiguredRoute
   '/d1/$databaseId': typeof D1DatabaseIdRoute
   '/do/$className': typeof DoClassNameRouteWithChildren
+  '/email/routing': typeof EmailRoutingRouteWithChildren
+  '/email/sending': typeof EmailSendingRoute
   '/kv/$namespaceId': typeof KvNamespaceIdRoute
+  '/observability/events': typeof ObservabilityEventsRoute
   '/r2/$bucketName': typeof R2BucketNameRouteWithChildren
   '/workflows/$workflowName': typeof WorkflowsWorkflowNameRouteWithChildren
+  '/cron-triggers/': typeof CronTriggersIndexRoute
+  '/observability/': typeof ObservabilityIndexRoute
   '/do/$className/$objectId': typeof DoClassNameObjectIdRoute
+  '/email/routing/$captureId': typeof EmailRoutingCaptureIdRoute
   '/workflows/$workflowName/$instanceId': typeof WorkflowsWorkflowNameInstanceIdRoute
   '/do/$className/': typeof DoClassNameIndexRoute
+  '/email/routing/': typeof EmailRoutingIndexRoute
   '/r2/$bucketName/': typeof R2BucketNameIndexRoute
   '/workflows/$workflowName/': typeof WorkflowsWorkflowNameIndexRoute
   '/r2/$bucketName/object/$': typeof R2BucketNameObjectSplatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/email': typeof EmailRouteWithChildren
+  '/cron-triggers/ad-hoc': typeof CronTriggersAdHocRoute
+  '/cron-triggers/configured': typeof CronTriggersConfiguredRoute
   '/d1/$databaseId': typeof D1DatabaseIdRoute
+  '/email/sending': typeof EmailSendingRoute
   '/kv/$namespaceId': typeof KvNamespaceIdRoute
+  '/observability/events': typeof ObservabilityEventsRoute
+  '/cron-triggers': typeof CronTriggersIndexRoute
+  '/observability': typeof ObservabilityIndexRoute
   '/do/$className/$objectId': typeof DoClassNameObjectIdRoute
+  '/email/routing/$captureId': typeof EmailRoutingCaptureIdRoute
   '/workflows/$workflowName/$instanceId': typeof WorkflowsWorkflowNameInstanceIdRoute
   '/do/$className': typeof DoClassNameIndexRoute
+  '/email/routing': typeof EmailRoutingIndexRoute
   '/r2/$bucketName': typeof R2BucketNameIndexRoute
   '/workflows/$workflowName': typeof WorkflowsWorkflowNameIndexRoute
   '/r2/$bucketName/object/$': typeof R2BucketNameObjectSplatRoute
@@ -113,14 +199,25 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/cron-triggers': typeof CronTriggersRouteWithChildren
+  '/email': typeof EmailRouteWithChildren
+  '/cron-triggers/ad-hoc': typeof CronTriggersAdHocRoute
+  '/cron-triggers/configured': typeof CronTriggersConfiguredRoute
   '/d1/$databaseId': typeof D1DatabaseIdRoute
   '/do/$className': typeof DoClassNameRouteWithChildren
+  '/email/routing': typeof EmailRoutingRouteWithChildren
+  '/email/sending': typeof EmailSendingRoute
   '/kv/$namespaceId': typeof KvNamespaceIdRoute
+  '/observability/events': typeof ObservabilityEventsRoute
   '/r2/$bucketName': typeof R2BucketNameRouteWithChildren
   '/workflows/$workflowName': typeof WorkflowsWorkflowNameRouteWithChildren
+  '/cron-triggers/': typeof CronTriggersIndexRoute
+  '/observability/': typeof ObservabilityIndexRoute
   '/do/$className/$objectId': typeof DoClassNameObjectIdRoute
+  '/email/routing/$captureId': typeof EmailRoutingCaptureIdRoute
   '/workflows/$workflowName/$instanceId': typeof WorkflowsWorkflowNameInstanceIdRoute
   '/do/$className/': typeof DoClassNameIndexRoute
+  '/email/routing/': typeof EmailRoutingIndexRoute
   '/r2/$bucketName/': typeof R2BucketNameIndexRoute
   '/workflows/$workflowName/': typeof WorkflowsWorkflowNameIndexRoute
   '/r2/$bucketName/object/$': typeof R2BucketNameObjectSplatRoute
@@ -129,39 +226,70 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/cron-triggers'
+    | '/email'
+    | '/cron-triggers/ad-hoc'
+    | '/cron-triggers/configured'
     | '/d1/$databaseId'
     | '/do/$className'
+    | '/email/routing'
+    | '/email/sending'
     | '/kv/$namespaceId'
+    | '/observability/events'
     | '/r2/$bucketName'
     | '/workflows/$workflowName'
+    | '/cron-triggers/'
+    | '/observability/'
     | '/do/$className/$objectId'
+    | '/email/routing/$captureId'
     | '/workflows/$workflowName/$instanceId'
     | '/do/$className/'
+    | '/email/routing/'
     | '/r2/$bucketName/'
     | '/workflows/$workflowName/'
     | '/r2/$bucketName/object/$'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/email'
+    | '/cron-triggers/ad-hoc'
+    | '/cron-triggers/configured'
     | '/d1/$databaseId'
+    | '/email/sending'
     | '/kv/$namespaceId'
+    | '/observability/events'
+    | '/cron-triggers'
+    | '/observability'
     | '/do/$className/$objectId'
+    | '/email/routing/$captureId'
     | '/workflows/$workflowName/$instanceId'
     | '/do/$className'
+    | '/email/routing'
     | '/r2/$bucketName'
     | '/workflows/$workflowName'
     | '/r2/$bucketName/object/$'
   id:
     | '__root__'
     | '/'
+    | '/cron-triggers'
+    | '/email'
+    | '/cron-triggers/ad-hoc'
+    | '/cron-triggers/configured'
     | '/d1/$databaseId'
     | '/do/$className'
+    | '/email/routing'
+    | '/email/sending'
     | '/kv/$namespaceId'
+    | '/observability/events'
     | '/r2/$bucketName'
     | '/workflows/$workflowName'
+    | '/cron-triggers/'
+    | '/observability/'
     | '/do/$className/$objectId'
+    | '/email/routing/$captureId'
     | '/workflows/$workflowName/$instanceId'
     | '/do/$className/'
+    | '/email/routing/'
     | '/r2/$bucketName/'
     | '/workflows/$workflowName/'
     | '/r2/$bucketName/object/$'
@@ -169,21 +297,53 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CronTriggersRoute: typeof CronTriggersRouteWithChildren
+  EmailRoute: typeof EmailRouteWithChildren
   D1DatabaseIdRoute: typeof D1DatabaseIdRoute
   DoClassNameRoute: typeof DoClassNameRouteWithChildren
   KvNamespaceIdRoute: typeof KvNamespaceIdRoute
+  ObservabilityEventsRoute: typeof ObservabilityEventsRoute
   R2BucketNameRoute: typeof R2BucketNameRouteWithChildren
   WorkflowsWorkflowNameRoute: typeof WorkflowsWorkflowNameRouteWithChildren
+  ObservabilityIndexRoute: typeof ObservabilityIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/email': {
+      id: '/email'
+      path: '/email'
+      fullPath: '/email'
+      preLoaderRoute: typeof EmailRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cron-triggers': {
+      id: '/cron-triggers'
+      path: '/cron-triggers'
+      fullPath: '/cron-triggers'
+      preLoaderRoute: typeof CronTriggersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/observability/': {
+      id: '/observability/'
+      path: '/observability'
+      fullPath: '/observability/'
+      preLoaderRoute: typeof ObservabilityIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cron-triggers/': {
+      id: '/cron-triggers/'
+      path: '/'
+      fullPath: '/cron-triggers/'
+      preLoaderRoute: typeof CronTriggersIndexRouteImport
+      parentRoute: typeof CronTriggersRoute
     }
     '/workflows/$workflowName': {
       id: '/workflows/$workflowName'
@@ -199,12 +359,33 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof R2BucketNameRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/observability/events': {
+      id: '/observability/events'
+      path: '/observability/events'
+      fullPath: '/observability/events'
+      preLoaderRoute: typeof ObservabilityEventsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/kv/$namespaceId': {
       id: '/kv/$namespaceId'
       path: '/kv/$namespaceId'
       fullPath: '/kv/$namespaceId'
       preLoaderRoute: typeof KvNamespaceIdRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/email/sending': {
+      id: '/email/sending'
+      path: '/sending'
+      fullPath: '/email/sending'
+      preLoaderRoute: typeof EmailSendingRouteImport
+      parentRoute: typeof EmailRoute
+    }
+    '/email/routing': {
+      id: '/email/routing'
+      path: '/routing'
+      fullPath: '/email/routing'
+      preLoaderRoute: typeof EmailRoutingRouteImport
+      parentRoute: typeof EmailRoute
     }
     '/do/$className': {
       id: '/do/$className'
@@ -220,6 +401,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof D1DatabaseIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/cron-triggers/configured': {
+      id: '/cron-triggers/configured'
+      path: '/configured'
+      fullPath: '/cron-triggers/configured'
+      preLoaderRoute: typeof CronTriggersConfiguredRouteImport
+      parentRoute: typeof CronTriggersRoute
+    }
+    '/cron-triggers/ad-hoc': {
+      id: '/cron-triggers/ad-hoc'
+      path: '/ad-hoc'
+      fullPath: '/cron-triggers/ad-hoc'
+      preLoaderRoute: typeof CronTriggersAdHocRouteImport
+      parentRoute: typeof CronTriggersRoute
+    }
     '/workflows/$workflowName/': {
       id: '/workflows/$workflowName/'
       path: '/'
@@ -234,6 +429,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof R2BucketNameIndexRouteImport
       parentRoute: typeof R2BucketNameRoute
     }
+    '/email/routing/': {
+      id: '/email/routing/'
+      path: '/'
+      fullPath: '/email/routing/'
+      preLoaderRoute: typeof EmailRoutingIndexRouteImport
+      parentRoute: typeof EmailRoutingRoute
+    }
     '/do/$className/': {
       id: '/do/$className/'
       path: '/'
@@ -247,6 +449,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/workflows/$workflowName/$instanceId'
       preLoaderRoute: typeof WorkflowsWorkflowNameInstanceIdRouteImport
       parentRoute: typeof WorkflowsWorkflowNameRoute
+    }
+    '/email/routing/$captureId': {
+      id: '/email/routing/$captureId'
+      path: '/$captureId'
+      fullPath: '/email/routing/$captureId'
+      preLoaderRoute: typeof EmailRoutingCaptureIdRouteImport
+      parentRoute: typeof EmailRoutingRoute
     }
     '/do/$className/$objectId': {
       id: '/do/$className/$objectId'
@@ -264,6 +473,48 @@ declare module '@tanstack/react-router' {
     }
   }
 }
+
+interface CronTriggersRouteChildren {
+  CronTriggersAdHocRoute: typeof CronTriggersAdHocRoute
+  CronTriggersConfiguredRoute: typeof CronTriggersConfiguredRoute
+  CronTriggersIndexRoute: typeof CronTriggersIndexRoute
+}
+
+const CronTriggersRouteChildren: CronTriggersRouteChildren = {
+  CronTriggersAdHocRoute: CronTriggersAdHocRoute,
+  CronTriggersConfiguredRoute: CronTriggersConfiguredRoute,
+  CronTriggersIndexRoute: CronTriggersIndexRoute,
+}
+
+const CronTriggersRouteWithChildren = CronTriggersRoute._addFileChildren(
+  CronTriggersRouteChildren,
+)
+
+interface EmailRoutingRouteChildren {
+  EmailRoutingCaptureIdRoute: typeof EmailRoutingCaptureIdRoute
+  EmailRoutingIndexRoute: typeof EmailRoutingIndexRoute
+}
+
+const EmailRoutingRouteChildren: EmailRoutingRouteChildren = {
+  EmailRoutingCaptureIdRoute: EmailRoutingCaptureIdRoute,
+  EmailRoutingIndexRoute: EmailRoutingIndexRoute,
+}
+
+const EmailRoutingRouteWithChildren = EmailRoutingRoute._addFileChildren(
+  EmailRoutingRouteChildren,
+)
+
+interface EmailRouteChildren {
+  EmailRoutingRoute: typeof EmailRoutingRouteWithChildren
+  EmailSendingRoute: typeof EmailSendingRoute
+}
+
+const EmailRouteChildren: EmailRouteChildren = {
+  EmailRoutingRoute: EmailRoutingRouteWithChildren,
+  EmailSendingRoute: EmailSendingRoute,
+}
+
+const EmailRouteWithChildren = EmailRoute._addFileChildren(EmailRouteChildren)
 
 interface DoClassNameRouteChildren {
   DoClassNameObjectIdRoute: typeof DoClassNameObjectIdRoute
@@ -310,11 +561,15 @@ const WorkflowsWorkflowNameRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CronTriggersRoute: CronTriggersRouteWithChildren,
+  EmailRoute: EmailRouteWithChildren,
   D1DatabaseIdRoute: D1DatabaseIdRoute,
   DoClassNameRoute: DoClassNameRouteWithChildren,
   KvNamespaceIdRoute: KvNamespaceIdRoute,
+  ObservabilityEventsRoute: ObservabilityEventsRoute,
   R2BucketNameRoute: R2BucketNameRouteWithChildren,
   WorkflowsWorkflowNameRoute: WorkflowsWorkflowNameRouteWithChildren,
+  ObservabilityIndexRoute: ObservabilityIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

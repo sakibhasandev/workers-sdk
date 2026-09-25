@@ -1,8 +1,11 @@
+import { DEFAULT_COMPAT_DATE } from "@cloudflare/workers-utils";
 import { assertWranglerVersion } from "./assert-wrangler-version";
-import { DEFAULT_COMPAT_DATE } from "./build-constants";
+import { isForcedBuildOutput } from "./build-output-env";
 import { PluginContext } from "./context";
 import { resolvePluginConfig } from "./plugin-config";
 import { additionalModulesPlugin } from "./plugins/additional-modules";
+import { agentHintPlugin } from "./plugins/agent-hint";
+import { buildOutputPlugin } from "./plugins/build-output";
 import { configPlugin } from "./plugins/config";
 import { debugPlugin } from "./plugins/debug";
 import { devPlugin } from "./plugins/dev";
@@ -30,7 +33,7 @@ import type * as vite from "vite";
 
 // TODO: simplify this function in the next major release (DEVX-2533)
 /**
- * @deprecated Use today's date instead (as `YYYY-MM-DD`)
+ * @deprecated Set a compatibility date explicitly instead (as `YYYY-MM-DD`)
  *
  * Gets the compatibility date to use with the local workerd version.
  *
@@ -67,13 +70,21 @@ await assertWranglerVersion();
 export function cloudflare(pluginConfig: PluginConfig = {}): vite.Plugin[] {
 	const ctx = new PluginContext(sharedContext);
 
+	const newConfig = pluginConfig.experimental?.newConfig;
+	const cfBuildOutput =
+		isForcedBuildOutput() ||
+		(typeof newConfig === "object" && newConfig?.cfBuildOutput === true);
+	const outputPlugin = cfBuildOutput
+		? buildOutputPlugin(ctx)
+		: outputConfigPlugin(ctx);
+
 	return [
 		{
 			name: "vite-plugin-cloudflare",
 			sharedDuringBuild: true,
-			config(userConfig, env) {
+			async config(userConfig, env) {
 				ctx.setResolvedPluginConfig(
-					resolvePluginConfig(pluginConfig, userConfig, env)
+					await resolvePluginConfig(pluginConfig, userConfig, env)
 				);
 
 				if (env.command === "build") {
@@ -101,11 +112,12 @@ export function cloudflare(pluginConfig: PluginConfig = {}): vite.Plugin[] {
 		tunnelPlugin(ctx),
 		previewPlugin(ctx),
 		shortcutsPlugin(ctx),
+		agentHintPlugin(ctx),
 		debugPlugin(ctx),
 		triggerHandlersPlugin(ctx),
 		virtualModulesPlugin(ctx),
 		virtualClientFallbackPlugin(ctx),
-		outputConfigPlugin(ctx),
+		outputPlugin,
 		wasmHelperPlugin(ctx),
 		additionalModulesPlugin(ctx),
 		nodeJsAlsPlugin(ctx),

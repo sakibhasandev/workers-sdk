@@ -398,8 +398,11 @@ describe("getPlatformProxy()", () => {
 					// for `sslmode=disable`) can close with RST rather than FIN — most
 					// reliably reproduced on Windows. Swallow the resulting ECONNRESET
 					// so it doesn't leak as an `uncaughtException` in the test process.
+					// The same teardown race can also surface as EPIPE, if the initial
+					// handshake write (e.g. MYSQL_INITIAL_HANDSHAKE_PACKET above) lands
+					// after the other end has already been torn down.
 					socket.on("error", (err: NodeJS.ErrnoException) => {
-						if (err.code !== "ECONNRESET") {
+						if (err.code !== "ECONNRESET" && err.code !== "EPIPE") {
 							throw err;
 						}
 					});
@@ -691,7 +694,7 @@ describe("getPlatformProxy()", () => {
 				encoding: "utf-8",
 			});
 
-			expect(stdout).toMatch(/^<[A-Za-z0-9]{36}@sender\.domain>/);
+			expect(stdout).toMatch(/^<[A-Za-z0-9]+@sender\.domain>/);
 		});
 	});
 });

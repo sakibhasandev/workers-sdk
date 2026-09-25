@@ -1,7 +1,13 @@
 import { ParseError, UserError } from "@cloudflare/workers-utils";
 import PQueue from "p-queue";
+import {
+	confirm,
+	fetchListResult,
+	fetchResult,
+	logger,
+} from "../shared/context";
 import { getZoneForRoute } from "./zones";
-import type { DeployHelpersContext, TriggerDeployment } from "../shared/types";
+import type { TriggerDeployment } from "../shared/types";
 import type {
 	ComplianceConfig,
 	CustomDomainRoute,
@@ -60,7 +66,9 @@ export function renderRoute(route: Route): string {
 		if (isCustomDomain) {
 			const flags: string[] = [];
 			if ("enabled" in route && route.enabled !== undefined) {
-				flags.push(route.enabled ? "enabled" : "disabled");
+				flags.push(
+					route.enabled ? "production: enabled" : "production: disabled"
+				);
 			}
 			if ("previews_enabled" in route && route.previews_enabled !== undefined) {
 				flags.push(
@@ -88,18 +96,15 @@ export async function publishRoutes(
 	{
 		workerUrl,
 		scriptName,
-		useServiceEnvironments,
 		accountId,
 	}: {
 		workerUrl: string;
 		scriptName: string;
-		useServiceEnvironments: boolean;
 		accountId: string;
-	},
-	ctx: DeployHelpersContext
+	}
 ): Promise<string[]> {
 	try {
-		return await ctx.fetchResult(complianceConfig, `${workerUrl}/routes`, {
+		return await fetchResult(complianceConfig, `${workerUrl}/routes`, {
 			// Note: PUT will delete previous routes on this script.
 			method: "PUT",
 			body: JSON.stringify(
@@ -115,16 +120,10 @@ export async function publishRoutes(
 		if (isAuthenticationError(e)) {
 			// An authentication error is probably due to a known issue,
 			// where the user is logged in via an API token that does not have "All Zones".
-			return await publishRoutesFallback(
-				complianceConfig,
-				routes,
-				{
-					scriptName,
-					useServiceEnvironments,
-					accountId,
-				},
-				ctx
-			);
+			return await publishRoutesFallback(complianceConfig, routes, {
+				scriptName,
+				accountId,
+			});
 		} else {
 			throw e;
 		}
@@ -138,24 +137,9 @@ export async function publishRoutes(
 async function publishRoutesFallback(
 	complianceConfig: ComplianceConfig,
 	routes: Route[],
-	{
-		scriptName,
-		useServiceEnvironments,
-		accountId,
-	}: { scriptName: string; useServiceEnvironments: boolean; accountId: string },
-	ctx: DeployHelpersContext
+	{ scriptName, accountId }: { scriptName: string; accountId: string }
 ) {
-	if (useServiceEnvironments) {
-		throw new UserError(
-			"Service environments combined with an API token that doesn't have 'All Zones' permissions is not supported.\n" +
-				"Either turn off service environments by setting `legacy_env = true`, creating an API token with 'All Zones' permissions, or logging in via OAuth",
-			{
-				telemetryMessage:
-					"deploy service environments require all zones permission",
-			}
-		);
-	}
-	ctx.logger.info(
+	logger.info(
 		"The current authentication token does not have 'All Zones' permissions.\n" +
 			"Falling back to using the zone-based API endpoint to update each route individually.\n" +
 			"Note that there is no access to routes associated with zones that the API token does not have permission for.\n" +
@@ -177,7 +161,6 @@ async function publishRoutesFallback(
 				const zone = await getZoneForRoute(
 					complianceConfig,
 					{ route, accountId },
-					ctx,
 					zoneIdCache
 				);
 				if (zone) {
@@ -199,7 +182,7 @@ async function publishRoutesFallback(
 		queuePromises.push(
 			queue.add(async () => {
 				try {
-					for (const { pattern, script } of await ctx.fetchListResult<{
+					for (const { pattern, script } of await fetchListResult<{
 						pattern: string;
 						script: string;
 					}>(complianceConfig, `/zones/${zone}/workers/routes`)) {
@@ -239,7 +222,7 @@ async function publishRoutesFallback(
 			}
 		}
 
-		const { pattern } = await ctx.fetchResult<{ pattern: string }>(
+		const { pattern } = await fetchResult<{ pattern: string }>(
 			complianceConfig,
 			`/zones/${zoneId}/workers/routes`,
 			{
@@ -258,10 +241,12 @@ async function publishRoutesFallback(
 	}
 
 	if (alreadyDeployedRoutes.size) {
-		ctx.logger.warn(
+		logger.warn(
 			"Previously deployed routes:\n" +
 				"The following routes were already associated with this worker, and have not been deleted:\n" +
-				[...alreadyDeployedRoutes.values()].map((route) => ` - "${route}"\n`) +
+				[...alreadyDeployedRoutes.values()]
+					.map((route) => ` - "${route}"\n`)
+					.join("") +
 				"If these routes are not wanted then you can remove them in the dashboard."
 		);
 	}
@@ -273,8 +258,8 @@ export async function publishCustomDomains(
 	complianceConfig: ComplianceConfig,
 	workerUrl: string,
 	accountId: string,
-	domains: Array<RouteObject>,
-	ctx: DeployHelpersContext
+	scriptName: string,
+	domains: Array<RouteObject>
 ): Promise<TriggerDeployment> {
 	const options = {
 		override_scope: true,
@@ -293,10 +278,61 @@ export async function publishCustomDomains(
 					: undefined,
 		};
 	});
+	let changeset: CustomDomainChangeset;
+	try {
+		changeset = await fetchResult<CustomDomainChangeset>(
+			complianceConfig,
+			`${workerUrl}/domains/changeset?replace_state=true`,
+			{
+				method: "POST",
+				body: JSON.stringify(origins),
+				headers: {
+					"Content-Type": "application/json",
+				},
+			}
+		);
+	} catch (error) {
+		if (process.stdout.isTTY) {
+			throw error;
+		}
+		changeset = { added: [], removed: [], updated: [], conflicting: [] };
+	}
+	const updatesRequired = changeset.updated.filter((domain) => domain.modified);
+	const previewUpdates = updatesRequired.filter(
+		(domain) => domain.previews_enabled === true
+	);
+	const fetchExistingDomain = (domain: UpdatedCustomDomain) =>
+		fetchResult<CustomDomain>(
+			complianceConfig,
+			`/accounts/${accountId}/workers/domains/records/${domain.id}`
+		);
+	let existing: CustomDomain[];
+	if (process.stdout.isTTY) {
+		existing = await Promise.all(updatesRequired.map(fetchExistingDomain));
+	} else {
+		const results = await Promise.allSettled(
+			previewUpdates.map(fetchExistingDomain)
+		);
+		existing = results.flatMap((result) =>
+			result.status === "fulfilled" ? [result.value] : []
+		);
+	}
+	const existingById = new Map(existing.map((domain) => [domain.id, domain]));
+	const changed =
+		changeset.added.some((domain) => domain.previews_enabled === true) ||
+		previewUpdates.some((domain) => {
+			const existingDomain = existingById.get(domain.id);
+			return (
+				existingDomain !== undefined &&
+				(existingDomain.service !== scriptName ||
+					existingDomain.previews_enabled !== true)
+			);
+		});
 
 	const fail = (): TriggerDeployment => {
 		return {
 			targets: [],
+			changed,
 			error: new UserError(
 				domains.length > 1
 					? `Publishing to ${domains.length} Custom Domains was skipped, fix conflicts and try again`
@@ -310,41 +346,23 @@ export async function publishCustomDomains(
 		options.override_existing_origin = true;
 		options.override_existing_dns_record = true;
 	} else {
-		const changeset = await ctx.fetchResult<CustomDomainChangeset>(
-			complianceConfig,
-			`${workerUrl}/domains/changeset?replace_state=true`,
-			{
-				method: "POST",
-				body: JSON.stringify(origins),
-				headers: {
-					"Content-Type": "application/json",
-				},
-			}
-		);
-
-		const updatesRequired = changeset.updated.filter(
-			(domain) => domain.modified
-		);
 		if (updatesRequired.length > 0) {
-			const existing = await Promise.all(
-				updatesRequired.map((domain) =>
-					ctx.fetchResult<CustomDomain>(
-						complianceConfig,
-						`/accounts/${accountId}/workers/domains/records/${domain.id}`
-					)
-				)
+			const existingForOtherWorkers = existing.filter(
+				(domain) => domain.service !== scriptName
 			);
-			const existingRendered = existing
-				.map(
-					(domain) =>
-						`\t• ${domain.hostname} (used as a domain for "${domain.service}")`
-				)
-				.join("\n");
-			const message = `Custom Domains already exist for these domains:
+			if (existingForOtherWorkers.length > 0) {
+				const existingRendered = existingForOtherWorkers
+					.map(
+						(domain) =>
+							`\t• ${domain.hostname} (used as a domain for "${domain.service}")`
+					)
+					.join("\n");
+				const message = `Custom Domains already exist for these domains:
 ${existingRendered}
 Update them to point to this script instead?`;
-			if (!(await ctx.confirm(message))) {
-				return fail();
+				if (!(await confirm(message))) {
+					return fail();
+				}
 			}
 			options.override_existing_origin = true;
 		}
@@ -356,14 +374,14 @@ Update them to point to this script instead?`;
 			const message = `You already have DNS records that conflict for these Custom Domains:
 ${conflicitingRendered}
 Update them to point to this script instead?`;
-			if (!(await ctx.confirm(message))) {
+			if (!(await confirm(message))) {
 				return fail();
 			}
 			options.override_existing_dns_record = true;
 		}
 	}
 
-	await ctx.fetchResult(complianceConfig, `${workerUrl}/domains/records`, {
+	await fetchResult(complianceConfig, `${workerUrl}/domains/records`, {
 		method: "PUT",
 		body: JSON.stringify({ ...options, origins }),
 		headers: {
@@ -371,5 +389,5 @@ Update them to point to this script instead?`;
 		},
 	});
 
-	return { targets: domains.map((domain) => renderRoute(domain)) };
+	return { targets: domains.map((domain) => renderRoute(domain)), changed };
 }

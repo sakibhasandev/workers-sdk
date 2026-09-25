@@ -38,17 +38,20 @@ const MetadataRedirectEntry = z.object({
 	to: z.string(),
 });
 
-const MetadataStaticRedirects = z.record(MetadataStaticRedirectEntry);
+const MetadataStaticRedirects = z.record(
+	z.string(),
+	MetadataStaticRedirectEntry
+);
 export type MetadataStaticRedirects = z.infer<typeof MetadataStaticRedirects>;
-const MetadataRedirects = z.record(MetadataRedirectEntry);
+const MetadataRedirects = z.record(z.string(), MetadataRedirectEntry);
 export type MetadataRedirects = z.infer<typeof MetadataRedirects>;
 
 const MetadataHeaderEntry = z.object({
-	set: z.record(z.string()).optional(),
+	set: z.record(z.string(), z.string()).optional(),
 	unset: z.array(z.string()).optional(),
 });
 
-const MetadataHeaders = z.record(MetadataHeaderEntry);
+const MetadataHeaders = z.record(z.string(), MetadataHeaderEntry);
 export type MetadataHeaders = z.infer<typeof MetadataHeaders>;
 
 export const RedirectsSchema = z
@@ -80,6 +83,7 @@ export const AssetConfigSchema = z.object({
 	not_found_handling: z
 		.enum(["single-page-application", "404-page", "none"])
 		.optional(),
+	base_path: z.string().optional(),
 	redirects: RedirectsSchema,
 	headers: HeadersSchema,
 	has_static_routing: z.boolean().optional(),

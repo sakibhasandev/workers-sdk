@@ -15,15 +15,16 @@ import {
 	startRemoteProxySession,
 	startWorker,
 	unstable_dev,
+	createTestHarness,
 	experimental_generateTypes,
 	unstable_getDevCompatibilityDate,
 	unstable_getDurableObjectClassNameToUseSQLiteMap,
 	unstable_getMiniflareWorkerOptions,
 	unstable_getVarsForDev,
-	unstable_getWorkerNameFromProject,
 	unstable_pages,
 	unstable_readConfig,
 } from "./api";
+import { registerOutputStreamErrorHandler } from "./output-stream-errors";
 import { main } from "./index";
 import type {
 	Binding,
@@ -40,6 +41,9 @@ import type {
 	Unstable_MiniflareWorkerOptions,
 	Unstable_RawConfig,
 	Unstable_RawEnvironment,
+	TestHarnessOptions,
+	WorkerHandle,
+	TestHarness,
 } from "./api";
 import type { Logger } from "./logger";
 import type { Request, Response } from "miniflare";
@@ -49,6 +53,9 @@ import type { Request, Response } from "miniflare";
  * main only gets called when the script is run directly, not when it's imported as a module.
  */
 if (typeof vitest === "undefined" && require.main === module) {
+	registerOutputStreamErrorHandler(process.stdout);
+	registerOutputStreamErrorHandler(process.stderr);
+
 	main(hideBin(process.argv)).catch((e) => {
 		// The logging of any error that was thrown from `main()` is handled in the `yargs.fail()` handler.
 		// Here we just want to ensure that the process exits with a non-zero code.
@@ -67,12 +74,13 @@ export {
 	unstable_pages,
 	DevEnv as unstable_DevEnv,
 	startWorker as unstable_startWorker,
+	createTestHarness,
 	unstable_getVarsForDev,
 	unstable_readConfig,
 	experimental_generateTypes,
 	unstable_getDurableObjectClassNameToUseSQLiteMap,
+	// eslint-disable-next-line @typescript-eslint/no-deprecated -- re-exporting deprecated public API for backward compatibility
 	unstable_getDevCompatibilityDate,
-	unstable_getWorkerNameFromProject,
 	getPlatformProxy,
 	unstable_getMiniflareWorkerOptions,
 };
@@ -89,10 +97,23 @@ export type {
 	Unstable_MiniflareWorkerOptions,
 	Experimental_GenerateTypesOptions,
 	Experimental_GenerateTypesResult,
+	TestHarnessOptions,
+	WorkerHandle,
+	TestHarness,
 };
 
 export { printBindings as unstable_printBindings } from "./utils/print-bindings";
 export { resolveNamedTunnel as unstable_resolveNamedTunnel } from "./tunnel/client";
+
+// Entries for the `cf-wrangler` delegate binary (see `bin/cf-wrangler.js`),
+// which calls these in-process. Not a stable public API.
+export { runCfWranglerBuild } from "./cf-wrangler/build";
+export { runCfWranglerDev } from "./cf-wrangler/dev";
+export {
+	ArgParseError,
+	parseBuildArgs as parseCfWranglerBuildArgs,
+	parseArgs as parseCfWranglerArgs,
+} from "./cf-wrangler/args";
 
 // Export internal APIs required by the Vitest integration as `unstable_`
 export { splitSqlQuery as unstable_splitSqlQuery } from "./d1/splitter";
@@ -133,9 +154,5 @@ export {
 	convertConfigBindingsToStartWorkerBindings as unstable_convertConfigBindingsToStartWorkerBindings,
 };
 export type { StartRemoteProxySessionOptions, Binding, RemoteProxySession };
-
-export { getDetailsForAutoConfig as experimental_getDetailsForAutoConfig } from "./autoconfig/details";
-export { runAutoConfig as experimental_runAutoConfig } from "./autoconfig/run";
-export { Framework as experimental_AutoConfigFramework } from "./autoconfig/frameworks/framework-class";
 
 export { experimental_getWranglerCommands } from "./experimental-commands-api";

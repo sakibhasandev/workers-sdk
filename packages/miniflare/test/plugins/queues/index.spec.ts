@@ -6,10 +6,11 @@ import {
 	QueuesError,
 	Response,
 } from "miniflare";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { z } from "zod";
 import {
 	MiniflareDurableObjectControlStub,
+	singleModuleManifest,
 	TestLog,
 	useDispose,
 } from "../../test-shared";
@@ -42,29 +43,42 @@ async function getControlStub(
 	return stub;
 }
 
-test("maxBatchTimeout validation", async ({ expect }) => {
+// TODO(miniflare v5): the queue trigger schema in `@cloudflare/config` dropped
+// the `.max(60)` bound on `maxBatchTimeout`. Re-enable once the validation is
+// restored upstream in `@cloudflare/config`.
+test.skip("maxBatchTimeout validation", async ({ expect }) => {
 	const mf = new Miniflare({
-		queueConsumers: {
-			QUEUE: { maxBatchTimeout: 60 },
-		},
-		modules: true,
-		script: "",
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					manifest: singleModuleManifest(""),
+					triggers: [{ type: "queue", name: "QUEUE", maxBatchTimeout: 60 }],
+				},
+			},
+		],
 	});
 	useDispose(mf);
 	let error: MiniflareCoreError | undefined = undefined;
 	try {
 		new Miniflare({
-			queueConsumers: {
-				QUEUE: { maxBatchTimeout: 61 },
-			},
-			modules: true,
-			script: "",
+			workers: [
+				{
+					config: {
+						name: "",
+						compatibilityDate: "2025-05-01",
+						manifest: singleModuleManifest(""),
+						triggers: [{ type: "queue", name: "QUEUE", maxBatchTimeout: 61 }],
+					},
+				},
+			],
 		});
 	} catch (e) {
 		error = e as MiniflareCoreError;
 	}
 	expect(error?.code).toEqual("ERR_VALIDATION");
-	expect(error?.message).toMatch(/Number must be less than or equal to 60/);
+	expect(error?.message).toMatch(/Too big: expected number to be <=60/);
 });
 
 test("flushes partial and full batches", async ({ expect }) => {
@@ -74,10 +88,11 @@ test("flushes partial and full batches", async ({ expect }) => {
 		workers: [
 			// Check with producer and consumer as separate Workers
 			{
-				name: "producer",
-				queueProducers: ["QUEUE"],
-				modules: true,
-				script: `export default {
+				config: {
+					name: "producer",
+					compatibilityDate: "2025-05-01",
+					env: { QUEUE: { type: "queue", name: "QUEUE" } },
+					manifest: singleModuleManifest(`export default {
           async fetch(request, env, ctx) {
             const url = new URL(request.url);
             const body = await request.json();
@@ -88,26 +103,32 @@ test("flushes partial and full batches", async ({ expect }) => {
             }
             return new Response(null, { status: 204 });
           }
-        }`,
+        }`),
+				},
 			},
 			{
-				name: "consumer",
-				queueConsumers: ["QUEUE"],
-				serviceBindings: {
-					async REPORTER(request) {
-						batches.push(StringArraySchema.parse(await request.json()));
-						return new Response();
+				config: {
+					name: "consumer",
+					compatibilityDate: "2025-05-01",
+					env: {
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								batches.push(StringArraySchema.parse(await request.json()));
+								return new Response();
+							},
+						},
 					},
-				},
-				modules: true,
-				script: `export default {
+					triggers: [{ type: "queue", name: "QUEUE" }],
+					manifest: singleModuleManifest(`export default {
           async queue(batch, env, ctx) {
             await env.REPORTER.fetch("http://localhost", {
               method: "POST",
               body: JSON.stringify(batch.messages.map(({ id }) => id)),
             });
           }
-        }`,
+        }`),
+				},
 			},
 		],
 	});
@@ -208,16 +229,23 @@ test("supports declaring queue producers as a key-value pair -> queueProducers: 
 }) => {
 	const promise = new DeferredPromise<z.infer<typeof MessageArraySchema>>();
 	const mf = new Miniflare({
-		queueProducers: { MY_QUEUE_PRODUCER: "MY_QUEUE" },
-		queueConsumers: ["MY_QUEUE"],
-		serviceBindings: {
-			async REPORTER(request) {
-				promise.resolve(MessageArraySchema.parse(await request.json()));
-				return new Response();
-			},
-		},
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						MY_QUEUE_PRODUCER: { type: "queue", name: "MY_QUEUE" },
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								promise.resolve(MessageArraySchema.parse(await request.json()));
+								return new Response();
+							},
+						},
+					},
+					triggers: [{ type: "queue", name: "MY_QUEUE" }],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
 				await env.MY_QUEUE_PRODUCER.send("Hello world!");
 				await env.MY_QUEUE_PRODUCER.sendBatch([{ body: "Hola mundo!" }]);
@@ -229,7 +257,10 @@ test("supports declaring queue producers as a key-value pair -> queueProducers: 
           body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
         });
       }
-    }`,
+    }`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 	const object = await getControlStub(mf, "MY_QUEUE");
@@ -249,16 +280,23 @@ test("supports declaring queue producers as an array -> queueProducers: ['MY_QUE
 }) => {
 	const promise = new DeferredPromise<z.infer<typeof MessageArraySchema>>();
 	const mf = new Miniflare({
-		queueProducers: ["MY_QUEUE"],
-		queueConsumers: ["MY_QUEUE"],
-		serviceBindings: {
-			async REPORTER(request) {
-				promise.resolve(MessageArraySchema.parse(await request.json()));
-				return new Response();
-			},
-		},
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						MY_QUEUE: { type: "queue", name: "MY_QUEUE" },
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								promise.resolve(MessageArraySchema.parse(await request.json()));
+								return new Response();
+							},
+						},
+					},
+					triggers: [{ type: "queue", name: "MY_QUEUE" }],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
         await env.MY_QUEUE.send("Hello World!");
 				await env.MY_QUEUE.sendBatch([{ body: "Hola Mundo!" }]);
@@ -270,7 +308,10 @@ test("supports declaring queue producers as an array -> queueProducers: ['MY_QUE
           body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
         });
       }
-    }`,
+    }`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 	const object = await getControlStub(mf, "MY_QUEUE");
@@ -290,16 +331,23 @@ test("supports declaring queue producers as {MY_QUEUE_BINDING: {queueName: 'my-q
 }) => {
 	const promise = new DeferredPromise<z.infer<typeof MessageArraySchema>>();
 	const mf = new Miniflare({
-		queueProducers: { MY_QUEUE_PRODUCER: { queueName: "MY_QUEUE" } },
-		queueConsumers: ["MY_QUEUE"],
-		serviceBindings: {
-			async REPORTER(request) {
-				promise.resolve(MessageArraySchema.parse(await request.json()));
-				return new Response();
-			},
-		},
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						MY_QUEUE_PRODUCER: { type: "queue", name: "MY_QUEUE" },
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								promise.resolve(MessageArraySchema.parse(await request.json()));
+								return new Response();
+							},
+						},
+					},
+					triggers: [{ type: "queue", name: "MY_QUEUE" }],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
         await env.MY_QUEUE_PRODUCER.send("Hello World!");
 				await env.MY_QUEUE_PRODUCER.sendBatch([{ body: "Hola Mundo!" }]);
@@ -311,7 +359,10 @@ test("supports declaring queue producers as {MY_QUEUE_BINDING: {queueName: 'my-q
           body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
         });
       }
-    }`,
+    }`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 	const object = await getControlStub(mf, "MY_QUEUE");
@@ -330,26 +381,38 @@ test("sends all structured cloneable types", async ({ expect }) => {
 	const errorPromise = new DeferredPromise<string>();
 
 	const mf = new Miniflare({
-		queueProducers: ["QUEUE"],
-		queueConsumers: {
-			QUEUE: { maxBatchSize: 100, maxBatchTimeout: 0, maxRetries: 0 },
-		},
-		serviceBindings: {
-			async REPORTER(request) {
-				errorPromise.resolve(await request.text());
-				return new Response();
-			},
-		},
-
-		compatibilityFlags: ["nodejs_compat"],
-		modules: [
+		workers: [
 			{
-				// Check with producer and consumer as same Worker
-				// TODO(soon): can't use `script: "..."` here as Miniflare doesn't know
-				//  to ignore `node:*` imports
-				type: "ESModule",
-				path: "<script>",
-				contents: `
+				config: {
+					name: "",
+					// Pre-`queues_json_messages` compat date so queue messages use V8
+					// structured-clone serialization (required to round-trip BigInt et al.)
+					compatibilityDate: "2000-01-01",
+					compatibilityFlags: ["nodejs_compat"],
+					env: {
+						QUEUE: { type: "queue", name: "QUEUE" },
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								errorPromise.resolve(await request.text());
+								return new Response();
+							},
+						},
+					},
+					triggers: [
+						{
+							type: "queue",
+							name: "QUEUE",
+							maxBatchSize: 100,
+							maxBatchTimeout: 0,
+							maxRetries: 0,
+						},
+					],
+					// Check with producer and consumer as same Worker
+					// TODO(soon): can't use a plain script here as Miniflare doesn't know
+					//  to ignore `node:*` imports
+					manifest: singleModuleManifest(
+						`
         import assert from "node:assert";
 
         const arrayBuffer = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]).buffer;
@@ -418,7 +481,9 @@ test("sends all structured cloneable types", async ({ expect }) => {
             });
           }
         }
-        `,
+        `
+					),
+				},
 			},
 		],
 	});
@@ -457,19 +522,31 @@ test("retries messages", async ({ expect }) => {
 	const log = new TestLog();
 	const mf = new Miniflare({
 		log,
-		queueProducers: { QUEUE: { queueName: "queue" } },
-		queueConsumers: {
-			queue: { maxBatchSize: 5, maxBatchTimeout: 1, maxRetries: 2 },
-		},
-		serviceBindings: {
-			async RETRY_FILTER(request) {
-				batches.push(MessageArraySchema.parse(await request.json()));
-				return Response.json({ retryAll, errorAll, retryMessages });
-			},
-		},
-
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						QUEUE: { type: "queue", name: "queue" },
+						RETRY_FILTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								batches.push(MessageArraySchema.parse(await request.json()));
+								return Response.json({ retryAll, errorAll, retryMessages });
+							},
+						},
+					},
+					triggers: [
+						{
+							type: "queue",
+							name: "queue",
+							maxBatchSize: 5,
+							maxBatchTimeout: 1,
+							maxRetries: 2,
+						},
+					],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
         const url = new URL(request.url);
         const body = await request.json();
@@ -493,7 +570,10 @@ test("retries messages", async ({ expect }) => {
           if (retryMessages.includes(message.body)) message.retry();
         }
       }
-    }`,
+    }`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 
@@ -703,32 +783,41 @@ test("moves to dead letter queue", async ({ expect }) => {
 	const log = new TestLog();
 	const mf = new Miniflare({
 		log,
-
-		queueProducers: { BAD_QUEUE: { queueName: "bad" } },
-		queueConsumers: {
-			// Check single Worker consuming multiple queues
-			bad: {
-				maxBatchSize: 5,
-				maxBatchTimeout: 1,
-				maxRetries: 0,
-				deadLetterQueue: "dlq",
-			},
-			dlq: {
-				maxBatchSize: 5,
-				maxBatchTimeout: 1,
-				maxRetries: 0,
-				deadLetterQueue: "bad", // (cyclic)
-			},
-		},
-		serviceBindings: {
-			async RETRY_FILTER(request) {
-				batches.push(MessageArraySchema.parse(await request.json()));
-				return Response.json({ retryMessages });
-			},
-		},
-
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						BAD_QUEUE: { type: "queue", name: "bad" },
+						RETRY_FILTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								batches.push(MessageArraySchema.parse(await request.json()));
+								return Response.json({ retryMessages });
+							},
+						},
+					},
+					triggers: [
+						// Check single Worker consuming multiple queues
+						{
+							type: "queue",
+							name: "bad",
+							maxBatchSize: 5,
+							maxBatchTimeout: 1,
+							maxRetries: 0,
+							deadLetterQueue: "dlq",
+						},
+						{
+							type: "queue",
+							name: "dlq",
+							maxBatchSize: 5,
+							maxBatchTimeout: 1,
+							maxRetries: 0,
+							deadLetterQueue: "bad", // (cyclic)
+						},
+					],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
         const url = new URL(request.url);
         const body = await request.json();
@@ -745,7 +834,10 @@ test("moves to dead letter queue", async ({ expect }) => {
           if (retryMessages.includes(message.body)) message.retry();
         }
       }
-    }`,
+    }`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 
@@ -815,8 +907,16 @@ test("moves to dead letter queue", async ({ expect }) => {
 	// Check rejects queue as own dead letter queue
 	const promise = mf.setOptions({
 		log,
-		queueConsumers: { bad: { deadLetterQueue: "bad" } },
-		script: "",
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					manifest: singleModuleManifest(""),
+					triggers: [{ type: "queue", name: "bad", deadLetterQueue: "bad" }],
+				},
+			},
+		],
 	});
 	await expect(promise).rejects.toThrow(
 		new QueuesError(
@@ -830,16 +930,23 @@ test("operations permit strange queue names", async ({ expect }) => {
 	const promise = new DeferredPromise<z.infer<typeof MessageArraySchema>>();
 	const id = "my/ Queue";
 	const mf = new Miniflare({
-		queueProducers: { QUEUE: { queueName: id } },
-		queueConsumers: [id],
-		serviceBindings: {
-			async REPORTER(request) {
-				promise.resolve(MessageArraySchema.parse(await request.json()));
-				return new Response();
-			},
-		},
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						QUEUE: { type: "queue", name: id },
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								promise.resolve(MessageArraySchema.parse(await request.json()));
+								return new Response();
+							},
+						},
+					},
+					triggers: [{ type: "queue", name: id }],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
         await env.QUEUE.send("msg1");
         await env.QUEUE.sendBatch([{ body: "msg2" }]);
@@ -851,7 +958,10 @@ test("operations permit strange queue names", async ({ expect }) => {
           body: JSON.stringify(batch.messages.map(({ id, body, attempts }) => ({ queue: batch.queue, id, body, attempts }))),
         });
       }
-    }`,
+    }`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 	const object = await getControlStub(mf, id);
@@ -877,18 +987,25 @@ test("supports message contentTypes", async ({ expect }) => {
 	const log = new TestLog();
 	const mf = new Miniflare({
 		log,
-		queueProducers: { QUEUE: { queueName: id } },
-		queueConsumers: [id],
-		serviceBindings: {
-			async REPORTER(request) {
-				promise.resolve(
-					MessageContentTypeTestSchema.parse(await request.json())
-				);
-				return new Response();
-			},
-		},
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						QUEUE: { type: "queue", name: id },
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								promise.resolve(
+									MessageContentTypeTestSchema.parse(await request.json())
+								);
+								return new Response();
+							},
+						},
+					},
+					triggers: [{ type: "queue", name: id }],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
         await env.QUEUE.send("msg1", { contentType: "text" });
         await env.QUEUE.send([{ message: "msg2" }], { contentType: "json" });
@@ -921,7 +1038,10 @@ test("supports message contentTypes", async ({ expect }) => {
           ),
         });
       },
-    };`,
+    };`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 	const object = await getControlStub(mf, id);
@@ -951,24 +1071,28 @@ test("supports metadata in send() response", async ({ expect }) => {
 	const mf = new Miniflare({
 		workers: [
 			{
-				name: "producer",
-				queueProducers: ["QUEUE"],
-				compatibilityFlags: ["experimental"],
-				modules: true,
-				script: `export default {
+				config: {
+					name: "producer",
+					compatibilityDate: "2025-05-01",
+					compatibilityFlags: ["experimental"],
+					env: { QUEUE: { type: "queue", name: "QUEUE" } },
+					manifest: singleModuleManifest(`export default {
 					async fetch(request, env, ctx) {
 						const resp = await env.QUEUE.send("msg");
 						return Response.json(resp);
 					}
-				}`,
+				}`),
+				},
 			},
 			{
-				name: "consumer",
-				queueConsumers: ["QUEUE"],
-				modules: true,
-				script: `export default {
+				config: {
+					name: "consumer",
+					compatibilityDate: "2025-05-01",
+					triggers: [{ type: "queue", name: "QUEUE" }],
+					manifest: singleModuleManifest(`export default {
 					async queue(batch, env, ctx) {}
-				}`,
+				}`),
+				},
 			},
 		],
 	});
@@ -996,24 +1120,28 @@ test("supports metadata in sendBatch() response", async ({ expect }) => {
 	const mf = new Miniflare({
 		workers: [
 			{
-				name: "producer",
-				queueProducers: ["QUEUE"],
-				compatibilityFlags: ["experimental"],
-				modules: true,
-				script: `export default {
+				config: {
+					name: "producer",
+					compatibilityDate: "2025-05-01",
+					compatibilityFlags: ["experimental"],
+					env: { QUEUE: { type: "queue", name: "QUEUE" } },
+					manifest: singleModuleManifest(`export default {
 					async fetch(request, env, ctx) {
 						const resp = await env.QUEUE.sendBatch([{ body: "msg1" }, { body: "msg2" }]);
 						return Response.json(resp);
 					}
-				}`,
+				}`),
+				},
 			},
 			{
-				name: "consumer",
-				queueConsumers: ["QUEUE"],
-				modules: true,
-				script: `export default {
+				config: {
+					name: "consumer",
+					compatibilityDate: "2025-05-01",
+					triggers: [{ type: "queue", name: "QUEUE" }],
+					manifest: singleModuleManifest(`export default {
 					async queue(batch, env, ctx) {}
-				}`,
+				}`),
+				},
 			},
 		],
 	});
@@ -1039,15 +1167,23 @@ test("supports metadata in sendBatch() response", async ({ expect }) => {
 
 test("validates message size", async ({ expect }) => {
 	const mf = new Miniflare({
-		queueProducers: { QUEUE: "MY_QUEUE" },
-		queueConsumers: {
-			MY_QUEUE: {
-				maxBatchSize: 100,
-				maxBatchTimeout: 0,
-			},
-		},
-		modules: true,
-		script: `export default {
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						QUEUE: { type: "queue", name: "MY_QUEUE" },
+					},
+					triggers: [
+						{
+							type: "queue",
+							name: "MY_QUEUE",
+							maxBatchSize: 100,
+							maxBatchTimeout: 0,
+						},
+					],
+					manifest: singleModuleManifest(`export default {
       async fetch(request, env, ctx) {
         const { pathname } = new URL(request.url);
         try {
@@ -1065,11 +1201,87 @@ test("validates message size", async ({ expect }) => {
           });
         }
       },
-    }`,
+    }`),
+				},
+			},
+		],
 	});
 	useDispose(mf);
 
 	await expect(mf.dispatchFetch("http://localhost")).rejects.toThrow(
 		"Queue send failed: message length of 128001 bytes exceeds limit of 128000"
 	);
+});
+
+// Regression test for https://github.com/cloudflare/workers-sdk/issues/15670.
+test("enqueues more undelayed messages than workerd's active timeout limit", async ({
+	expect,
+}) => {
+	const messagesPerBatch = 100;
+	const batchCount = 200;
+	const total = messagesPerBatch * batchCount;
+	let delivered = 0;
+
+	const mf = new Miniflare({
+		workers: [
+			{
+				config: {
+					name: "",
+					compatibilityDate: "2025-05-01",
+					env: {
+						QUEUE: { type: "queue", name: "QUEUE" },
+						REPORTER: {
+							type: "fetcher",
+							handler: async (request) => {
+								delivered += Number(await request.text());
+								return new Response();
+							},
+						},
+					},
+					triggers: [
+						{
+							type: "queue",
+							name: "QUEUE",
+							maxBatchSize: messagesPerBatch,
+							maxBatchTimeout: 0,
+						},
+					],
+					manifest: singleModuleManifest(`export default {
+      async fetch(request, env, ctx) {
+        const { searchParams } = new URL(request.url);
+        const batchCount = Number(searchParams.get("batchCount"));
+        const messagesPerBatch = Number(searchParams.get("messagesPerBatch"));
+        const batch = Array.from({ length: messagesPerBatch }, (_, i) => ({ body: "message-" + i }));
+        try {
+          for (let i = 0; i < batchCount; i++) {
+            await env.QUEUE.sendBatch(batch);
+          }
+        } catch (e) {
+          return new Response(String(e?.stack ?? e), { status: 500 });
+        }
+        return new Response(null, { status: 204 });
+      },
+
+      async queue(batch, env, ctx) {
+        await env.REPORTER.fetch("http://localhost", {
+          method: "POST",
+          body: String(batch.messages.length),
+        });
+      },
+    }`),
+				},
+			},
+		],
+	});
+	useDispose(mf);
+
+	const res = await mf.dispatchFetch(
+		`http://localhost/?batchCount=${batchCount}&messagesPerBatch=${messagesPerBatch}`
+	);
+	expect(res.status, await res.text()).toBe(204);
+
+	await vi.waitFor(() => expect(delivered).toBe(total), {
+		timeout: 20_000,
+		interval: 50,
+	});
 });

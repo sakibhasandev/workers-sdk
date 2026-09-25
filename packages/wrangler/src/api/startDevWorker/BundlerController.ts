@@ -1,8 +1,12 @@
 import assert from "node:assert";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { getWranglerTmpDir } from "@cloudflare/workers-utils";
+import {
+	extractBindingsOfType,
+	getWranglerTmpDir,
+} from "@cloudflare/workers-utils";
 import { watch } from "chokidar";
+import { BuildFailure } from "../../deployment-bundle/build-failures";
 import { bundleWorker, shouldCheckFetch } from "../../deployment-bundle/bundle";
 import { getBundleType } from "../../deployment-bundle/bundle-type";
 import {
@@ -16,47 +20,145 @@ import { runBuild } from "../../dev/use-esbuild";
 import { logger } from "../../logger";
 import { isNavigatorDefined } from "../../navigator-user-agent";
 import { debounce } from "../../utils/debounce";
+import { isAbortError } from "../../utils/isAbortError";
 import { Controller } from "./BaseController";
 import { castErrorCause } from "./events";
-import { extractBindingsOfType } from "./utils";
 import type { BundleResult } from "../../deployment-bundle/bundle";
 import type { EsbuildBundle } from "../../dev/use-esbuild";
 import type { ConfigUpdateEvent } from "./events";
 import type { StartDevWorkerOptions } from "./types";
 import type { EphemeralDirectory, Entry } from "@cloudflare/workers-utils";
 
+type PendingCustomBuild = {
+	config: StartDevWorkerOptions;
+	filePath: string;
+	buildAborter: AbortController;
+	runBuildCommand: boolean;
+};
+
 export class BundlerController extends Controller {
 	#currentBundle?: EsbuildBundle;
 
 	#customBuildWatcher?: ReturnType<typeof watch>;
+	#debouncedCustomBuild?: ReturnType<typeof debounce>;
 
 	// Handle aborting in-flight custom builds as new ones come in from the filesystem watcher
 	#customBuildAborter = new AbortController();
 
-	async #runCustomBuild(config: StartDevWorkerOptions, filePath: string) {
+	/**
+	 * The custom build that is waiting for the in-flight one to finish, if any.
+	 *
+	 * Only the most recent request is kept. A custom build always builds from
+	 * whatever is on disk when it runs, so an earlier queued request would just
+	 * repeat the same work.
+	 */
+	#pendingCustomBuild?: PendingCustomBuild;
+
+	/**
+	 * The promise for the loop that is currently working through
+	 * `#pendingCustomBuild`, or `undefined` if no loop is running.
+	 */
+	#customBuildDrain?: Promise<void>;
+
+	/**
+	 * Queue a custom build, superseding any build that is in-flight or waiting.
+	 *
+	 * Custom builds are run one at a time. Running them concurrently lets two
+	 * builds write to the same output files at once, and the user's build command
+	 * is unlikely to expect that.
+	 *
+	 * @param runBuildCommand Whether to run the user's build command. This is
+	 * `false` when (re)watching after a config update, since `getEntry()`
+	 * already ran the build command for the current config immediately before
+	 * `BundlerController` saw it (see `onConfigUpdate()`); only the resulting
+	 * output still needs to be bundled. Real file-change events must always
+	 * run the build command to reflect the change.
+	 * @returns a promise that resolves once the queue has been drained.
+	 */
+	#scheduleCustomBuild(
+		config: StartDevWorkerOptions,
+		filePath: string,
+		runBuildCommand = true
+	): Promise<void> {
+		// Watcher events can still be delivered between `teardown()` aborting the
+		// in-flight build and the watcher finishing closing, and a build must never
+		// outlive dev: it would spawn a process and dispatch bundle events into a
+		// torn-down environment.
+		if (this.tearingDown) {
+			return Promise.resolve();
+		}
+
 		// If a new custom build comes in, we need to cancel in-flight builds
 		this.#customBuildAborter.abort();
 		this.#customBuildAborter = new AbortController();
 
-		// Since `this.#customBuildAborter` will change as new builds are scheduled, store the specific AbortController that will be used for this build
-		const buildAborter = this.#customBuildAborter;
-		const relativeFile =
-			path.relative(config.projectRoot, config.entrypoint) || ".";
-		logger.log(`The file ${filePath} changed, restarting build...`);
+		this.#pendingCustomBuild = {
+			config,
+			filePath,
+			buildAborter: this.#customBuildAborter,
+			runBuildCommand,
+		};
+		if (this.#customBuildDrain === undefined) {
+			const drain = this.#drainCustomBuilds();
+			this.#customBuildDrain = drain;
+			// `#runCustomBuild()` reports build failures as error events, so the drain
+			// should never reject. Guard against an unhandled rejection anyway, since
+			// the file watcher doesn't await it.
+			void drain.catch(() => {});
+		}
+		return this.#customBuildDrain;
+	}
+
+	async #drainCustomBuilds() {
+		// Yield so that `#customBuildDrain` has been assigned before the loop below
+		// can clear it.
+		await Promise.resolve();
+		try {
+			while (this.#pendingCustomBuild !== undefined) {
+				const next = this.#pendingCustomBuild;
+				this.#pendingCustomBuild = undefined;
+				// The request may have been superseded by a newer one, or dev may have
+				// been torn down, while an earlier build was running.
+				if (next.buildAborter.signal.aborted) {
+					continue;
+				}
+				await this.#runCustomBuild(
+					next.config,
+					next.filePath,
+					next.buildAborter,
+					next.runBuildCommand
+				);
+			}
+		} finally {
+			this.#customBuildDrain = undefined;
+		}
+	}
+
+	async #runCustomBuild(
+		config: StartDevWorkerOptions,
+		filePath: string,
+		buildAborter: AbortController,
+		runBuildCommand = true
+	) {
 		this.emitBundleStartEvent(config);
 		try {
-			await runCustomBuild(
-				config.entrypoint,
-				relativeFile,
-				{
-					cwd: config.build?.custom?.workingDirectory,
-					command: config.build?.custom?.command,
-				},
-				config.config,
-				"dev"
-			);
-			if (buildAborter.signal.aborted) {
-				return;
+			if (runBuildCommand) {
+				const relativeFile =
+					path.relative(config.projectRoot, config.entrypoint) || ".";
+				logger.log(`The file ${filePath} changed, restarting build...`);
+				await runCustomBuild(
+					config.entrypoint,
+					relativeFile,
+					{
+						cwd: config.build?.custom?.workingDirectory,
+						command: config.build?.custom?.command,
+					},
+					config.config,
+					{ wranglerCommand: "dev", signal: buildAborter.signal }
+				);
+				if (buildAborter.signal.aborted) {
+					return;
+				}
 			}
 			assert(this.#tmpDir);
 			if (!config.build?.bundle) {
@@ -103,7 +205,8 @@ export class BundlerController extends Controller {
 						entry,
 						config.build.moduleRules,
 						this.#tmpDir.path,
-						config.pythonModules?.exclude ?? []
+						config.pythonModules?.exclude ?? [],
+						config.build.findAdditionalModules !== false
 					)
 				: await bundleWorker(entry, this.#tmpDir.path, {
 						bundle: true,
@@ -112,7 +215,7 @@ export class BundlerController extends Controller {
 						doBindings,
 						workflowBindings,
 						jsxFactory: config.build.jsxFactory,
-						jsxFragment: config.build.jsxFactory,
+						jsxFragment: config.build.jsxFragment,
 						tsconfig: config.build.tsconfig,
 						minify: config.build.minify,
 						keepNames: config.build.keepNames ?? true,
@@ -172,6 +275,9 @@ export class BundlerController extends Controller {
 				entrypointSource: readFileSync(entrypointPath, "utf8"),
 			});
 		} catch (err) {
+			if (buildAborter.signal.aborted || isAbortError(err)) {
+				return;
+			}
 			this.emitErrorEvent({
 				type: "error",
 				reason: "Custom build failed",
@@ -184,9 +290,19 @@ export class BundlerController extends Controller {
 
 	async #startCustomBuild(config: StartDevWorkerOptions) {
 		await this.#customBuildWatcher?.close();
+		this.#customBuildWatcher = undefined;
+		// Builds scheduled against the previous config must not run now that it has
+		// been replaced.
+		this.#debouncedCustomBuild?.cancel();
+		this.#debouncedCustomBuild = undefined;
+		this.#pendingCustomBuild = undefined;
 		this.#customBuildAborter?.abort();
 
-		if (!config.build?.custom?.command) {
+		// Closing the previous watcher suspends this method, so `teardown()` may
+		// have run to completion in the meantime. It reads `#customBuildWatcher`
+		// once, so a watcher created below would never be closed and would keep
+		// the process alive.
+		if (this.tearingDown || !config.build?.custom?.command) {
 			return;
 		}
 
@@ -195,19 +311,59 @@ export class BundlerController extends Controller {
 		// This is always present if a custom command is provided, defaulting to `./src`
 		assert(pathsToWatch, "config.build.custom.watch");
 
+		if (config.dev.watch === false) {
+			// `getEntry()` already ran the build command for this config; just
+			// bundle its output (see `#scheduleCustomBuild()`'s `runBuildCommand`).
+			await this.#scheduleCustomBuild(
+				config,
+				String(pathsToWatch),
+				/* runBuildCommand */ false
+			);
+			return;
+		}
+
 		this.#customBuildWatcher = watch(pathsToWatch, {
 			persistent: true,
-			// The initial custom build is always done in getEntry()
+			// The initial custom build command is always run by `getEntry()`, so
+			// files that already exist when we start watching must not be
+			// reported as changes.
 			ignoreInitial: true,
 		});
+		// A real change can be detected (and start a real rebuild) before the
+		// watcher's initial scan finishes: `ignoreInitial` only suppresses `add`
+		// events for pre-existing files, not `change` events picked up mid-scan.
+		// Track that so `ready`'s bundle-only pass below doesn't supersede (and
+		// discard the result of) a rebuild that's already reflecting a real edit.
+		let realChangeSeenBeforeReady = false;
 		this.#customBuildWatcher.on("ready", () => {
-			void this.#runCustomBuild(config, String(pathsToWatch));
+			if (realChangeSeenBeforeReady) {
+				return;
+			}
+			// Bundle the output `getEntry()` already produced; don't re-run the
+			// build command a second time (see `#scheduleCustomBuild()`'s
+			// `runBuildCommand`).
+			void this.#scheduleCustomBuild(
+				config,
+				String(pathsToWatch),
+				/* runBuildCommand */ false
+			);
 		});
 
-		this.#customBuildWatcher.on(
-			"all",
-			(_event, filePath) => void this.#runCustomBuild(config, filePath)
-		);
+		// A single logical change (a `git pull`, a "save all", a framework writing
+		// out a directory) usually surfaces as a burst of watcher events. Debounce
+		// them so that the burst results in one build rather than a build per event
+		// that is immediately superseded by the next.
+		let lastChangedPath = String(pathsToWatch);
+		const debouncedCustomBuild = debounce(() => {
+			void this.#scheduleCustomBuild(config, lastChangedPath);
+		});
+		this.#debouncedCustomBuild = debouncedCustomBuild;
+
+		this.#customBuildWatcher.on("all", (_event, filePath) => {
+			realChangeSeenBeforeReady = true;
+			lastChangedPath = filePath;
+			debouncedCustomBuild();
+		});
 	}
 
 	#bundlerCleanup?: ReturnType<typeof runBuild>;
@@ -215,6 +371,14 @@ export class BundlerController extends Controller {
 
 	async #startBundle(config: StartDevWorkerOptions) {
 		await this.#bundlerCleanup?.();
+		// Cleaning up the previous build suspends this method, so `teardown()` may
+		// have run to completion in the meantime. It reads `#bundlerCleanup` once,
+		// so an esbuild watch build started below would never be disposed of. Bail
+		// out before replacing the aborter, which `teardown()` has already aborted
+		// to suppress events from in-flight builds.
+		if (this.tearingDown) {
+			return;
+		}
 		// If a new bundle build comes in, we need to cancel in-flight builds
 		this.#bundleBuildAborter.abort();
 		this.#bundleBuildAborter = new AbortController();
@@ -273,10 +437,29 @@ export class BundlerController extends Controller {
 				onStart: () => {
 					this.emitBundleStartEvent(config);
 				},
+				onRebuildError: (errors, warnings) => {
+					if (!buildAborter.signal.aborted) {
+						// Watch-mode rebuild failures route through the same error
+						// path as initial-build failures, so DevEnv logs them
+						// (logBuildFailure) and emits `buildFailed` symmetrically.
+						this.emitErrorEvent({
+							type: "error",
+							reason: "Failed to rebuild the Worker",
+							cause: new BuildFailure(
+								`Build failed with ${errors.length} error(s)`,
+								errors,
+								warnings
+							),
+							source: "BundlerController",
+							data: undefined,
+						});
+					}
+				},
 				checkFetch: shouldCheckFetch(
 					config.compatibilityDate,
 					config.compatibilityFlags
 				),
+				watch: config.dev.watch ?? true,
 				defineNavigatorUserAgent: isNavigatorDefined(
 					config.compatibilityDate,
 					config.compatibilityFlags
@@ -305,16 +488,38 @@ export class BundlerController extends Controller {
 	}
 
 	#assetsWatcher?: ReturnType<typeof watch>;
+	#debouncedRefreshBundle?: ReturnType<typeof debounce>;
+
 	async #ensureWatchingAssets(config: StartDevWorkerOptions) {
 		await this.#assetsWatcher?.close();
+		this.#assetsWatcher = undefined;
+		// The watcher has closed, so no further events can arm the previous refresh.
+		// Discard any that is still pending: it captured the config it was created
+		// with, which has now been replaced.
+		this.#debouncedRefreshBundle?.cancel();
+		this.#debouncedRefreshBundle = undefined;
+
+		// Closing the previous watcher suspends this method, so `teardown()` may
+		// have run to completion in the meantime. It reads `#assetsWatcher` once,
+		// so a watcher created below would never be closed and would keep the
+		// process alive.
+		if (this.tearingDown) {
+			return;
+		}
 
 		const debouncedRefreshBundle = debounce(() => {
+			// The watcher can deliver events while it is closing, so a refresh can be
+			// armed after dev has stopped.
+			if (this.tearingDown) {
+				return;
+			}
 			if (this.#currentBundle) {
 				this.emitBundleCompleteEvent(config, this.#currentBundle);
 			}
 		});
+		this.#debouncedRefreshBundle = debouncedRefreshBundle;
 
-		if (config.assets?.directory) {
+		if (config.dev.watch !== false && config.assets?.directory) {
 			const assetsDir = config.assets.directory;
 			const watcher = watch(assetsDir, {
 				persistent: true,
@@ -353,6 +558,17 @@ export class BundlerController extends Controller {
 	#tmpDir?: EphemeralDirectory;
 
 	onConfigUpdate(event: ConfigUpdateEvent) {
+		// A config update can arrive after teardown has finished: `DevEnv` tears its
+		// controllers down concurrently, and `ConfigController` can dispatch a
+		// config-file change delivered while its own watcher was closing. Acting on
+		// it would create file watchers, an esbuild watch build and a temp directory
+		// that nothing will ever clean up, all of which can keep the process alive
+		// after dev has shut down.
+		if (this.tearingDown) {
+			logger.debug("Ignoring config update during teardown");
+			return;
+		}
+
 		this.#tmpDir?.remove();
 		try {
 			this.#tmpDir = getWranglerTmpDir(event.config.projectRoot, "dev");
@@ -398,6 +614,7 @@ export class BundlerController extends Controller {
 	override async teardown() {
 		logger.debug("BundlerController teardown beginning...");
 		await super.teardown();
+		this.#pendingCustomBuild = undefined;
 		this.#customBuildAborter?.abort();
 		// Abort any in-flight esbuild build so that a finishing build doesn't
 		// emit `bundleComplete`/`bundleStart` into a torn-down event bus.
@@ -411,8 +628,14 @@ export class BundlerController extends Controller {
 			// ...middleware-loader.entry.ts" during teardown.
 			this.#bundlerCleanup?.(),
 			this.#customBuildWatcher?.close(),
+			this.#customBuildDrain?.catch(() => {}),
 			this.#assetsWatcher?.close(),
 		]);
+		// Discard any debounced work armed by an event that arrived while the
+		// watchers were closing, so its timer doesn't keep the process alive. Must
+		// run after the watchers have closed, otherwise a later event could re-arm it.
+		this.#debouncedCustomBuild?.cancel();
+		this.#debouncedRefreshBundle?.cancel();
 		// Defence-in-depth: `bundle.ts`'s `stop()` normally removes the tmp
 		// dir on our behalf, but it may have never been assigned (e.g. when
 		// running a custom build, or when the initial build threw). Remove

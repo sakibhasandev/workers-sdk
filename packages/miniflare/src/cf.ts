@@ -4,8 +4,8 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { dim } from "kleur/colors";
 import { fetch } from "undici";
-import type { Plugins } from "./plugins";
-import type { Log, OptionalZodTypeOf } from "./shared";
+import type { ParsedInstanceOptions } from "./config/schema";
+import type { Log } from "./shared";
 import type { IncomingRequestCfProperties } from "@cloudflare/workers-types/experimental";
 
 /**
@@ -89,6 +89,10 @@ export const fallbackCf: IncomingRequestCfProperties = {
 		certFingerprintSHA256: "",
 		certNotBefore: "",
 		certNotAfter: "",
+		certRFC9440: "",
+		certRFC9440TooLarge: false,
+		certChainRFC9440: "",
+		certChainRFC9440TooLarge: false,
 	},
 	edgeRequestKeepAliveStatus: 0,
 	hostMetadata: undefined,
@@ -107,7 +111,7 @@ export const DAY = 86400000;
 // Max age in days of cf.json
 export const CF_DAYS = 30;
 
-type CoreOptions = OptionalZodTypeOf<Plugins["core"]["sharedOptions"]>;
+type CoreOptions = ParsedInstanceOptions;
 
 /**
  * Check if cf fetching is disabled via environment variable.

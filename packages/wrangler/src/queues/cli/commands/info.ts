@@ -10,6 +10,7 @@ export const queuesInfoCommand = createCommand({
 		owner: "Product: Queues",
 		status: "stable",
 	},
+	behaviour: { supportTemporary: true },
 	args: {
 		name: {
 			type: "string",
@@ -24,6 +25,9 @@ export const queuesInfoCommand = createCommand({
 
 		logger.log(`Queue Name: ${queue.queue_name}`);
 		logger.log(`Queue ID: ${queue.queue_id}`);
+		if (queue.jurisdiction !== undefined) {
+			logger.log(`Jurisdiction: ${queue.jurisdiction}`);
+		}
 		logger.log(`Created On: ${queue.created_on}`);
 		logger.log(`Last Modified: ${queue.modified_on}`);
 		logger.log(`Number of Producers: ${queue.producers_total_count}`);

@@ -1,25 +1,32 @@
-import type { ContainerNormalizedConfig } from "@cloudflare/containers-shared";
 import type {
-	AssetsOptions,
+	BuiltContainerImage,
+	BuiltImage,
+	ContainerNormalizedConfig,
+} from "@cloudflare/containers-shared";
+import type {
+	ValidatedAssetsOptions,
 	LegacyAssetPaths,
-	CfPlacement,
+	CfModule,
+	CfModuleType,
+	CfWorkerSourceMap,
 	Config,
-	EphemeralDirectory,
+	FetchKVGetValueFetcher,
 	FetchResultFetcher,
 	FetchListResultFetcher,
+	FetchPagedListResultFetcher,
 	Logger,
 	Route,
 	Entry,
+	ContainerApp,
+	DurableObjectCodeUpdateStrategy,
 } from "@cloudflare/workers-utils";
-import type { NodeJSCompatMode } from "miniflare";
 
-/**
- * client needs to handle logger and fetch/auth implementation
- * these are passed into this package to handle any API requests/logs
- */
+/** API, logging, and prompt implementations supplied by the consumer. */
 export type DeployHelpersContext = {
 	fetchResult: FetchResultFetcher;
 	fetchListResult: FetchListResultFetcher;
+	fetchPagedListResult: FetchPagedListResultFetcher;
+	fetchKVGetValue: FetchKVGetValueFetcher;
 	logger: Logger;
 	confirm: (
 		text: string,
@@ -29,7 +36,40 @@ export type DeployHelpersContext = {
 		text: string,
 		options?: { defaultValue?: string }
 	) => Promise<string>;
-	isNonInteractiveOrCI: () => boolean;
+	select: <Values extends string>(
+		text: string,
+		options: {
+			choices: {
+				title: string;
+				description?: string;
+				value: Values;
+			}[];
+			defaultOption?: number;
+			fallbackOption?: number;
+		}
+	) => Promise<Values>;
+};
+
+export type ContainerlessConfig = Omit<Config, "containers">;
+
+export type BuiltDurableObjectContainerImage = BuiltImage & {
+	className: string;
+	imageName: string;
+};
+
+export type ContainerDeployConfig = {
+	/** Original resolved container configuration. */
+	source: ContainerApp[] | undefined;
+	standard: {
+		/** Normalized non-Durable-Object container applications. */
+		normalized: ContainerNormalizedConfig[];
+		/** Locally built images awaiting deployment or cleanup. */
+		builtImages: BuiltContainerImage[];
+	};
+	durableObjects: {
+		/** Locally built named images awaiting upload or cleanup. */
+		builtImages: BuiltDurableObjectContainerImage[];
+	};
 };
 
 /**
@@ -41,56 +81,33 @@ export type DeployHelpersContext = {
  * config.unsafe, config.tail_consumers).
  */
 export type SharedDeployVersionsProps = {
-	config: Config;
 	/** Merged from args.script/config.main/config.site.entry-point/config.assets. */
 	entry: Entry;
-	/** From config.rules. */
-	rules: Config["rules"];
-	/** Merged: --name arg ?? config.name, with CI override applied. */
-	name: string;
-	workerNameOverridden: boolean;
-	/** Merged: --compatibility-date arg ?? config.compatibility_date. Still optional — validated as required in stage 4. */
+	/** Merged: --name arg ?? config.name, with CI override applied. Validated as required separately. */
+	name: string | undefined;
+	/** Merged: --compatibility-date arg ?? config.compatibility_date. Still optional — validated as required later. */
 	compatibilityDate: string | undefined;
 	/** Merged: --compatibility-flags arg ?? config.compatibility_flags. */
 	compatibilityFlags: string[];
-	/** computed based on compat date and args */
-	nodejsCompatMode: NodeJSCompatMode;
-	/** Merged from --assets arg and config.assets. */
-	assetsOptions: AssetsOptions | undefined;
-	/** Merged: --jsx-factory arg || config.jsx_factory. */
-	jsxFactory: string;
-	/** Merged: --jsx-fragment arg || config.jsx_fragment. */
-	jsxFragment: string;
-	/** Merged: --tsconfig arg ?? config.tsconfig. */
-	tsconfig: string | undefined;
-	/** Merged: --minify arg ?? config.minify. */
-	minify: boolean | undefined;
-	/** Merged: !(--bundle arg ?? !config.no_bundle). */
-	noBundle: boolean;
-	/** Merged: --upload-source-maps arg ?? config.upload_source_maps. */
-	uploadSourceMaps: boolean | undefined;
+	/**
+	 * Validated/resolved assets directory, merged from --assets arg and
+	 * config.assets. The full AssetsOptions are resolved later via
+	 * `resolveAssetOptions`.
+	 */
+	assetsDir: ValidatedAssetsOptions | undefined;
+	/**
+	 * The user Worker entry, merged: --script arg ?? config.main. Undefined for
+	 * assets-only Workers. Drives `has_user_worker` when resolving assets.
+	 */
+	main: string | undefined;
 	/** Merged: --keep-vars arg || config.keep_vars. */
 	keepVars: boolean;
 	/** Merged from --site arg and config.site. */
 	isWorkersSite: boolean;
-	/** Merged: { ...config.define, ...--define arg }. CLI overrides config. */
-	defines: Record<string, string>;
-	/** Merged: { ...config.alias, ...--alias arg }. CLI overrides config. */
-	alias: Record<string, string>;
-	/**
-	 * Whether to use the deprecated service environments API path.
-	 * True only when config opts in (legacy_env: false) AND --env is specified.
-	 */
-	useServiceEnvApiPath: boolean;
-	placement: CfPlacement | undefined;
-	/** Output directory for the bundled Worker. From --outdir arg or a temp directory. */
-	destination: string | EphemeralDirectory;
 	/** From --dry-run arg. */
 	dryRun: boolean;
 	/** From --env arg. */
 	env: string | undefined;
-	/** From --outdir arg. Already used to derive `destination`, but also needed for outdir README and noBundleWorker. */
-	outdir: string | undefined;
 	/** From --outfile arg. */
 	outfile: string | undefined;
 	/** From --tag arg. */
@@ -99,15 +116,31 @@ export type SharedDeployVersionsProps = {
 	message: string | undefined;
 	/** From --secrets-file arg. */
 	secretsFile: string | undefined;
-	/** From collectKeyValues(--var arg). Pre-resolved key-value pairs. */
-	var: Record<string, string>;
+	/** From collectKeyValues(--var arg). CLI-only vars; config vars flow separately via getBindings(config). */
+	cliVars: Record<string, string>;
 	/** From --experimental-auto-create arg. */
 	experimentalAutoCreate: boolean;
+	/** Resolved from requireAuth() before calling deploy-helpers. undefined only in dry-run. */
+	accountId: string | undefined;
+	/** Resolved from getMetricsUsageHeaders() / config.send_metrics. Controls whether usage metrics headers are sent with upload requests. */
+	sendMetrics: boolean;
+	/** Resolved from getFlag("RESOURCES_PROVISION"). Controls whether bindings are auto-provisioned before upload. */
+	resourcesProvision: boolean;
+	/** Controls whether provisioned resource IDs are written back to the config file. */
+	skipProvisioningConfigWriteback: boolean;
+	/** From --strict arg. In strict mode, conflicting pre-upload checks abort instead of auto-continuing. */
+	strict: boolean;
+	/** Container configuration and locally built image state. */
+	containers: ContainerDeployConfig;
+	/** Whether the resolved Worker name differs from the pre-merge config/args name. */
+	workerNameOverridden?: boolean;
 };
 
 export type DeployProps = SharedDeployVersionsProps & {
 	/** Discriminant for DeployProps vs VersionsUploadProps */
 	command: "deploy";
+	/** If set, automatically register this `workers.dev` account subdomain when the account has none. */
+	autoRegisterWorkersDevSubdomain?: string;
 	/** Merged from --site arg and config.site. */
 	legacyAssetPaths: LegacyAssetPaths | undefined;
 	/** Merged: --triggers arg ?? config.triggers.crons. */
@@ -116,15 +149,25 @@ export type DeployProps = SharedDeployVersionsProps & {
 	routes: Route[];
 	/** Merged: --logpush arg ?? config.logpush. */
 	logpush: boolean | undefined;
-	containers: ContainerNormalizedConfig[];
 	/** From --dispatch-namespace arg. Deploy-only (Workers for Platforms). */
 	dispatchNamespace: string | undefined;
-	/** From --strict arg. Deploy-only. */
-	strict: boolean;
-	/** From --metafile arg. Deploy-only. */
-	metafile: string | boolean | undefined;
 	/** From --old-asset-ttl arg. Deploy-only. */
 	oldAssetTtl: number | undefined;
+	/** From --containers-rollout arg. Deploy-only. */
+	containersRollout: "immediate" | "gradual" | "none" | undefined;
+	/** Controls how Durable Object code updates are applied. */
+	durableObjectsCodeUpdateStrategy?: DurableObjectCodeUpdateStrategy;
+	/**
+	 * When true, an existing Worker with the same name aborts the deploy instead
+	 * of updating it, because this run cannot confirm the local project owns the
+	 * remote Worker. Set for non-interactive deploys with no pre-existing config
+	 * file when either the name was generated automatically (no user-supplied
+	 * name) or the deploy is the Pages-to-Workers delegation (where the name is a
+	 * Pages project name carried across, not proof of Worker ownership). Deploys
+	 * that carry a config file naming the Worker leave this false and update it as
+	 * normal.
+	 */
+	failIfWorkerNameTaken?: boolean;
 };
 
 export type VersionsUploadProps = SharedDeployVersionsProps & {
@@ -134,18 +177,31 @@ export type VersionsUploadProps = SharedDeployVersionsProps & {
 	previewAlias: string | undefined;
 };
 
+export type WorkerBuildResult = {
+	modules: CfModule[];
+	sourceMaps: CfWorkerSourceMap[] | undefined;
+	dependencies: Record<string, { bytesInOutput: number }>;
+	resolvedEntryPointPath: string;
+	bundleType: CfModuleType;
+	content: string;
+};
+
 export interface TriggerDeployment {
 	targets: string[];
+	changed?: boolean;
+	category?: string;
+	resource?: string;
 	error?: Error;
 }
 
 export type TriggerProps = {
 	config: Config;
-	accountId: string;
+	accountId: string | undefined;
 	scriptName: string;
-	env: string | undefined;
+	workerTag?: string | null;
 	crons: string[] | undefined;
 	routes: Route[];
-	useServiceEnvironments: boolean;
 	firstDeploy: boolean;
+	dryRun: boolean;
+	validated: boolean;
 };

@@ -3,30 +3,52 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { configFileName, UserError } from "@cloudflare/workers-utils";
 import chalk from "chalk";
-import { execaCommand } from "execa";
+import { x } from "tinyexec";
+import treeKill from "tree-kill";
 import dedent from "ts-dedent";
 import { logger } from "../logger";
 import type { Config } from "@cloudflare/workers-utils";
+import type { Result } from "tinyexec";
 
 export type WranglerCommand = "dev" | "deploy" | "versions upload" | "types";
+
+type RunCommandOptions = {
+	wranglerCommand?: WranglerCommand;
+	signal?: AbortSignal;
+};
+
+const FORCE_KILL_AFTER_MS = 5_000;
 
 export async function runCommand(
 	command: string,
 	cwd: string | undefined,
 	prefix = "[custom build]",
-	wranglerCommand?: WranglerCommand
+	runOptions?: RunCommandOptions
 ) {
 	logger.log(chalk.blue(prefix), "Running:", command);
+	let abortHandler: ReturnType<typeof terminateProcessOnAbort> | undefined;
 	try {
-		const res = execaCommand(command, {
-			shell: true,
-			cwd,
-			env: {
-				...process.env,
-				...(wranglerCommand ? { WRANGLER_COMMAND: wranglerCommand } : {}),
+		// `command` is handed to the shell verbatim, so trim it: on Windows the
+		// shell is `cmd.exe /d /s /c "<command>"`, where surrounding whitespace
+		// from a multi-line config value is not harmless.
+		const res = x(command.trim(), [], {
+			nodeOptions: {
+				shell: true,
+				cwd,
+				// tinyexec always merges this over `process.env`, so the rest of the
+				// environment is still inherited.
+				env: runOptions?.wranglerCommand
+					? { WRANGLER_COMMAND: runOptions.wranglerCommand }
+					: undefined,
 			},
+			throwOnError: true,
+			// Disable tinyexec's default PATH manipulation, which prepends every
+			// ancestor `node_modules/.bin` and the directory holding the running
+			// Node binary. Custom builds should see the user's own PATH.
+			nodePath: false,
 		});
-		res.stdout?.pipe(
+		abortHandler = terminateProcessOnAbort(runOptions?.signal, res);
+		res.process?.stdout?.pipe(
 			new Writable({
 				write(chunk: Buffer, _, callback) {
 					const lines = chunk.toString().split("\n");
@@ -37,7 +59,7 @@ export async function runCommand(
 				},
 			})
 		);
-		res.stderr?.pipe(
+		res.process?.stderr?.pipe(
 			new Writable({
 				write(chunk: Buffer, _, callback) {
 					const lines = chunk.toString().split("\n");
@@ -48,8 +70,24 @@ export async function runCommand(
 				},
 			})
 		);
-		await res;
+		const { exitCode } = await res;
+		// `throwOnError` only covers non-zero exit codes. A process that was
+		// terminated by a signal (e.g. because `signal` aborted, or because the
+		// user pressed Ctrl-C) reports no exit code at all, and must not be
+		// treated as a successful build.
+		if (exitCode === undefined) {
+			throw new Error(
+				`Command \`${command}\` was terminated by ${res.process?.signalCode ?? "a signal"}`
+			);
+		}
+		if (runOptions?.signal?.aborted) {
+			await abortHandler?.waitForExit();
+		}
 	} catch (e) {
+		if (runOptions?.signal?.aborted) {
+			await abortHandler?.waitForExit();
+			throw e;
+		}
 		logger.error(e);
 		throw new UserError(
 			`Running custom build \`${command}\` failed. There are likely more logs from your build command above.`,
@@ -58,6 +96,8 @@ export async function runCommand(
 				cause: e,
 			}
 		);
+	} finally {
+		abortHandler?.cleanup();
 	}
 }
 /**
@@ -71,15 +111,10 @@ export async function runCustomBuild(
 	expectedEntryRelative: string,
 	build: Pick<Config["build"], "command" | "cwd">,
 	configPath: string | undefined,
-	wranglerCommand?: WranglerCommand
+	runOptions?: RunCommandOptions
 ) {
 	if (build.command) {
-		await runCommand(
-			build.command,
-			build.cwd,
-			"[custom build]",
-			wranglerCommand
-		);
+		await runCommand(build.command, build.cwd, "[custom build]", runOptions);
 
 		assertEntryPointExists(
 			expectedEntryAbsolute,
@@ -112,6 +147,69 @@ function assertEntryPointExists(
 			{ telemetryMessage: "missing entrypoint after custom build" }
 		);
 	}
+}
+
+/**
+ * Terminate a spawned custom build command (and any processes it spawned) when
+ * the given `signal` aborts.
+ *
+ * `tree-kill` sends the signal to the process and all of its descendants on both
+ * POSIX and Windows. This matters because custom build commands are run through
+ * a shell and typically spawn their own child processes (e.g. `npm run build`).
+ * Killing the whole tree both terminates those children and closes the stdio
+ * pipes they inherited — without the latter, the command promise would hang
+ * waiting for the pipes to reach EOF.
+ */
+function terminateProcessOnAbort(
+	signal: AbortSignal | undefined,
+	subprocess: Result
+) {
+	let processExitPromise: Promise<void> | undefined;
+	let forceKillTimer: NodeJS.Timeout | undefined;
+	const terminate = () => {
+		signal?.removeEventListener("abort", terminate);
+		const pid = subprocess.pid;
+		if (pid === undefined) {
+			return;
+		}
+		processExitPromise ??= new Promise<void>((resolve) => {
+			treeKill(pid, "SIGTERM", (error) => {
+				if (error) {
+					logger.debug("Failed to kill custom build process tree", error);
+				}
+				resolve();
+			});
+		});
+		// If the process tree ignores SIGTERM (and keeps stdio pipes open, which
+		// would otherwise hang the command promise), escalate to SIGKILL after a
+		// grace period. The timer is cleared in `cleanup()` once the command has
+		// settled, so SIGKILL is only sent to a process tree that refused to exit.
+		forceKillTimer ??= setTimeout(() => {
+			treeKill(pid, "SIGKILL", (error) => {
+				if (error) {
+					logger.debug("Failed to force kill custom build process tree", error);
+				}
+			});
+		}, FORCE_KILL_AFTER_MS);
+	};
+	if (signal?.aborted) {
+		terminate();
+	} else {
+		signal?.addEventListener("abort", terminate);
+	}
+
+	return {
+		cleanup() {
+			signal?.removeEventListener("abort", terminate);
+			if (forceKillTimer !== undefined) {
+				clearTimeout(forceKillTimer);
+				forceKillTimer = undefined;
+			}
+		},
+		waitForExit() {
+			return processExitPromise ?? Promise.resolve();
+		},
+	};
 }
 
 /**

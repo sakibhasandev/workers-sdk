@@ -7,6 +7,28 @@ export type {
 	ConfigBindingOptions,
 } from "./config";
 export * from "./config/environment";
+export { partitionExports } from "./config/exports";
+export type { ExportType, PartitionedExports } from "./config/exports";
+export {
+	getDurableObjectExports,
+	hasDurableObjectExports,
+	isLiveDurableObjectExport,
+} from "./config/durable-object-exports";
+export type { LiveDurableObjectExport } from "./config/durable-object-exports";
+export {
+	getContainerDurableObjectClassNames,
+	getContainerNameToClassNameMap,
+	getDurableObjectClassNameToUseSQLiteMap,
+	getDurableObjectContainerApps,
+	getResolvedDurableObjectContainerApps,
+	isDurableObjectContainerApp,
+	resolveContainerClassName,
+	validateDurableObjectContainerApplications,
+} from "./config/containers";
+export type {
+	DurableObjectContainerApp,
+	ResolvedDurableObjectContainerApp,
+} from "./config/containers";
 export {
 	type RedirectedRawConfig,
 	defaultWranglerConfig,
@@ -43,7 +65,6 @@ export {
 	parseByteSize,
 } from "./parse";
 export {
-	friendlyBindingNames,
 	getBindingTypeFriendlyName,
 	isPagesConfig,
 	normalizeAndValidateConfig,
@@ -52,9 +73,18 @@ export {
 	isValidR2BucketName,
 	bucketFormatMessage,
 } from "./config/validation";
+
+import * as validation from "./config/validation";
+
+/**
+ * @deprecated new code should use getBindingTypeFriendlyName() instead
+ */
+export const friendlyBindingNames = validation.friendlyBindingNames;
+
 export {
 	type BindingLocalSupport,
 	getBindingLocalSupport,
+	validateBindingRemoteSetting,
 } from "./config/binding-local-support";
 
 export { validatePagesConfig } from "./config/validation-pages";
@@ -76,10 +106,25 @@ export type { ResolveConfigPathOptions } from "./config/config-helpers";
 export * from "./errors";
 export { assertNever } from "./assert-never";
 
+export {
+	getPackagePath,
+	isPackageInstalled,
+	getInstalledPackageVersion,
+} from "./package-resolution";
+
 export * from "./constants";
 
 export { mapWorkerMetadataBindings } from "./map-worker-metadata-bindings";
 export { constructWranglerConfig } from "./construct-wrangler-config";
+export {
+	convertConfigToBindings,
+	extractBindingsOfType,
+	getBindings,
+	isUnsafeBindingType,
+} from "./binding-utils";
+export type { ConvertBindingsOptions } from "./binding-utils";
+export { printBindings } from "./print-bindings";
+export type { PrintBindingsOptions } from "./print-bindings";
 
 export {
 	getBooleanEnvironmentVariableFactory,
@@ -88,14 +133,30 @@ export {
 
 export * from "./environment-variables/misc-variables";
 
-export { getGlobalWranglerConfigPath } from "./global-wrangler-config-path";
+export {
+	getGlobalConfigPath,
+	getGlobalWranglerCachePath,
+} from "./global-wrangler-config-path";
+export type { GetGlobalConfigPathOptions } from "./global-wrangler-config-path";
 
-export { isCompatDate, getTodaysCompatDate } from "./compatibility-date";
+export {
+	isCompatDate,
+	getTodaysCompatDate,
+	isNodejsCompatDefaultOn,
+	NODEJS_COMPAT_DEFAULT_ON_DATE,
+	NODEJS_COMPAT_V2_SWITCH_OVER_DATE,
+	resolveNodejsCompat,
+	stripRedundantNodejsCompatFlags,
+} from "./compatibility-date";
 export type { CompatDate } from "./compatibility-date";
+export { DEFAULT_COMPAT_DATE } from "./default-compat-date";
 
 export { isDockerfile } from "./config/validation";
 
 export { isDirectory, removeDir, removeDirSync } from "./fs-helpers";
+
+export { createConfigCache } from "./config-cache";
+export type { ConfigCache, ConfigCacheOptions } from "./config-cache";
 
 export {
 	type EphemeralDirectory,
@@ -108,7 +169,7 @@ export { MetricsRegistry } from "./prometheus-metrics";
 export type { Counter } from "./prometheus-metrics";
 
 export type { Tunnel, TunnelOptions } from "./tunnel";
-export { startTunnel } from "./tunnel";
+export { resolveNamedTunnel, startTunnel } from "./tunnel";
 export { spawnCloudflared } from "./cloudflared";
 
 export * from "./cfetch";
@@ -116,7 +177,13 @@ export * from "./cfetch";
 export { fetchLatestNpmVersion } from "./update-check";
 export type { NpmVersionCheckResult } from "./update-check";
 
-export type { Logger } from "./logger";
+export { LOGGER_LEVELS } from "./logger";
+export type { Logger, LoggerLevel } from "./logger";
+
+export { isCI, isInteractive, isNonInteractiveOrCI } from "./is-interactive";
+export { openInBrowser } from "./open-in-browser";
+export { clearOutputFilePath, writeOutput } from "./output";
+export type { OutputEntry } from "./output";
 
 export { retryOnAPIFailure } from "./retry";
 export { formatTime } from "./format-time";
@@ -125,3 +192,34 @@ export {
 	getHostFromUrl,
 	getZoneFromRoute,
 } from "./route-utils";
+
+export type { PackageManager } from "./package-manager";
+export {
+	NpmPackageManager,
+	PnpmPackageManager,
+	YarnPackageManager,
+	BunPackageManager,
+	NubPackageManager,
+} from "./package-manager";
+
+export {
+	checkWorkerNameValidity,
+	toValidWorkerName,
+	getWorkerName,
+	getWorkerNameFromProject,
+} from "./worker-name";
+
+export { formatZodError } from "./zod-format";
+
+export { toUrlPath } from "./url-path";
+export type { UrlPath } from "./url-path";
+
+export {
+	compareMigrationPaths,
+	getD1MigrationFiles,
+	normalizeRelativePath,
+} from "./d1-migrations";
+export type {
+	D1MigrationFile,
+	GetD1MigrationFilesOptions,
+} from "./d1-migrations";

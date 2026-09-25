@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { getRuntimeHeader } from "@cloudflare/runtime-types";
 import { runInTempDir } from "@cloudflare/workers-utils/test-helpers";
 import { http, HttpResponse } from "msw";
 import { afterAll, beforeAll, beforeEach, describe, it, vi } from "vitest";
@@ -211,7 +212,7 @@ describe("validateEnvInterfaceNames", () => {
 	});
 
 	it("should throw for reserved name Env", ({ expect }) => {
-		expect(() => validateEnvInterfaceNames(["env"])).toThrowError(
+		expect(() => validateEnvInterfaceNames(["env"])).toThrow(
 			/Environment name "env" converts to reserved interface name "Env"/
 		);
 	});
@@ -222,7 +223,7 @@ describe("validateEnvInterfaceNames", () => {
 		// Both staging-env and staging_env convert to StagingEnv
 		expect(() =>
 			validateEnvInterfaceNames(["staging-env", "staging_env"])
-		).toThrowError(
+		).toThrow(
 			/Environment names "staging-env" and "staging_env" both convert to interface name "StagingEnv"/
 		);
 	});
@@ -230,9 +231,7 @@ describe("validateEnvInterfaceNames", () => {
 	it("should throw when names with different separators collide", ({
 		expect,
 	}) => {
-		expect(() =>
-			validateEnvInterfaceNames(["my-prod", "my_prod"])
-		).toThrowError(
+		expect(() => validateEnvInterfaceNames(["my-prod", "my_prod"])).toThrow(
 			/Environment names "my-prod" and "my_prod" both convert to interface name "MyProdEnv"/
 		);
 	});
@@ -251,7 +250,7 @@ describe("throwMissingBindingError", () => {
 				fieldName: "binding",
 				index: 0,
 			})
-		).toThrowError(
+		).toThrow(
 			'Processing wrangler.json configuration:\n  - "kv_namespaces[0]" bindings should have a string "binding" field but got {"id":"1234"}.'
 		);
 	});
@@ -268,7 +267,7 @@ describe("throwMissingBindingError", () => {
 				fieldName: "binding",
 				index: 2,
 			})
-		).toThrowError(
+		).toThrow(
 			'Processing wrangler.json configuration:\n  - "env.production" environment configuration\n    - "env.production.d1_databases[2]" bindings should have a string "binding" field but got {"database_id":"abc123"}.'
 		);
 	});
@@ -282,7 +281,7 @@ describe("throwMissingBindingError", () => {
 				envName: TOP_LEVEL_ENV_NAME,
 				fieldName: "binding",
 			})
-		).toThrowError(
+		).toThrow(
 			'Processing wrangler.json configuration:\n  - "ai" bindings should have a string "binding" field but got {}.'
 		);
 	});
@@ -297,7 +296,7 @@ describe("throwMissingBindingError", () => {
 				fieldName: "binding",
 				index: 0,
 			})
-		).toThrowError(
+		).toThrow(
 			'Processing Wrangler configuration configuration:\n  - "kv_namespaces[0]" bindings should have a string "binding" field but got {}.'
 		);
 	});
@@ -312,7 +311,7 @@ describe("throwMissingBindingError", () => {
 				fieldName: "name",
 				index: 1,
 			})
-		).toThrowError(
+		).toThrow(
 			'Processing wrangler.json configuration:\n  - "env.staging" environment configuration\n    - "env.staging.unsafe[1]" bindings should have a string "name" field but got {"type":"ratelimit"}.'
 		);
 	});
@@ -554,7 +553,7 @@ const bindingsConfigMock: Omit<
 		},
 	],
 	vpc_networks: [],
-	websearch: undefined,
+	connect: [],
 };
 
 describe("generate types - CLI", () => {
@@ -584,6 +583,38 @@ describe("generate types - CLI", () => {
 			})
 		);
 	});
+
+	it("keeps the runtime header stable after trailing whitespace is removed", async ({
+		expect,
+	}) => {
+		fs.writeFileSync(
+			"./wrangler.jsonc",
+			JSON.stringify({
+				compatibility_date: "2024-11-06",
+				vars: { value: "test" },
+			}),
+			"utf-8"
+		);
+		spy.mockResolvedValue({
+			runtimeHeader: getRuntimeHeader("1.0.0-test", "2024-11-06"),
+			runtimeTypes: "<runtime types go here>",
+		});
+
+		await runWrangler("types");
+		const generatedContent = fs.readFileSync(
+			"./worker-configuration.d.ts",
+			"utf-8"
+		);
+		const cleanedContent = generatedContent.replace(/[ \t]+$/gm, "");
+		fs.writeFileSync("./worker-configuration.d.ts", cleanedContent);
+
+		await runWrangler("types");
+
+		expect(fs.readFileSync("./worker-configuration.d.ts", "utf-8")).toBe(
+			cleanedContent
+		);
+	});
+
 	it("should error when no config file is detected", async ({ expect }) => {
 		await expect(runWrangler("types")).rejects.toMatchInlineSnapshot(
 			`[Error: No config file detected. This command requires a Wrangler configuration file.]`
@@ -638,31 +669,37 @@ describe("generate types - CLI", () => {
 		);
 
 		await runWrangler("types");
-		expect(spy).toHaveBeenNthCalledWith(1, {
-			config: expect.objectContaining({
-				compatibility_date: "2022-01-12",
-				compatibility_flags: ["fake-compat-1"],
-			}),
-			outFile: "worker-configuration.d.ts",
-		});
+		expect(spy).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({
+				config: expect.objectContaining({
+					compatibility_date: "2022-01-12",
+					compatibility_flags: ["fake-compat-1"],
+				}),
+			})
+		);
 
 		await runWrangler("types --config ./my-wrangler-config-a.jsonc");
-		expect(spy).toHaveBeenNthCalledWith(2, {
-			config: expect.objectContaining({
-				compatibility_date: "2023-01-12",
-				compatibility_flags: ["fake-compat-2"],
-			}),
-			outFile: "worker-configuration.d.ts",
-		});
+		expect(spy).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				config: expect.objectContaining({
+					compatibility_date: "2023-01-12",
+					compatibility_flags: ["fake-compat-2"],
+				}),
+			})
+		);
 
 		await runWrangler("types -c my-wrangler-config-b.jsonc");
-		expect(spy).toHaveBeenNthCalledWith(3, {
-			config: expect.objectContaining({
-				compatibility_date: "2024-01-12",
-				compatibility_flags: ["fake-compat-3"],
-			}),
-			outFile: "worker-configuration.d.ts",
-		});
+		expect(spy).toHaveBeenNthCalledWith(
+			3,
+			expect.objectContaining({
+				config: expect.objectContaining({
+					compatibility_date: "2024-01-12",
+					compatibility_flags: ["fake-compat-3"],
+				}),
+			})
+		);
 		expect(std.out).toMatchInlineSnapshot(`
 			"
 			 ⛅️ wrangler x.x.x
@@ -1297,7 +1334,7 @@ describe("generate types - CLI", () => {
 		expect(fs.readFileSync("./worker-configuration.d.ts", "utf-8"))
 			.toMatchInlineSnapshot(`
 				"/* eslint-disable */
-				// Generated by Wrangler by running \`wrangler\` (hash: 87f2cdaf48add6af8118936351f2fdf6)
+				// Generated by Wrangler by running \`wrangler types\` (hash: 87f2cdaf48add6af8118936351f2fdf6)
 				// Runtime types generated with workerd@
 				interface __BaseEnv_Env {
 					SOMETHING: "asdasdfasdf";
@@ -1747,6 +1784,59 @@ describe("generate types - CLI", () => {
 		);
 	});
 
+	it("should report types as up to date for multi-worker setup without re-passing -c flags (--check)", async ({
+		expect,
+	}) => {
+		fs.mkdirSync("primary", { recursive: true });
+		fs.mkdirSync("secondary", { recursive: true });
+
+		fs.writeFileSync(
+			"./primary/index.ts",
+			`export default { async fetch() { return new Response("ok"); } };`,
+			"utf-8"
+		);
+		fs.writeFileSync(
+			"./primary/wrangler.jsonc",
+			JSON.stringify({
+				name: "primary-worker",
+				main: "./index.ts",
+				compatibility_date: "2024-01-01",
+				services: [{ binding: "SECONDARY", service: "secondary-worker" }],
+			}),
+			"utf-8"
+		);
+
+		fs.writeFileSync(
+			"./secondary/index.ts",
+			`export default { async fetch() { return new Response("ok"); } };`,
+			"utf-8"
+		);
+		fs.writeFileSync(
+			"./secondary/wrangler.jsonc",
+			JSON.stringify({
+				name: "secondary-worker",
+				main: "./index.ts",
+				compatibility_date: "2024-01-01",
+			}),
+			"utf-8"
+		);
+
+		// Generate types with both configs
+		await runWrangler(
+			"types --include-runtime=false -c primary/wrangler.jsonc -c secondary/wrangler.jsonc --path primary/worker-configuration.d.ts"
+		);
+
+		// --check with only the primary -c (no secondary -c) should still detect
+		// the types as up to date by recovering the secondary config from the header.
+		await runWrangler(
+			"types --check --include-runtime=false -c primary/wrangler.jsonc --path primary/worker-configuration.d.ts"
+		);
+
+		expect(std.out).toContain(
+			"Types at primary/worker-configuration.d.ts are up to date."
+		);
+	});
+
 	it("should include secret keys from .env, if there is no .dev.vars", async ({
 		expect,
 	}) => {
@@ -1806,6 +1896,7 @@ describe("generate types - CLI", () => {
 					varStr: "A from wrangler toml",
 					varArrNum: [1, 2, 3],
 					varArrMix: [1, "two", 3, true],
+					varArrEmpty: [],
 					varObj: { test: true },
 				},
 			}),
@@ -1824,6 +1915,7 @@ describe("generate types - CLI", () => {
 				varStr: string;
 				varArrNum: number[];
 				varArrMix: (boolean|number|string)[];
+				varArrEmpty: unknown[];
 				varObj: object;
 			}
 			declare namespace Cloudflare {
@@ -1836,6 +1928,55 @@ describe("generate types - CLI", () => {
 
 			📣 Remember to rerun 'wrangler types' after you change your wrangler.jsonc file.
 			"
+		`);
+	});
+
+	it("should use native Container image types without a generated environment binding", async ({
+		expect,
+	}) => {
+		fs.writeFileSync(
+			"./wrangler.jsonc",
+			JSON.stringify({
+				name: "test-name",
+				durable_objects: {
+					bindings: [
+						{
+							name: "SANDBOX",
+							class_name: "Sandbox",
+						},
+					],
+				},
+				migrations: [
+					{
+						tag: "v1",
+						new_sqlite_classes: ["Sandbox"],
+					},
+				],
+				containers: [
+					{
+						class_name: "Sandbox",
+						scheduling_policy: "durable_object",
+						images: {
+							sandbox: {
+								dockerfile: "./Dockerfile",
+							},
+							tools: {
+								dockerfile: "./Dockerfile.tools",
+							},
+						},
+					},
+				],
+			}),
+			"utf-8"
+		);
+
+		await runWrangler("types --include-runtime=false");
+
+		const generated = fs.readFileSync("worker-configuration.d.ts", "utf-8");
+		expect(generated).toContain(dedent`
+			interface __BaseEnv_Env {
+				SANDBOX: DurableObjectNamespace /* Sandbox */;
+			}
 		`);
 	});
 
@@ -2599,7 +2740,7 @@ describe("generate types - CLI", () => {
 
 			await expect(
 				runWrangler("types --include-runtime=false")
-			).rejects.toThrowError(
+			).rejects.toThrow(
 				/Processing wrangler\.jsonc configuration:\n\s+- "env\.staging" environment configuration\n\s+- "env\.staging\.kv_namespaces\[0\]" bindings should have a string "binding" field but got \{\}/
 			);
 		});
@@ -2621,7 +2762,7 @@ describe("generate types - CLI", () => {
 
 			await expect(
 				runWrangler("types --include-runtime=false")
-			).rejects.toThrowError(
+			).rejects.toThrow(
 				/Processing wrangler\.jsonc configuration:\n\s+- "r2_buckets\[0\]" bindings should have a string "binding" field/
 			);
 		});
@@ -3179,7 +3320,7 @@ describe("generate types - CLI", () => {
 
 			await expect(
 				runWrangler("types --include-runtime=false")
-			).rejects.toThrowError(
+			).rejects.toThrow(
 				/Environment names "my-env" and "my_env" both convert to interface name "MyEnv"/
 			);
 		});
@@ -3237,7 +3378,7 @@ describe("generate types - CLI", () => {
 					"utf-8"
 				);
 
-				await expect(runWrangler("types --env-interface")).rejects.toThrowError(
+				await expect(runWrangler("types --env-interface")).rejects.toThrow(
 					`Not enough arguments following: env-interface`
 				);
 			});
@@ -3265,7 +3406,7 @@ describe("generate types - CLI", () => {
 				for (const interfaceName of invalidInterfaceNames) {
 					await expect(
 						runWrangler(`types --env-interface '${interfaceName}'`)
-					).rejects.toThrowError(
+					).rejects.toThrow(
 						/The provided env-interface value .*? does not satisfy the validation regex/
 					);
 				}
@@ -3291,7 +3432,7 @@ describe("generate types - CLI", () => {
 
 				await expect(
 					runWrangler("types --env-interface CloudflareEnv")
-				).rejects.toThrowError(
+				).rejects.toThrow(
 					"An env-interface value has been provided but the worker uses the incompatible Service Worker syntax"
 				);
 			});
@@ -3317,7 +3458,7 @@ describe("generate types - CLI", () => {
 				expect(fs.readFileSync("./cloudflare-env.d.ts", "utf-8"))
 					.toMatchInlineSnapshot(`
 						"/* eslint-disable */
-						// Generated by Wrangler by running \`wrangler\` (hash: d3ba65ad57f6692e19d214b1925cf9fc)
+						// Generated by Wrangler by running \`wrangler types cloudflare-env.d.ts\` (hash: d3ba65ad57f6692e19d214b1925cf9fc)
 						// Runtime types generated with workerd@
 						interface __BaseEnv_Env {
 							SOMETHING: "asdasdfasdf";
@@ -3355,10 +3496,28 @@ describe("generate types - CLI", () => {
 				];
 
 				for (const path of invalidPaths) {
-					await expect(runWrangler(`types ${path}`)).rejects.toThrowError(
+					await expect(runWrangler(`types ${path}`)).rejects.toThrow(
 						/The provided output path '.*?' does not point to a declaration file/
 					);
 				}
+			});
+
+			it("should error if both --include-env and --include-runtime are false", async ({
+				expect,
+			}) => {
+				fs.writeFileSync(
+					"./wrangler.jsonc",
+					JSON.stringify({
+						vars: bindingsConfigMock.vars,
+					}),
+					"utf-8"
+				);
+
+				await expect(
+					runWrangler("types --include-env=false --include-runtime=false")
+				).rejects.toThrow(
+					"At least one of --include-env or --include-runtime must be enabled."
+				);
 			});
 		});
 
@@ -3380,7 +3539,7 @@ describe("generate types - CLI", () => {
 			expect(fs.readFileSync("./my-cloudflare-env-interface.d.ts", "utf-8"))
 				.toMatchInlineSnapshot(`
 					"/* eslint-disable */
-					// Generated by Wrangler by running \`wrangler\` (hash: 98b5807d9daed69f691128b816dc9f4d)
+					// Generated by Wrangler by running \`wrangler types --env-interface=MyCloudflareEnvInterface my-cloudflare-env-interface.d.ts\` (hash: 98b5807d9daed69f691128b816dc9f4d)
 					// Runtime types generated with workerd@
 					interface __BaseEnv_MyCloudflareEnvInterface {
 						SOMETHING: "asdasdfasdf";
@@ -3646,6 +3805,78 @@ describe("generate types - CLI", () => {
 			"
 		`);
 	});
+
+	describe("declarative Durable Object `exports`", () => {
+		it("populates `durableNamespaces` from live `exports` entries (including unbound + `expecting-transfer`) and excludes tombstones", async ({
+			expect,
+		}) => {
+			// `UnboundDO` and `IncomingDO` are reachable only through `ctx.exports`.
+			fs.writeFileSync(
+				"./index.ts",
+				`import { DurableObject } from "cloudflare:workers";
+export class BoundDO extends DurableObject {}
+export class UnboundDO extends DurableObject {}
+export class IncomingDO extends DurableObject {}
+export default { async fetch() { return new Response("ok"); } };`
+			);
+			fs.writeFileSync(
+				"./wrangler.jsonc",
+				JSON.stringify({
+					compatibility_date: "2026-01-01",
+					name: "test-exports-types",
+					main: "./index.ts",
+					durable_objects: {
+						bindings: [{ name: "BOUND_DO", class_name: "BoundDO" }],
+					},
+					exports: {
+						BoundDO: { type: "durable-object", storage: "sqlite" },
+						UnboundDO: { type: "durable-object", storage: "sqlite" },
+						IncomingDO: {
+							type: "durable-object",
+							state: "expecting-transfer",
+							storage: "sqlite",
+							transfer_from: "source-worker",
+						},
+						// Tombstones must not appear in `durableNamespaces`.
+						OldGone: { type: "durable-object", state: "deleted" },
+						LegacyName: {
+							type: "durable-object",
+							state: "renamed",
+							renamed_to: "BoundDO",
+						},
+					},
+				}),
+				"utf-8"
+			);
+
+			await runWrangler("types --include-runtime=false");
+
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				Generating project types...
+
+				interface __BaseEnv_Env {
+					BOUND_DO: DurableObjectNamespace<import("./index").BoundDO>;
+				}
+				declare namespace Cloudflare {
+					interface GlobalProps {
+						mainModule: typeof import("./index");
+						durableNamespaces: "BoundDO" | "UnboundDO" | "IncomingDO";
+					}
+					interface Env extends __BaseEnv_Env {}
+				}
+				interface Env extends __BaseEnv_Env {}
+
+				────────────────────────────────────────────────────────────
+				✨ Types written to worker-configuration.d.ts
+
+				📣 Remember to rerun 'wrangler types' after you change your wrangler.jsonc file.
+				"
+			`);
+		});
+	});
 });
 
 describe("generate types - API", () => {
@@ -3844,7 +4075,7 @@ describe("generate types - API", () => {
 				includeRuntime: false,
 			})
 		).rejects.toThrow(
-			"You cannot run this command without including either Env or Runtime types"
+			"At least one of includeEnv or includeRuntime must be enabled."
 		);
 
 		await expect(

@@ -14,6 +14,7 @@ import {
 import { detectPackageManager } from "helpers/packageManagers";
 import { retry } from "helpers/retry";
 import * as jsonc from "jsonc-parser";
+import semver from "semver";
 import { fetch } from "undici";
 import { version } from "../../package.json";
 import { getFrameworkMap } from "../../src/templates";
@@ -23,6 +24,7 @@ import {
 	isExperimental,
 	runDeployTests,
 	testPackageManager,
+	testPackageManagerVersion,
 } from "./constants";
 import { runC3 } from "./run-c3";
 import { kill, spawnWithLogging } from "./spawn";
@@ -33,9 +35,18 @@ import type { ExpectStatic } from "vitest";
 
 export type FrameworkTestConfig = RunnerConfig & {
 	testCommitMessage: boolean;
+	expectFrameworkCli?: boolean;
 	nodeCompat: boolean;
+	typesPath?: string;
 	unsupportedPms?: string[];
 	unsupportedOSs?: string[];
+	/**
+	 * Per–package-manager semver ranges to skip. Keys are pm names ("pnpm",
+	 * "npm", "yarn", "bun"); values are semver ranges. Used on pnpm >=11 for
+	 * frameworks that either run their own install (e.g. Hono) or whose
+	 * recovery prompt fires after the e2e harness has closed stdin.
+	 */
+	unsupportedPmRanges?: Partial<Record<string, string>>;
 	flags?: string[];
 	extraEnv?: Record<string, string | undefined>;
 };
@@ -317,10 +328,14 @@ export async function verifyPreviewScript(
 
 export async function verifyTypes(
 	expect: ExpectStatic,
-	{ nodeCompat, verifyTypes: verify }: FrameworkTestConfig,
+	{
+		nodeCompat,
+		typesPath: configuredTypesPath,
+		verifyTypes: verify,
+	}: FrameworkTestConfig,
 	{
 		workersTypes,
-		typesPath = "./worker-configuration.d.ts",
+		typesPath: templateTypesPath = "./worker-configuration.d.ts",
 		envInterfaceName = "Env",
 	}: TemplateConfig,
 	projectPath: string
@@ -329,6 +344,7 @@ export async function verifyTypes(
 		return;
 	}
 
+	const typesPath = configuredTypesPath ?? templateTypesPath;
 	const outputFileContent = readFile(join(projectPath, typesPath)).split("\n");
 
 	const hasEnvInterface = outputFileContent.some(
@@ -345,7 +361,7 @@ export async function verifyTypes(
 	// if the runtime types were installed, they wont be in this file
 	if (workersTypes === "generated") {
 		expect(outputFileContent[2]).match(
-			/\/\/ Runtime types generated with workerd@1\.\d{8}\.\d \d{4}-\d{2}-\d{2} ([a-z_]+,?)*/
+			/^\/\/ Runtime types generated with workerd@1\.\d{8}\.\d \d{4}-\d{2}-\d{2}(?: [a-z_]+(?:,[a-z_]+)*)?$/
 		);
 	}
 
@@ -358,13 +374,13 @@ export async function verifyTypes(
 		return;
 	}
 
-	const tsconfigTypes = tsconfig.compilerOptions?.types;
+	const tsconfigTypes: string[] = tsconfig.compilerOptions?.types ?? [];
 	if (workersTypes === "generated") {
 		expect(tsconfigTypes).toContain(typesPath);
 	}
 	if (workersTypes === "installed") {
 		expect(
-			tsconfigTypes.some((x: string) => x.includes("@cloudflare/workers-types"))
+			tsconfigTypes.some((x) => x.includes("@cloudflare/workers-types"))
 		).toBe(true);
 	}
 	if (nodeCompat) {
@@ -417,8 +433,23 @@ export function shouldRunTest(testConfig: FrameworkTestConfig) {
 		// Skip if the package manager is unsupported
 		!testConfig.unsupportedPms?.includes(testPackageManager) &&
 		// Skip if the OS is unsupported
-		!testConfig.unsupportedOSs?.includes(process.platform)
+		!testConfig.unsupportedOSs?.includes(process.platform) &&
+		// Skip if the package-manager version falls inside an unsupported range
+		!isUnsupportedPmVersion(testConfig)
 	);
+}
+
+function isUnsupportedPmVersion(testConfig: FrameworkTestConfig): boolean {
+	const range = testConfig.unsupportedPmRanges?.[testPackageManager];
+	if (!range || !testPackageManagerVersion) {
+		return false;
+	}
+	// Coerce to handle suffixes like "11.5.1-canary"; unparseable → run test.
+	const coerced = semver.coerce(testPackageManagerVersion);
+	if (!coerced) {
+		return false;
+	}
+	return semver.satisfies(coerced, range);
 }
 
 /**
@@ -432,7 +463,16 @@ export function getFrameworkConfig(frameworkKey: string) {
 	const frameworkMap = getFrameworkMap({
 		experimental: isExperimental,
 	});
-	const [frameworkId, platformVariant] = frameworkKey.split(":");
+	// Test keys may include optional labels after the framework id, e.g.
+	//   "next" | "next:vinext" | "nuxt:pages" | "nuxt:pages:minimal"
+	// Only "pages" / "workers" are treated as platform variants; any other
+	// trailing segment is a disambiguating label ignored here.
+	const [frameworkId, second, third] = frameworkKey.split(":");
+	const platformVariant =
+		second === "pages" || second === "workers" ? second : undefined;
+	const _label = platformVariant ? third : second; // reserved for callers
+	void _label;
+
 	if ("platformVariants" in frameworkMap[frameworkId]) {
 		assert(
 			platformVariant === "pages" || platformVariant === "workers",
@@ -459,7 +499,8 @@ export async function testGitCommitMessage(
 	expect: ExpectStatic,
 	projectName: string,
 	framework: string,
-	projectPath: string
+	projectPath: string,
+	expectFrameworkCli = true
 ) {
 	const commitMessage = await runCommand(["git", "log", "-1"], {
 		silent: true,
@@ -472,6 +513,11 @@ export async function testGitCommitMessage(
 	expect(commitMessage).toContain(`C3 = create-cloudflare@${version}`);
 	expect(commitMessage).toContain(`project name = ${projectName}`);
 	expect(commitMessage).toContain(`framework = ${framework}`);
+	if (expectFrameworkCli) {
+		expect(commitMessage).toContain("framework cli =");
+	} else {
+		expect(commitMessage).not.toContain("framework cli =");
+	}
 }
 
 /**

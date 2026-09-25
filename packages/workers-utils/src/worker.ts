@@ -1,4 +1,11 @@
-import type { CacheOptions, Observability, Route } from "./config/environment";
+import type {
+	CacheOptions,
+	DurableObjectCodeUpdateStrategy,
+	Exports,
+	LocalS3Credentials,
+	Observability,
+	Route,
+} from "./config/environment";
 import type { INHERIT_SYMBOL } from "./constants";
 import type { Json, WorkerMetadata } from "./types";
 import type { AssetConfig, RouterConfig } from "@cloudflare/workers-shared";
@@ -88,10 +95,20 @@ export interface CfKvNamespace {
 export type CfSendEmailBindings = {
 	name: string;
 	remote?: boolean;
+	allowed_sender_addresses?: string[];
 } & (
-	| { destination_address?: string }
-	| { allowed_destination_addresses?: string[] }
-	| { allowed_sender_addresses?: string[] }
+	| {
+			destination_address: string;
+			allowed_destination_addresses?: never;
+	  }
+	| {
+			destination_address?: never;
+			allowed_destination_addresses: string[];
+	  }
+	| {
+			destination_address?: never;
+			allowed_destination_addresses?: never;
+	  }
 );
 
 /**
@@ -187,17 +204,19 @@ export interface CfWorkflow {
 	class_name: string;
 	binding: string;
 	script_name?: string;
-	remote?: boolean;
 	raw?: boolean;
 	limits?: {
 		steps?: number;
+	};
+	concurrency?: {
+		limit?: number;
 	};
 	schedules?: string | string[];
 }
 
 export interface CfQueue {
 	binding: string;
-	queue_name: string;
+	queue_name?: string | typeof INHERIT_SYMBOL;
 	delivery_delay?: number;
 	remote?: boolean;
 	raw?: boolean;
@@ -209,6 +228,11 @@ export interface CfR2Bucket {
 	jurisdiction?: string;
 	remote?: boolean;
 	raw?: boolean;
+	/** Settings that only apply to local development */
+	local_dev?: {
+		/** EXPERIMENTAL: credentials for the local S3-compatible endpoint */
+		experimental_s3_credentials?: LocalS3Credentials;
+	};
 }
 
 // TODO: figure out if this is duplicated in packages/wrangler/src/config/environment.ts
@@ -244,11 +268,6 @@ export interface CfAISearch {
 	remote?: boolean;
 }
 
-export interface CfWebSearch {
-	binding: string;
-	remote?: boolean;
-}
-
 export interface CfAgentMemory {
 	binding: string;
 	namespace: string | typeof INHERIT_SYMBOL;
@@ -274,7 +293,7 @@ export interface CfHelloWorld {
 
 export interface CfFlagship {
 	binding: string;
-	app_id: string;
+	app_id?: string | typeof INHERIT_SYMBOL;
 	remote?: boolean;
 }
 
@@ -297,6 +316,26 @@ export interface CfHyperdrive {
 	localConnectionString?: string;
 }
 
+export interface CfDevPluginCfg {
+	plugin: {
+		/**
+		 * Package is the bare specifier of the package that exposes plugins to integrate into Miniflare via a named `plugins` export.
+		 * @example "@cloudflare/my-external-miniflare-plugin"
+		 */
+		package: string;
+		/**
+		 * Plugin is the name of the plugin exposed by the package.
+		 * @example "my-unsafe-plugin"
+		 */
+		name: string;
+	};
+
+	/**
+	 * dev-only options to pass to the plugin.
+	 */
+	options?: Record<string, unknown>;
+}
+
 export interface CfService {
 	binding: string;
 	service: string;
@@ -305,6 +344,7 @@ export interface CfService {
 	props?: Record<string, unknown>;
 	remote?: boolean;
 	cross_account_grant?: string;
+	dev?: CfDevPluginCfg;
 }
 
 export interface CfVpcService {
@@ -327,7 +367,7 @@ export interface CfAnalyticsEngineDataset {
 
 export interface CfDispatchNamespace {
 	binding: string;
-	namespace: string;
+	namespace?: string | typeof INHERIT_SYMBOL;
 	outbound?: {
 		service: string;
 		environment?: string;
@@ -366,25 +406,7 @@ export interface CfUnsafeBinding {
 	name: string;
 	type: string;
 
-	dev?: {
-		plugin: {
-			/**
-			 * Package is the bare specifier of the package that exposes plugins to integrate into Miniflare via a named `plugins` export.
-			 * @example "@cloudflare/my-external-miniflare-plugin"
-			 */
-			package: string;
-			/**
-			 * Plugin is the name of the plugin exposed by the package.
-			 * @example "my-unsafe-plugin"
-			 */
-			name: string;
-		};
-
-		/**
-		 * dev-only options to pass to the plugin.
-		 */
-		options?: Record<string, unknown>;
-	};
+	dev?: CfDevPluginCfg;
 }
 
 type CfUnsafeMetadata = Record<string, unknown>;
@@ -417,9 +439,21 @@ export interface CfDurableObjectMigrations {
 			from: string;
 			to: string;
 		}[];
+		transferred_classes?: {
+			from: string;
+			from_script: string;
+			to: string;
+		}[];
 		deleted_classes?: string[];
 	}[];
 }
+
+/**
+ * The declarative `exports` map keyed by class name.
+ *
+ * Durable Objects can only be configured by `exports` or `migrations`, not both.
+ */
+export type CfExports = Exports;
 
 export type CfPlacement =
 	| { mode: "smart"; hint?: string }
@@ -458,9 +492,25 @@ export interface CfWorkerInit {
 	 */
 	sourceMaps: CfWorkerSourceMap[] | undefined;
 
-	containers: { class_name: string }[] | undefined;
+	/**
+	 * A container is linked to its Durable Object either by `class_name`, or by
+	 * the Durable Object's `exports` entry naming the container by `name`.
+	 */
+	containers:
+		| {
+				name?: string;
+				class_name?: string;
+				images?: Record<string, string>;
+		  }[]
+		| undefined;
 
 	migrations: CfDurableObjectMigrations | undefined;
+	code_update_strategy?: DurableObjectCodeUpdateStrategy;
+	/**
+	 * Declarative exports configuration. Durable Object entries are sent instead
+	 * of `migrations`.
+	 */
+	exports: CfExports | undefined;
 	compatibility_date: string | undefined;
 	compatibility_flags: string[] | undefined;
 	keepVars: boolean | undefined;
@@ -485,11 +535,21 @@ export interface CfWorkerInit {
 		| undefined;
 	observability: Observability | undefined;
 	cache: CacheOptions | undefined;
+	/**
+	 * The list of npm package dependencies collected from the project's package.json.
+	 * Sent to the API for instrumentation and analytics purposes.
+	 */
+	package_dependencies?:
+		| Array<{
+				name: string;
+				packageJsonVersion: string;
+				installedVersion: string;
+		  }>
+		| undefined;
 }
 
 export interface CfWorkerContext {
 	env: string | undefined;
-	useServiceEnvironments: boolean | undefined;
 	zone: string | undefined;
 	host: string | undefined;
 	routes: Route[] | undefined;

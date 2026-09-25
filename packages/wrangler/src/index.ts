@@ -22,6 +22,12 @@ import { aiSearchCreateCommand } from "./ai-search/create";
 import { aiSearchDeleteCommand } from "./ai-search/delete";
 import { aiSearchGetCommand } from "./ai-search/get";
 import { aiSearchNamespace } from "./ai-search/index";
+import { aiSearchJobsCancelCommand } from "./ai-search/jobs/cancel";
+import { aiSearchJobsCreateCommand } from "./ai-search/jobs/create";
+import { aiSearchJobsGetCommand } from "./ai-search/jobs/get";
+import { aiSearchJobsNamespace } from "./ai-search/jobs/index";
+import { aiSearchJobsListCommand } from "./ai-search/jobs/list";
+import { aiSearchJobsLogsCommand } from "./ai-search/jobs/logs";
 import { aiSearchListCommand } from "./ai-search/list";
 import { aiSearchNamespaceCreateCommand } from "./ai-search/namespace/create";
 import { aiSearchNamespaceDeleteCommand } from "./ai-search/namespace/delete";
@@ -170,6 +176,43 @@ import { emailSendingSendCommand } from "./email-routing/sending/send";
 import { emailSendingSendRawCommand } from "./email-routing/sending/send-raw";
 import { emailSendingSettingsCommand } from "./email-routing/sending/settings";
 import { emailRoutingSettingsCommand } from "./email-routing/settings";
+import { flagshipAppsCreateCommand } from "./flagship/apps/create";
+import { flagshipAppsDeleteCommand } from "./flagship/apps/delete";
+import { flagshipAppsGetCommand } from "./flagship/apps/get";
+import { flagshipAppsListCommand } from "./flagship/apps/list";
+import { flagshipAppsUpdateCommand } from "./flagship/apps/update";
+import { flagshipFlagsChangelogCommand } from "./flagship/flags/changelog";
+import { flagshipFlagsCreateCommand } from "./flagship/flags/create";
+import { flagshipFlagsDeleteCommand } from "./flagship/flags/delete";
+import {
+	flagshipFlagsDisableCommand,
+	flagshipFlagsEnableCommand,
+} from "./flagship/flags/enable";
+import { flagshipFlagsEvaluateCommand } from "./flagship/flags/evaluate";
+import { flagshipFlagsGetCommand } from "./flagship/flags/get";
+import { flagshipFlagsListCommand } from "./flagship/flags/list";
+import { flagshipFlagsPullCommand } from "./flagship/flags/pull";
+import { flagshipFlagsRolloutCommand } from "./flagship/flags/rollout";
+import { flagshipFlagsRulesDeleteCommand } from "./flagship/flags/rules/delete";
+import { flagshipFlagsRulesListCommand } from "./flagship/flags/rules/list";
+import { flagshipFlagsRulesReorderCommand } from "./flagship/flags/rules/reorder";
+import { flagshipFlagsRulesUpdateCommand } from "./flagship/flags/rules/update";
+import { flagshipFlagsSetCommand } from "./flagship/flags/set";
+import { flagshipFlagsSplitCommand } from "./flagship/flags/split";
+import { flagshipFlagsUpdateCommand } from "./flagship/flags/update";
+import {
+	flagshipAppsDeleteAlias,
+	flagshipAppsListAlias,
+	flagshipAppsNamespace,
+	flagshipFlagsChangelogAlias,
+	flagshipFlagsDeleteAlias,
+	flagshipFlagsEvaluateAlias,
+	flagshipFlagsGetAlias,
+	flagshipFlagsListAlias,
+	flagshipFlagsNamespace,
+	flagshipFlagsRulesNamespace,
+	flagshipNamespace,
+} from "./flagship/index";
 import {
 	helloWorldGetCommand,
 	helloWorldNamespace,
@@ -180,6 +223,10 @@ import { hyperdriveDeleteCommand } from "./hyperdrive/delete";
 import { hyperdriveGetCommand } from "./hyperdrive/get";
 import { hyperdriveNamespace } from "./hyperdrive/index";
 import { hyperdriveListCommand } from "./hyperdrive/list";
+import {
+	hyperdrivePlanetscaleNamespace,
+	hyperdrivePlanetscaleSignatureCommand,
+} from "./hyperdrive/planetscale";
 import { hyperdriveUpdateCommand } from "./hyperdrive/update";
 import { init } from "./init";
 import {
@@ -269,17 +316,19 @@ import { pipelinesStreamsDeleteCommand } from "./pipelines/cli/streams/delete";
 import { pipelinesStreamsGetCommand } from "./pipelines/cli/streams/get";
 import { pipelinesStreamsListCommand } from "./pipelines/cli/streams/list";
 import { pipelinesUpdateCommand } from "./pipelines/cli/update";
-import {
-	previewCommand,
-	previewDeleteCommand,
-	previewSecretBulkCommand,
-	previewSecretDeleteCommand,
-	previewSecretListCommand,
-	previewSecretNamespace,
-	previewSecretPutCommand,
-	previewSettingsCommand,
-	previewSettingsUpdateCommand,
-} from "./preview";
+import { previewBaseConfigNamespace } from "./preview/base-config";
+import { previewBaseConfigSecretNamespace } from "./preview/base-config/secrets";
+import { previewBaseConfigSecretBulkCommand } from "./preview/base-config/secrets/bulk";
+import { previewBaseConfigSecretDeleteCommand } from "./preview/base-config/secrets/delete";
+import { previewBaseConfigSecretListCommand } from "./preview/base-config/secrets/list";
+import { previewBaseConfigSecretPutCommand } from "./preview/base-config/secrets/put";
+import { previewDeleteCommand } from "./preview/delete";
+import { previewCommand } from "./preview/preview";
+import { previewSecretNamespace } from "./preview/secrets";
+import { previewSecretBulkCommand } from "./preview/secrets/bulk";
+import { previewSecretDeleteCommand } from "./preview/secrets/delete";
+import { previewSecretListCommand } from "./preview/secrets/list";
+import { previewSecretPutCommand } from "./preview/secrets/put";
 import { queuesNamespace } from "./queues/cli/commands";
 import { queuesConsumerNamespace } from "./queues/cli/commands/consumer";
 import { queuesConsumerHttpNamespace } from "./queues/cli/commands/consumer/http-pull";
@@ -425,15 +474,33 @@ import { tunnelInfoCommand } from "./tunnel/info";
 import { tunnelListCommand } from "./tunnel/list";
 import { tunnelQuickStartCommand } from "./tunnel/quick-start";
 import { tunnelRunCommand } from "./tunnel/run";
+import { turnstileWidgetCreateCommand } from "./turnstile/create";
+import { turnstileWidgetDeleteCommand } from "./turnstile/delete";
+import { turnstileWidgetGetCommand } from "./turnstile/get";
+import {
+	turnstileNamespace,
+	turnstileWidgetNamespace,
+} from "./turnstile/index";
+import { turnstileWidgetListCommand } from "./turnstile/list";
+import { turnstileWidgetUpdateCommand } from "./turnstile/update";
 import { typesCommand } from "./type-generation";
 import {
+	authKeyringCommand,
 	authNamespace,
 	authTokenCommand,
 	loginCommand,
 	logoutCommand,
 	whoamiCommand,
 } from "./user/commands";
+import {
+	authActivateCommand,
+	authCreateCommand,
+	authDeactivateCommand,
+	authDeleteCommand,
+	authListCommand,
+} from "./user/profiles";
 import { noProxy, proxy } from "./utils/constants";
+import { logDidYouMean } from "./utils/did-you-mean";
 import { debugLogFilepath } from "./utils/log-file";
 import { vectorizeCreateCommand } from "./vectorize/create";
 import { vectorizeCreateMetadataIndexCommand } from "./vectorize/createMetadataIndex";
@@ -452,6 +519,7 @@ import { vectorizeQueryCommand } from "./vectorize/query";
 import { vectorizeUpsertCommand } from "./vectorize/upsert";
 import { versionsNamespace } from "./versions";
 import { versionsDeployCommand } from "./versions/deploy";
+import { normalizeDurableObjectsCodeUpdateModeArgs } from "./versions/deployment-args";
 import { deploymentsNamespace } from "./versions/deployments";
 import { deploymentsListCommand } from "./versions/deployments/list";
 import { deploymentsStatusCommand } from "./versions/deployments/status";
@@ -471,11 +539,10 @@ import { vpcServiceGetCommand } from "./vpc/get";
 import { vpcNamespace, vpcServiceNamespace } from "./vpc/index";
 import { vpcServiceListCommand } from "./vpc/list";
 import { vpcServiceUpdateCommand } from "./vpc/update";
-import { websearchNamespace } from "./websearch/index";
-import { websearchSearchCommand } from "./websearch/search";
 import { workflowsInstanceNamespace, workflowsNamespace } from "./workflows";
 import { workflowsDeleteCommand } from "./workflows/commands/delete";
 import { workflowsDescribeCommand } from "./workflows/commands/describe";
+import { workflowsInstancesDeleteCommand } from "./workflows/commands/instances/delete";
 import { workflowsInstancesDescribeCommand } from "./workflows/commands/instances/describe";
 import { workflowsInstancesListCommand } from "./workflows/commands/instances/list";
 import { workflowsInstancesPauseCommand } from "./workflows/commands/instances/pause";
@@ -498,6 +565,22 @@ if (proxy) {
 	logger.warn(
 		`Proxy environment variables detected. We'll use your proxy for fetch requests.`
 	);
+}
+
+function redactEventCode(argv: string[]): string[] {
+	return argv.map((arg, index) => {
+		const previousArg = argv[index - 1];
+		if (previousArg === "--event-code" || previousArg === "--eventCode") {
+			return "<redacted>";
+		}
+		if (arg.startsWith("--event-code=")) {
+			return "--event-code=<redacted>";
+		}
+		if (arg.startsWith("--eventCode=")) {
+			return "--eventCode=<redacted>";
+		}
+		return arg;
+	});
 }
 
 export function createCLIParser(argv: string[]) {
@@ -549,14 +632,21 @@ export function createCLIParser(argv: string[]) {
 		},
 		"install-skills": {
 			describe:
-				"Install Cloudflare agents skills, if not already present, without asking the user for confirmation",
+				"Install Cloudflare skills for detected AI coding agents before running the command",
 			type: "boolean",
 			default: false,
+		},
+		profile: {
+			describe: "Use a specific auth profile",
+			type: "string",
+			requiresArg: true,
 		},
 	} as const;
 	// Type check result against CommonYargsOptions to make sure we've included
 	// all common options
-	const wrangler: CommonYargsArgv = makeCLI(argv)
+	const wrangler: CommonYargsArgv = makeCLI(
+		normalizeDurableObjectsCodeUpdateModeArgs(argv)
+	)
 		.strict()
 		// We handle errors ourselves in a try-catch around `yargs.parse`.
 		// If you want the "help info" to be displayed then throw an instance of `CommandLineArgsError`.
@@ -610,7 +700,7 @@ export function createCLIParser(argv: string[]) {
 				type: "wrangler-session",
 				version: 1,
 				wrangler_version: wranglerVersion,
-				command_line_args: argv,
+				command_line_args: redactEventCode(argv),
 				log_file_path: debugLogFilepath,
 			});
 
@@ -629,7 +719,16 @@ export function createCLIParser(argv: string[]) {
 		"Examples:": `${chalk.bold("EXAMPLES")}`,
 	});
 	wrangler.group(
-		["config", "cwd", "env", "env-file", "help", "install-skills", "version"],
+		[
+			"config",
+			"cwd",
+			"env",
+			"env-file",
+			"help",
+			"install-skills",
+			"profile",
+			"version",
+		],
 		`${chalk.bold("GLOBAL FLAGS")}`
 	);
 
@@ -832,14 +931,6 @@ export function createCLIParser(argv: string[]) {
 	registry.define([
 		{ command: "wrangler preview", definition: previewCommand },
 		{ command: "wrangler preview delete", definition: previewDeleteCommand },
-		{
-			command: "wrangler preview settings",
-			definition: previewSettingsCommand,
-		},
-		{
-			command: "wrangler preview settings update",
-			definition: previewSettingsUpdateCommand,
-		},
 		{ command: "wrangler preview secret", definition: previewSecretNamespace },
 		{
 			command: "wrangler preview secret put",
@@ -856,6 +947,30 @@ export function createCLIParser(argv: string[]) {
 		{
 			command: "wrangler preview secret bulk",
 			definition: previewSecretBulkCommand,
+		},
+		{
+			command: "wrangler preview base-config",
+			definition: previewBaseConfigNamespace,
+		},
+		{
+			command: "wrangler preview base-config secret",
+			definition: previewBaseConfigSecretNamespace,
+		},
+		{
+			command: "wrangler preview base-config secret put",
+			definition: previewBaseConfigSecretPutCommand,
+		},
+		{
+			command: "wrangler preview base-config secret delete",
+			definition: previewBaseConfigSecretDeleteCommand,
+		},
+		{
+			command: "wrangler preview base-config secret list",
+			definition: previewBaseConfigSecretListCommand,
+		},
+		{
+			command: "wrangler preview base-config secret bulk",
+			definition: previewBaseConfigSecretBulkCommand,
 		},
 	]);
 	registry.registerNamespace("preview");
@@ -1485,11 +1600,174 @@ export function createCLIParser(argv: string[]) {
 		{ command: "wrangler hyperdrive get", definition: hyperdriveGetCommand },
 		{ command: "wrangler hyperdrive list", definition: hyperdriveListCommand },
 		{
+			command: "wrangler hyperdrive planetscale",
+			definition: hyperdrivePlanetscaleNamespace,
+		},
+		{
+			command: "wrangler hyperdrive planetscale signature",
+			definition: hyperdrivePlanetscaleSignatureCommand,
+		},
+		{
 			command: "wrangler hyperdrive update",
 			definition: hyperdriveUpdateCommand,
 		},
 	]);
 	registry.registerNamespace("hyperdrive");
+
+	// flagship
+	registry.define([
+		{ command: "wrangler flagship", definition: flagshipNamespace },
+		{ command: "wrangler flagship apps", definition: flagshipAppsNamespace },
+		{
+			command: "wrangler flagship apps create",
+			definition: flagshipAppsCreateCommand,
+		},
+		{
+			command: "wrangler flagship apps list",
+			definition: flagshipAppsListCommand,
+		},
+		{ command: "wrangler flagship apps ls", definition: flagshipAppsListAlias },
+		{
+			command: "wrangler flagship apps get",
+			definition: flagshipAppsGetCommand,
+		},
+		{
+			command: "wrangler flagship apps update",
+			definition: flagshipAppsUpdateCommand,
+		},
+		{
+			command: "wrangler flagship apps delete",
+			definition: flagshipAppsDeleteCommand,
+		},
+		{
+			command: "wrangler flagship apps rm",
+			definition: flagshipAppsDeleteAlias,
+		},
+		{ command: "wrangler flagship flags", definition: flagshipFlagsNamespace },
+		{
+			command: "wrangler flagship flags create",
+			definition: flagshipFlagsCreateCommand,
+		},
+		{
+			command: "wrangler flagship flags list",
+			definition: flagshipFlagsListCommand,
+		},
+		{
+			command: "wrangler flagship flags ls",
+			definition: flagshipFlagsListAlias,
+		},
+		{
+			command: "wrangler flagship flags get",
+			definition: flagshipFlagsGetCommand,
+		},
+		{
+			command: "wrangler flagship flags pull",
+			definition: flagshipFlagsPullCommand,
+		},
+		{
+			command: "wrangler flagship flags inspect",
+			definition: flagshipFlagsGetAlias,
+		},
+		{
+			command: "wrangler flagship flags update",
+			definition: flagshipFlagsUpdateCommand,
+		},
+		{
+			command: "wrangler flagship flags set",
+			definition: flagshipFlagsSetCommand,
+		},
+		{
+			command: "wrangler flagship flags rules",
+			definition: flagshipFlagsRulesNamespace,
+		},
+		{
+			command: "wrangler flagship flags rules list",
+			definition: flagshipFlagsRulesListCommand,
+		},
+		{
+			command: "wrangler flagship flags rules update",
+			definition: flagshipFlagsRulesUpdateCommand,
+		},
+		{
+			command: "wrangler flagship flags rules delete",
+			definition: flagshipFlagsRulesDeleteCommand,
+		},
+		{
+			command: "wrangler flagship flags rules reorder",
+			definition: flagshipFlagsRulesReorderCommand,
+		},
+		{
+			command: "wrangler flagship flags split",
+			definition: flagshipFlagsSplitCommand,
+		},
+		{
+			command: "wrangler flagship flags rollout",
+			definition: flagshipFlagsRolloutCommand,
+		},
+		{
+			command: "wrangler flagship flags enable",
+			definition: flagshipFlagsEnableCommand,
+		},
+		{
+			command: "wrangler flagship flags disable",
+			definition: flagshipFlagsDisableCommand,
+		},
+		{
+			command: "wrangler flagship flags evaluate",
+			definition: flagshipFlagsEvaluateCommand,
+		},
+		{
+			command: "wrangler flagship flags eval",
+			definition: flagshipFlagsEvaluateAlias,
+		},
+		{
+			command: "wrangler flagship flags delete",
+			definition: flagshipFlagsDeleteCommand,
+		},
+		{
+			command: "wrangler flagship flags rm",
+			definition: flagshipFlagsDeleteAlias,
+		},
+		{
+			command: "wrangler flagship flags changelog",
+			definition: flagshipFlagsChangelogCommand,
+		},
+		{
+			command: "wrangler flagship flags history",
+			definition: flagshipFlagsChangelogAlias,
+		},
+	]);
+	registry.registerNamespace("flagship");
+
+	// turnstile
+	registry.define([
+		{ command: "wrangler turnstile", definition: turnstileNamespace },
+		{
+			command: "wrangler turnstile widget",
+			definition: turnstileWidgetNamespace,
+		},
+		{
+			command: "wrangler turnstile widget create",
+			definition: turnstileWidgetCreateCommand,
+		},
+		{
+			command: "wrangler turnstile widget delete",
+			definition: turnstileWidgetDeleteCommand,
+		},
+		{
+			command: "wrangler turnstile widget get",
+			definition: turnstileWidgetGetCommand,
+		},
+		{
+			command: "wrangler turnstile widget list",
+			definition: turnstileWidgetListCommand,
+		},
+		{
+			command: "wrangler turnstile widget update",
+			definition: turnstileWidgetUpdateCommand,
+		},
+	]);
+	registry.registerNamespace("turnstile");
 
 	// tunnel
 	registry.define([
@@ -1560,18 +1838,32 @@ export function createCLIParser(argv: string[]) {
 			command: "wrangler ai-search namespace delete",
 			definition: aiSearchNamespaceDeleteCommand,
 		},
-	]);
-	registry.registerNamespace("ai-search");
-
-	// websearch
-	registry.define([
-		{ command: "wrangler websearch", definition: websearchNamespace },
 		{
-			command: "wrangler websearch search",
-			definition: websearchSearchCommand,
+			command: "wrangler ai-search jobs",
+			definition: aiSearchJobsNamespace,
+		},
+		{
+			command: "wrangler ai-search jobs list",
+			definition: aiSearchJobsListCommand,
+		},
+		{
+			command: "wrangler ai-search jobs create",
+			definition: aiSearchJobsCreateCommand,
+		},
+		{
+			command: "wrangler ai-search jobs get",
+			definition: aiSearchJobsGetCommand,
+		},
+		{
+			command: "wrangler ai-search jobs cancel",
+			definition: aiSearchJobsCancelCommand,
+		},
+		{
+			command: "wrangler ai-search jobs logs",
+			definition: aiSearchJobsLogsCommand,
 		},
 	]);
-	registry.registerNamespace("websearch");
+	registry.registerNamespace("ai-search");
 
 	// cert - includes mtls-certificates and CA cert management
 	registry.define([
@@ -2020,6 +2312,10 @@ export function createCLIParser(argv: string[]) {
 			command: "wrangler workflows instances resume",
 			definition: workflowsInstancesResumeCommand,
 		},
+		{
+			command: "wrangler workflows instances delete",
+			definition: workflowsInstancesDeleteCommand,
+		},
 	]);
 	registry.registerNamespace("workflows");
 
@@ -2280,6 +2576,30 @@ export function createCLIParser(argv: string[]) {
 			command: "wrangler auth token",
 			definition: authTokenCommand,
 		},
+		{
+			command: "wrangler auth keyring",
+			definition: authKeyringCommand,
+		},
+		{
+			command: "wrangler auth create",
+			definition: authCreateCommand,
+		},
+		{
+			command: "wrangler auth delete",
+			definition: authDeleteCommand,
+		},
+		{
+			command: "wrangler auth activate",
+			definition: authActivateCommand,
+		},
+		{
+			command: "wrangler auth deactivate",
+			definition: authDeactivateCommand,
+		},
+		{
+			command: "wrangler auth list",
+			definition: authListCommand,
+		},
 	]);
 	registry.registerNamespace("auth");
 
@@ -2357,13 +2677,16 @@ export async function main(argv: string[]): Promise<void> {
 		return;
 	}
 
-	// Check for unknown command with a `--help` flag
+	// Check for unknown command with a `--help` flag.
+	// This throw happens before the try-catch that calls handleError(), so
+	// we log the error and suggestion here (handleError is never reached).
 	const [subCommand] = nonFlagArgs;
 	if (hasHelpFlag && subCommand) {
 		const knownCommands = registry.topLevelCommands;
 		if (!knownCommands.has(subCommand)) {
 			logger.info("");
 			logger.error(`Unknown argument: ${subCommand}`);
+			logDidYouMean(subCommand, knownCommands, "wrangler");
 			await showHelpWithCategories();
 			throw new CommandLineArgsError(`Unknown argument: ${subCommand}`, {
 				telemetryMessage: "cli help unknown argument",
@@ -2419,7 +2742,24 @@ export async function main(argv: string[]): Promise<void> {
 			if (dispatcher) {
 				dispatchGenericCommandErrorEvent(dispatcher, startTime, e);
 			}
-			await handleError(e, configArgs, argv);
+			try {
+				await handleError(e, configArgs, argv, (path) =>
+					path.length === 0
+						? registry.topLevelCommands
+						: registry.getSubcommands(path)
+				);
+			} catch (handleErrorErr) {
+				// handleError itself threw before it could log the error.
+				// Fall back to raw stderr so the user always sees something.
+				const message = e instanceof Error ? (e.stack ?? e.message) : String(e);
+				const handlerMessage =
+					handleErrorErr instanceof Error
+						? (handleErrorErr.stack ?? handleErrorErr.message)
+						: String(handleErrorErr);
+				process.stderr.write(
+					`\n${message}${handlerMessage ? `\n\n(error handler also failed: ${handlerMessage})` : ""}\n`
+				);
+			}
 			throw e;
 		}
 	} finally {

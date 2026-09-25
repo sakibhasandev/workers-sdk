@@ -8,7 +8,13 @@ import { mockConfirm } from "./helpers/mock-dialogs";
 import { useMockIsTTY } from "./helpers/mock-istty";
 import { msw } from "./helpers/msw";
 import { runWrangler } from "./helpers/run-wrangler";
-import type { Pipeline, SchemaField, Sink, Stream } from "../pipelines/types";
+import type {
+	Pipeline,
+	SchemaField,
+	Sink,
+	SinkFormat,
+	Stream,
+} from "../pipelines/types";
 import type { ExpectStatic } from "vitest";
 
 describe("wrangler pipelines", () => {
@@ -581,13 +587,57 @@ describe("wrangler pipelines", () => {
 				"
 				 ⛅️ wrangler x.x.x
 				──────────────────
-				┌─┬─┬─┬─┐
-				│ Name │ ID │ Created │ Modified │
-				├─┼─┼─┼─┤
-				│ pipeline_one │ pipeline_1 │ 1/1/2024 │ 1/1/2024 │
-				├─┼─┼─┼─┤
-				│ pipeline_two │ pipeline_2 │ 1/2/2024 │ 1/2/2024 │
-				└─┴─┴─┴─┘"
+				┌─┬─┬─┬─┬─┐
+				│ Name │ ID │ Created │ Modified │ Status │
+				├─┼─┼─┼─┼─┤
+				│ pipeline_one │ pipeline_1 │ 1/1/2024 │ 1/1/2024 │ active │
+				├─┼─┼─┼─┼─┤
+				│ pipeline_two │ pipeline_2 │ 1/2/2024 │ 1/2/2024 │ active │
+				└─┴─┴─┴─┴─┘"
+			`);
+		});
+
+		it("should surface failed pipelines in the list", async ({ expect }) => {
+			const mockPipelines: Pipeline[] = [
+				{
+					id: "pipeline_1",
+					name: "healthy_pipeline",
+					sql: "INSERT INTO sink1 SELECT * FROM stream1;",
+					status: "running",
+					created_at: "2024-01-01T00:00:00Z",
+					modified_at: "2024-01-01T00:00:00Z",
+				},
+				{
+					id: "pipeline_2",
+					name: "broken_pipeline",
+					sql: "INSERT INTO sink2 SELECT * FROM stream2;",
+					status: "failed",
+					failure_reason: "Sink bucket 'my-bucket' does not exist",
+					created_at: "2024-01-02T00:00:00Z",
+					modified_at: "2024-01-02T00:00:00Z",
+				},
+			];
+
+			mockListPipelinesRequest(expect, mockPipelines);
+
+			await runWrangler("pipelines list");
+
+			expect(std.err).toMatchInlineSnapshot(`""`);
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				┌─┬─┬─┬─┬─┐
+				│ Name │ ID │ Created │ Modified │ Status │
+				├─┼─┼─┼─┼─┤
+				│ healthy_pipeline │ pipeline_1 │ 1/1/2024 │ 1/1/2024 │ running │
+				├─┼─┼─┼─┼─┤
+				│ broken_pipeline │ pipeline_2 │ 1/2/2024 │ 1/2/2024 │ failed │
+				└─┴─┴─┴─┴─┘
+
+				1 pipeline is in a failed state. Run 'wrangler pipelines get <pipeline>' for details:
+				  X broken_pipeline: Sink bucket 'my-bucket' does not exist
+				"
 			`);
 		});
 
@@ -680,13 +730,13 @@ describe("wrangler pipelines", () => {
 				"
 				 ⛅️ wrangler x.x.x
 				──────────────────
-				┌─┬─┬─┬─┬─┐
-				│ Name │ ID │ Created │ Modified │ Type │
-				├─┼─┼─┼─┼─┤
-				│ new_pipeline │ pipeline_1 │ 1/1/2024 │ 1/1/2024 │ │
-				├─┼─┼─┼─┼─┤
-				│ legacy_pipeline │ legacy_123 │ N/A │ N/A │ Legacy │
-				└─┴─┴─┴─┴─┘"
+				┌─┬─┬─┬─┬─┬─┐
+				│ Name │ ID │ Created │ Modified │ Status │ Type │
+				├─┼─┼─┼─┼─┼─┤
+				│ new_pipeline │ pipeline_1 │ 1/1/2024 │ 1/1/2024 │ active │ │
+				├─┼─┼─┼─┼─┼─┤
+				│ legacy_pipeline │ legacy_123 │ N/A │ N/A │ N/A │ Legacy │
+				└─┴─┴─┴─┴─┴─┘"
 			`);
 		});
 
@@ -788,6 +838,7 @@ describe("wrangler pipelines", () => {
 				General:
 				  ID:           pipeline_123
 				  Name:         my_pipeline
+				  Status:       active
 				  Created At:   1/1/2024, 12:00:00 AM
 				  Modified At:  1/1/2024, 12:00:00 AM
 
@@ -807,6 +858,48 @@ describe("wrangler pipelines", () => {
 				├─┼─┤
 				│ test_sink │ sink_789 │
 				└─┴─┘"
+			`);
+		});
+
+		it("highlights failure reason for a failed pipeline", async ({
+			expect,
+		}) => {
+			const mockPipeline: Pipeline = {
+				id: "pipeline_123",
+				name: "my_pipeline",
+				sql: "INSERT INTO test_sink SELECT * FROM test_stream;",
+				status: "failed",
+				failure_reason:
+					"Schema validation failed: column 'id' expected int64 but got string",
+				created_at: "2024-01-01T00:00:00Z",
+				modified_at: "2024-01-01T00:00:00Z",
+			};
+
+			const getRequest = mockGetPipelineRequest("pipeline_123", mockPipeline);
+
+			await runWrangler("pipelines get pipeline_123");
+
+			expect(getRequest.count).toBe(1);
+			expect(std.err).toMatchInlineSnapshot(`""`);
+			expect(std.out).toMatchInlineSnapshot(`
+				"
+				 ⛅️ wrangler x.x.x
+				──────────────────
+				General:
+				  ID:           pipeline_123
+				  Name:         my_pipeline
+				  Status:       failed
+				  Created At:   1/1/2024, 12:00:00 AM
+				  Modified At:  1/1/2024, 12:00:00 AM
+
+				X This pipeline is in a failed state.
+				  Reason: Schema validation failed: column 'id' expected int64 but got string
+
+				Pipeline SQL:
+				INSERT INTO test_sink SELECT * FROM test_stream;
+
+				Connected Streams: None
+				Connected Sinks: None"
 			`);
 		});
 
@@ -2007,6 +2100,7 @@ describe("wrangler pipelines", () => {
 			expectedRequest: {
 				name: string;
 				type: string;
+				format: SinkFormat;
 				isDataCatalog?: boolean;
 			}
 		) {
@@ -2019,10 +2113,12 @@ describe("wrangler pipelines", () => {
 						const body = (await request.json()) as {
 							name: string;
 							type: string;
+							format?: SinkFormat;
 							config?: Record<string, unknown>;
 						};
 						expect(body.name).toBe(expectedRequest.name);
 						expect(body.type).toBe(expectedRequest.type);
+						expect(body.format).toEqual(expectedRequest.format);
 
 						const config = expectedRequest.isDataCatalog
 							? {
@@ -2047,7 +2143,7 @@ describe("wrangler pipelines", () => {
 								id: "sink_123",
 								name: expectedRequest.name,
 								type: expectedRequest.type,
-								format: { type: "json" },
+								format: body.format ?? expectedRequest.format,
 								schema: null,
 								config,
 								created_at: "2024-01-01T00:00:00Z",
@@ -2097,6 +2193,7 @@ describe("wrangler pipelines", () => {
 			const createRequest = mockCreateSinkRequest(expect, {
 				name: "my_sink",
 				type: "r2",
+				format: { type: "parquet", compression: "zstd" },
 			});
 
 			await runWrangler(
@@ -2126,14 +2223,87 @@ describe("wrangler pipelines", () => {
 				  Time Interval:  300s
 
 				Format:
-				  Type:  json"
+				  Type:                   parquet
+				  Compression:            zstd
+				  Target Row Group Size:  1024MB"
 			`);
+		});
+
+		it("should create R2 JSON sink with gzip compression", async ({
+			expect,
+		}) => {
+			const createRequest = mockCreateSinkRequest(expect, {
+				name: "my_sink",
+				type: "r2",
+				format: { type: "json", compression: "gzip" },
+			});
+
+			await runWrangler(
+				"pipelines sinks create my_sink --type r2 --bucket my-bucket --format json --compression gzip --access-key-id mykey --secret-access-key mysecret"
+			);
+
+			expect(createRequest.count).toBe(1);
+			expect(std.err).toMatchInlineSnapshot(`""`);
+			expect(std.out).toContain("Compression:  gzip");
+		});
+
+		it("should create uncompressed JSON sink when compression is omitted", async ({
+			expect,
+		}) => {
+			const createRequest = mockCreateSinkRequest(expect, {
+				name: "my_sink",
+				type: "r2",
+				format: { type: "json" },
+			});
+
+			await runWrangler(
+				"pipelines sinks create my_sink --type r2 --bucket my-bucket --format json --access-key-id mykey --secret-access-key mysecret"
+			);
+
+			expect(createRequest.count).toBe(1);
+		});
+
+		it("should create JSON sink with explicit uncompressed output", async ({
+			expect,
+		}) => {
+			const createRequest = mockCreateSinkRequest(expect, {
+				name: "my_sink",
+				type: "r2",
+				format: { type: "json", compression: "uncompressed" },
+			});
+
+			await runWrangler(
+				"pipelines sinks create my_sink --type r2 --bucket my-bucket --format json --compression uncompressed --access-key-id mykey --secret-access-key mysecret"
+			);
+
+			expect(createRequest.count).toBe(1);
+		});
+
+		it("should reject unsupported JSON compression", async ({ expect }) => {
+			await expect(
+				runWrangler(
+					"pipelines sinks create my_sink --type r2 --bucket my-bucket --format json --compression zstd"
+				)
+			).rejects.toThrowErrorMatchingInlineSnapshot(
+				`[Error: JSON sinks only support 'uncompressed' or 'gzip' compression]`
+			);
+		});
+
+		it("should reject row group size for JSON sinks", async ({ expect }) => {
+			await expect(
+				runWrangler(
+					"pipelines sinks create my_sink --type r2 --bucket my-bucket --format json --target-row-group-size 10MB"
+				)
+			).rejects.toThrowErrorMatchingInlineSnapshot(
+				`[Error: --target-row-group-size is only supported for Parquet sinks]`
+			);
 		});
 
 		it("should create R2 Data Catalog sink", async ({ expect }) => {
 			const createRequest = mockCreateSinkRequest(expect, {
 				name: "my_sink",
 				type: "r2_data_catalog",
+				format: { type: "parquet", compression: "zstd" },
 				isDataCatalog: true,
 			});
 
@@ -2163,7 +2333,9 @@ describe("wrangler pipelines", () => {
 				  Time Interval:  300s
 
 				Format:
-				  Type:  json"
+				  Type:                   parquet
+				  Compression:            zstd
+				  Target Row Group Size:  1024MB"
 			`);
 		});
 
@@ -2197,6 +2369,7 @@ describe("wrangler pipelines", () => {
 			const createRequest = mockCreateSinkRequest(expect, {
 				name: "my_sink",
 				type: "r2",
+				format: { type: "parquet", compression: "zstd" },
 			});
 
 			await runWrangler(

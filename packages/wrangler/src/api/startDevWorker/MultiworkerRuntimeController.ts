@@ -1,15 +1,12 @@
 import assert from "node:assert";
 import { randomUUID } from "node:crypto";
-import { prepareContainerImagesForDev } from "@cloudflare/containers-shared";
-import { getDockerPath } from "@cloudflare/workers-utils";
 import chalk from "chalk";
-import { Miniflare, Mutex } from "miniflare";
+import { convertV4MiniflareOptions, Miniflare, Mutex } from "miniflare";
 import * as MF from "../../dev/miniflare";
 import { logger } from "../../logger";
 import { castErrorCause } from "./events";
 import {
 	convertToConfigBundle,
-	getContainerDevOptions,
 	getUserWorkerInnerUrlOverrides,
 	LocalRuntimeController,
 } from "./LocalRuntimeController";
@@ -17,6 +14,7 @@ import type { RemoteProxySession } from "../remoteBindings";
 import type { ControllerBus } from "./BaseController";
 import type { BundleCompleteEvent } from "./events";
 import type { Binding } from "./index";
+import type { ContainerImagePreparationState } from "./LocalRuntimeController";
 
 // Ensure DO references from other workers have the same SQL setting as the DO definition in it's original Worker
 function ensureMatchingSql(options: MF.Options) {
@@ -79,6 +77,10 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 	#mutex = new Mutex();
 	#mf?: Miniflare;
 
+	override get mf(): Miniflare | undefined {
+		return this.#mf;
+	}
+
 	#options = new Map<string, { options: MF.Options; primary: boolean }>();
 
 	#remoteProxySessionsData = new Map<
@@ -89,9 +91,10 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 		} | null
 	>();
 
-	// If this doesn't match what is in config, trigger a rebuild.
-	// Used for the rebuild hotkey
-	#currentContainerBuildId: string | undefined;
+	#containerImagePreparationState = new Map<
+		string,
+		ContainerImagePreparationState
+	>();
 
 	#canStartMiniflare() {
 		return (
@@ -106,17 +109,20 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 
 		const secondary = [...this.#options.values()].filter((o) => !o.primary);
 
+		// `containerEngine` is a top-level (shared) Miniflare option, but the
+		// merged options only spread the primary worker's top-level options.
+		// `containerEngine` is only set if containers are present in a specific worker,
+		// so we need to check all workers for containers
+		const containerEngine = [...this.#options.values()]
+			.map((o) => o.options.containerEngine)
+			.find((engine) => engine !== undefined);
+
 		return {
 			...primary.options,
+			containerEngine,
 			workers: [
 				...primary.options.workers,
-				...secondary.flatMap((o) =>
-					o.options.workers.map((w) => {
-						// TODO: investigate why ratelimits causes everything to crash
-						delete w.ratelimits;
-						return w;
-					})
-				),
+				...secondary.flatMap((o) => o.options.workers),
 			],
 		};
 	}
@@ -165,47 +171,17 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 				return;
 			}
 
-			if (
-				data.config.containers?.length &&
-				this.#currentContainerBuildId !== data.config.dev.containerBuildId
-			) {
-				logger.log(chalk.dim("⎔ Preparing container image(s)..."));
-				// Assemble container options and build if necessary
-				assert(
-					data.config.dev.containerBuildId,
-					"Build ID should be set if containers are enabled and defined"
+			const containerImagePreparationState = await this.prepareContainerImages(
+				data,
+				this.#containerImagePreparationState.get(workerName)
+			);
+			if (containerImagePreparationState === undefined) {
+				this.#containerImagePreparationState.delete(workerName);
+			} else {
+				this.#containerImagePreparationState.set(
+					workerName,
+					containerImagePreparationState
 				);
-				const containerOptions = await getContainerDevOptions(
-					data.config.containers,
-					data.config.dev.containerBuildId
-				);
-				this.dockerPath = data.config.dev?.dockerPath ?? getDockerPath();
-				// keep track of them so we can clean up later
-				for (const container of containerOptions ?? []) {
-					this.containerImageTagsSeen.add(container.image_tag);
-				}
-				await prepareContainerImagesForDev({
-					dockerPath: this.dockerPath,
-					containerOptions,
-					onContainerImagePreparationStart: (buildStartEvent) => {
-						this.containerBeingBuilt = {
-							...buildStartEvent,
-							abortRequested: false,
-						};
-					},
-					onContainerImagePreparationEnd: () => {
-						this.containerBeingBuilt = undefined;
-					},
-					logger: logger,
-				});
-				if (this.containerBeingBuilt) {
-					this.containerBeingBuilt.abortRequested = false;
-				}
-
-				this.#currentContainerBuildId = data.config.dev.containerBuildId;
-				// Miniflare will have logged 'Ready on...' before the containers are built, but that is actually the proxy server :/
-				// The actual user worker's miniflare instance is blocked until the containers are built
-				logger.log(chalk.dim("⎔ Container image(s) ready"));
 			}
 
 			// Bail out if a newer bundle for this worker arrived while we
@@ -227,6 +203,12 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 					});
 				}
 			);
+
+			// `handleUncaughtError` is a shared Miniflare option, and the
+			// merged options spread the primary worker's shared options —
+			// install the hook on every worker's options rather than assuming
+			// which one is primary.
+			options.handleUncaughtError = this.dispatchRuntimeError;
 
 			this.#options.set(data.config.name, {
 				options,
@@ -254,14 +236,15 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 				}
 
 				const mergedMfOptions = ensureMatchingSql(this.#mergedMfOptions());
+				const miniflareOptions = convertV4MiniflareOptions(mergedMfOptions);
 
 				if (this.#mf === undefined) {
 					logger.log(chalk.dim("⎔ Starting local server..."));
-					this.#mf = new Miniflare(mergedMfOptions);
+					this.#mf = new Miniflare(miniflareOptions);
 				} else {
 					logger.log(chalk.dim("⎔ Reloading local server..."));
 
-					await this.#mf.setOptions(mergedMfOptions);
+					await this.#mf.setOptions(miniflareOptions);
 
 					logger.log(chalk.dim("⎔ Local server updated and ready"));
 				}
@@ -271,7 +254,10 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 				// `inspectorUrl` for this set of `options`, we protect `#mf` with a mutex,
 				// so only one update can happen at a time.
 				const userWorkerUrl = await this.#mf.ready;
-				const userWorkerInspectorUrl = await this.#mf.getInspectorURL();
+				const userWorkerInspectorUrl =
+					data.config.dev.inspector !== false
+						? await this.#mf.getInspectorURL()
+						: null;
 				// If we received a new `bundleComplete` event for *any* worker
 				// before we were able to dispatch a `reloadComplete`, ignore
 				// this bundle — the later handler will apply the full config.
@@ -289,12 +275,14 @@ export class MultiworkerRuntimeController extends LocalRuntimeController {
 							hostname: userWorkerUrl.hostname,
 							port: userWorkerUrl.port,
 						},
-						userWorkerInspectorUrl: {
-							protocol: userWorkerInspectorUrl.protocol,
-							hostname: userWorkerInspectorUrl.hostname,
-							port: userWorkerInspectorUrl.port,
-							pathname: `/core:user:${data.config.name}`,
-						},
+						userWorkerInspectorUrl: userWorkerInspectorUrl
+							? {
+									protocol: userWorkerInspectorUrl.protocol,
+									hostname: userWorkerInspectorUrl.hostname,
+									port: userWorkerInspectorUrl.port,
+									pathname: `/core:user:${data.config.name}`,
+								}
+							: undefined,
 						userWorkerInnerUrlOverrides: getUserWorkerInnerUrlOverrides(
 							data.config
 						),

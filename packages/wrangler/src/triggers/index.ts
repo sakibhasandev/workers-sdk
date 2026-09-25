@@ -1,9 +1,11 @@
 import { triggersDeploy } from "@cloudflare/deploy-helpers";
 import { createCommand, createNamespace } from "../core/create-command";
 import { resolveTriggersInput } from "../deployment-bundle/resolve-config-args";
-import { logger } from "../logger";
+import {
+	routeZoneArgs,
+	validateRouteZoneArgs,
+} from "../deployment-bundle/route-zone-args";
 import * as metrics from "../metrics";
-import { ensureQueuesExistByConfig } from "../queues/client";
 import { requireAuth } from "../user";
 
 export const triggersNamespace = createNamespace({
@@ -41,14 +43,11 @@ export const triggersDeployCommand = createCommand({
 			requiresArg: true,
 			array: true,
 		},
+		...routeZoneArgs,
 		"dry-run": {
 			describe: "Don't actually deploy",
 			type: "boolean",
-		},
-		"legacy-env": {
-			type: "boolean",
-			describe: "Use legacy environments",
-			hidden: true,
+			default: false,
 		},
 		"experimental-deploy-helpers": {
 			describe: "Experimental: Gates refactored deploy/upload path",
@@ -59,32 +58,28 @@ export const triggersDeployCommand = createCommand({
 		},
 	},
 	behaviour: {
+		supportTemporary: true,
+		useConfigRedirectIfAvailable: true,
 		warnIfMultipleEnvsConfiguredButNoneSpecified: true,
+		suggestSkillsAfterHandler: true,
 	},
-	async handler(args, { config, ...ctx }) {
+	validateArgs(args) {
+		validateRouteZoneArgs(args);
+	},
+	async handler(args, { config }) {
 		metrics.sendMetricsEvent("deploy worker triggers", {
 			sendMetrics: config.send_metrics,
 		});
 		const props = resolveTriggersInput(args, config);
+		const accountId = args.dryRun ? undefined : await requireAuth(config);
 
-		if (args.dryRun) {
-			logger.log(`--dry-run: exiting now.`);
-			return;
-		}
-
-		// Any validation that requires auth goes below
-		const accountId = await requireAuth(config);
-		await ensureQueuesExistByConfig(config);
-
-		await triggersDeploy(
-			{
-				config,
-				accountId,
-				env: args.env,
-				firstDeploy: false,
-				...props,
-			},
-			ctx
-		);
+		await triggersDeploy({
+			config,
+			accountId,
+			firstDeploy: false,
+			dryRun: args.dryRun,
+			validated: false,
+			...props,
+		});
 	},
 });

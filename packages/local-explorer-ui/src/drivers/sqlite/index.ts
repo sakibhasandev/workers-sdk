@@ -20,6 +20,7 @@ import type {
 	StudioTableSchemaChange,
 } from "../../types/studio";
 import type { Icon } from "@phosphor-icons/react";
+import type { JSX } from "react";
 
 /**
  * Represents a row from SQLite's `sqlite_master` system table.
@@ -284,13 +285,11 @@ export class StudioSQLiteDriver extends StudioDriverCommon {
 			type: string;
 		}>;
 
-		const columns = rows.map(
-			(row): StudioTableColumn => ({
-				name: row.name,
-				pk: !!row.pk,
-				type: row.type,
-			})
-		);
+		const columns = rows.map((row): StudioTableColumn => ({
+			name: row.name,
+			pk: !!row.pk,
+			type: row.type,
+		}));
 
 		return {
 			autoIncrement: false,
@@ -435,14 +434,13 @@ export class StudioSQLiteDriver extends StudioDriverCommon {
 		// without bindings (no need to provide real values).
 		const sanitizedTokens = tokenizeSQL(sql.trim(), "sqlite")
 			.filter((t) => t.type !== "COMMENT")
-			.map(
-				(t): StudioSQLToken =>
-					t.value === "?"
-						? {
-								type: "STRING",
-								value: `''`,
-							}
-						: t
+			.map((t): StudioSQLToken =>
+				t.value === "?"
+					? {
+							type: "STRING",
+							value: `''`,
+						}
+					: t
 			);
 
 		const normalizedSql = sanitizedTokens.map((t) => t.value).join("");

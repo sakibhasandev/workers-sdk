@@ -55,6 +55,12 @@ export interface AiSearchCustomMetadata {
 	field_name: string;
 }
 
+/**
+ * How a web-crawler source discovers URLs. `sitemap` reads XML sitemaps;
+ * `discover` follows links recursively.
+ */
+export type AiSearchParseType = "sitemap" | "discover";
+
 export interface AiSearchPublicEndpointParams {
 	authorized_hosts?: string[];
 	chat_completions_endpoint?: { disabled?: boolean };
@@ -76,7 +82,7 @@ export interface AiSearchSourceParams {
 			specific_sitemaps?: string[];
 			use_browser_rendering?: boolean;
 		};
-		parse_type?: string;
+		parse_type?: AiSearchParseType;
 		store_options?: {
 			storage_id?: string;
 			r2_jurisdiction?: string;
@@ -156,10 +162,60 @@ export interface AiSearchMessage {
 }
 
 /**
+ * Per-request retrieval overrides for an AI Search query.
+ */
+export interface AiSearchSearchRetrievalOptions {
+	filters?: Record<string, string>;
+	match_threshold?: number;
+	max_num_results?: number;
+}
+
+/**
+ * Per-request options for an AI Search query.
+ */
+export interface AiSearchSearchOptions {
+	retrieval?: AiSearchSearchRetrievalOptions;
+	reranking?: {
+		enabled: boolean;
+	};
+}
+
+/**
+ * Request body for an AI Search query.
+ */
+export interface AiSearchSearchRequest {
+	messages: AiSearchMessage[];
+	ai_search_options?: AiSearchSearchOptions;
+}
+
+/**
  * Represents an AI Search namespace.
  */
 export interface AiSearchNamespace {
 	name: string;
 	created_at: string;
 	description?: string;
+}
+
+/**
+ * Represents an AI Search indexing job.
+ */
+export interface AiSearchJob {
+	id: string;
+	source: "user" | "schedule";
+	description?: string;
+	end_reason?: string;
+	ended_at?: string;
+	last_seen_at?: string;
+	started_at?: string;
+}
+
+/**
+ * A log entry for an AI Search indexing job.
+ */
+export interface AiSearchJobLog {
+	id: number;
+	created_at: number;
+	message: string;
+	message_type: number;
 }

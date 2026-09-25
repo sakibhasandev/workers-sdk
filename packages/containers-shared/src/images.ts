@@ -1,24 +1,24 @@
-import { UserError } from "@cloudflare/workers-utils";
-import { buildImage } from "./build";
+import { UserError } from "@cloudflare/workers-utils/errors";
+import { startContainerBuild } from "./build";
 import { ExternalRegistryKind } from "./client/models/ExternalRegistryKind";
 import { getCloudflareContainerRegistry } from "./knobs";
 import { dockerLoginImageRegistry } from "./login";
 import { getCloudflareRegistryWithAccountNamespace } from "./registry";
-import {
-	checkExposedPorts,
-	cleanupDuplicateImageTags,
-	runDockerCmd,
-	verifyDockerInstalled,
-} from "./utils";
+import { runDockerCmd, verifyDockerInstalled } from "./utils";
 import type {
 	ContainerDevOptions,
 	DockerfileConfig,
 	ViteLogger,
 	WranglerLogger,
 } from "./types";
+import type { ComplianceConfig } from "@cloudflare/workers-utils/compliance";
 
 export const DEFAULT_CONTAINER_EGRESS_INTERCEPTOR_IMAGE =
 	"cloudflare/proxy-everything:3cb1195@sha256:0ef6716c52430096900b150d84a3302057d6cd2319dae7987128c85d0733e3c8";
+
+export function getEgressInterceptorPlatform(): string | undefined {
+	return process.env.MINIFLARE_CONTAINER_EGRESS_IMAGE_PLATFORM;
+}
 
 export function getEgressInterceptorImage(): string {
 	return (
@@ -31,17 +31,33 @@ export async function pullEgressInterceptorImage(
 	dockerPath: string
 ): Promise<void> {
 	const image = getEgressInterceptorImage();
-	await runDockerCmd(dockerPath, ["pull", image, "--platform", "linux/amd64"]);
+	const platform = getEgressInterceptorPlatform();
+	const args = ["pull", image];
+	if (platform !== undefined) {
+		args.push("--platform", platform);
+	}
+	await runDockerCmd(dockerPath, args);
 }
 
+/**
+ * Pulls a prebuilt image for local container development.
+ *
+ * @param dockerPath - Path to the Docker CLI executable.
+ * @param options - Container image and local development tag configuration.
+ * @param logger - Logger used for recoverable registry credential warnings.
+ * @param complianceConfig - Compliance configuration used to identify the managed registry.
+ * @returns An object with an `abort` function and a `ready` promise.
+ */
 export async function pullImage(
 	dockerPath: string,
 	options: Exclude<ContainerDevOptions, DockerfileConfig>,
-	logger: WranglerLogger | ViteLogger
-): Promise<{ abort: () => void; ready: Promise<void> }> {
+	logger: WranglerLogger | ViteLogger,
+	complianceConfig?: ComplianceConfig
+): Promise<{ abort: () => void; ready: Promise<{ aborted: boolean }> }> {
 	const domain = new URL(`http://${options.image_uri}`).hostname;
 
-	const isExternalRegistry = domain !== getCloudflareContainerRegistry();
+	const isExternalRegistry =
+		domain !== getCloudflareContainerRegistry(complianceConfig);
 	try {
 		await dockerLoginImageRegistry(dockerPath, domain);
 	} catch (e) {
@@ -71,6 +87,7 @@ export async function pullImage(
 				options.image_tag,
 			]);
 		}
+		return { aborted };
 	});
 
 	return {
@@ -87,9 +104,11 @@ export async function pullImage(
  * will be called before starting the local development server, and by a rebuild
  * hotkey during development.
  *
- * Because this runs when local dev starts, we also do some validation here,
- * such as checking if the Docker CLI is installed, and if the container images
- * expose any ports.
+ * Because this runs when local dev starts, it also checks that the Docker CLI
+ * is installed.
+ *
+ * @param args - Image preparation callbacks, Docker settings, and compliance configuration.
+ * @returns Whether image preparation was aborted before completion.
  */
 export async function prepareContainerImagesForDev(args: {
 	dockerPath: string;
@@ -102,7 +121,8 @@ export async function prepareContainerImagesForDev(args: {
 		containerOptions: ContainerDevOptions;
 	}) => void;
 	logger: WranglerLogger | ViteLogger;
-}): Promise<void> {
+	complianceConfig?: ComplianceConfig;
+}): Promise<{ aborted: boolean }> {
 	const {
 		dockerPath,
 		containerOptions,
@@ -118,11 +138,26 @@ export async function prepareContainerImagesForDev(args: {
 	}
 	await verifyDockerInstalled({
 		dockerPath,
-		numberOfContainers: containerOptions.length,
+		operation: "running dev",
+		imageNoun:
+			containerOptions.length !== 1
+				? "the configured images"
+				: "the configured image",
+		hint: "To suppress this error if you do not intend on triggering any container instances, set dev.enable_containers to false in your Wrangler config or pass --enable-containers=false.",
 	});
 	for (const options of containerOptions) {
 		if ("dockerfile" in options) {
-			const build = await buildImage(dockerPath, options);
+			const build = await startContainerBuild({
+				pathToDocker: dockerPath,
+				verifyDockerIsRunning: false,
+				build: {
+					tag: options.image_tag,
+					pathToDockerfile: options.dockerfile,
+					buildContext: options.image_build_context,
+					args: options.image_vars,
+					platform: "linux/amd64",
+				},
+			});
 			onContainerImagePreparationStart({
 				containerOptions: options,
 				abort: () => {
@@ -136,7 +171,12 @@ export async function prepareContainerImagesForDev(args: {
 				containerOptions: options,
 			});
 		} else {
-			const pull = await pullImage(dockerPath, options, args.logger);
+			const pull = await pullImage(
+				dockerPath,
+				options,
+				args.logger,
+				args.complianceConfig
+			);
 			onContainerImagePreparationStart({
 				containerOptions: options,
 				abort: () => {
@@ -144,16 +184,14 @@ export async function prepareContainerImagesForDev(args: {
 					pull.abort();
 				},
 			});
-			await pull.ready;
+			const pullResult = await pull.ready;
+			aborted ||= pullResult.aborted;
 			onContainerImagePreparationEnd({
 				containerOptions: options,
 			});
 		}
-		if (!aborted) {
-			// Clean up duplicate image tags. This is scoped to cloudflare-dev only
-			await cleanupDuplicateImageTags(dockerPath, options.image_tag);
-
-			await checkExposedPorts(dockerPath, options);
+		if (aborted) {
+			break;
 		}
 	}
 
@@ -162,17 +200,52 @@ export async function prepareContainerImagesForDev(args: {
 	if (!aborted) {
 		await pullEgressInterceptorImage(dockerPath);
 	}
+
+	return { aborted };
+}
+
+/**
+ * Determines whether an image reference belongs to the Cloudflare-managed
+ * registry, including shorthand references that omit the registry hostname.
+ *
+ * @param image - Image reference to classify.
+ * @param complianceConfig - Compliance configuration used to select the managed registry.
+ * @returns Whether the image uses the Cloudflare-managed registry.
+ */
+export function isCloudflareRegistryImage(
+	image: string,
+	complianceConfig?: ComplianceConfig
+): boolean {
+	let url: URL | undefined;
+	try {
+		url = new URL(`http://${image}`);
+	} catch {}
+
+	return (
+		url === undefined ||
+		(!url.host.match(/[:.]/) && url.hostname !== "localhost") ||
+		url.hostname === getCloudflareContainerRegistry(complianceConfig)
+	);
 }
 
 /**
  * Resolve an image name to the full unambiguous name.
  *
  * image:tag -> prepend registry.cloudflare.com/accountid/
- * registry.cloudflare.com/image:tag -> registry.cloudlfare.com/accountid/image:tag
+ * registry.cloudflare.com/image:tag -> registry.cloudflare.com/accountid/image:tag
  * registry.cloudflare.com/accountid/image:tag -> no change
  * anyother-registry.com/anything -> no change
+ *
+ * @param accountId - Cloudflare account ID that owns managed-registry images.
+ * @param image - Image reference to normalize.
+ * @param complianceConfig - Compliance configuration used to select the managed registry.
+ * @returns The normalized image reference.
  */
-export function resolveImageName(accountId: string, image: string): string {
+export function resolveImageName(
+	accountId: string,
+	image: string,
+	complianceConfig?: ComplianceConfig
+): string {
 	let url: URL | undefined;
 	try {
 		url = new URL(`http://${image}`);
@@ -185,10 +258,14 @@ export function resolveImageName(accountId: string, image: string): string {
 		(!url.host.match(/[:.]/) && url.hostname !== "localhost")
 	) {
 		// Not a valid URL so assume it is in the format image:tag and prepend the registry
-		return getCloudflareRegistryWithAccountNamespace(accountId, image);
+		return getCloudflareRegistryWithAccountNamespace(
+			accountId,
+			image,
+			complianceConfig
+		);
 	}
 
-	if (url.hostname !== getCloudflareContainerRegistry()) {
+	if (url.hostname !== getCloudflareContainerRegistry(complianceConfig)) {
 		// hostname not the managed registry, passthrough
 		return image;
 	}
@@ -217,10 +294,17 @@ export function resolveImageName(accountId: string, image: string): string {
 
 /**
  * Get type of container registry, and validate.
- * Currently we support Cloudflare managed registries and AWS ECR.
- * When using Cloudflare managed registries we expect CLOUDFLARE_CONTAINER_REGISTRY to be set
+ * We support the configured Cloudflare managed registry plus the external registries listed in
+ * `acceptedRegistries` below (currently AWS ECR, DockerHub, and Google Artifact Registry).
+ *
+ * @param domain - Registry hostname to validate.
+ * @param complianceConfig - Compliance configuration used to select the managed registry.
+ * @returns The matching registry type and credential metadata.
  */
-export const getAndValidateRegistryType = (domain: string): RegistryPattern => {
+export const getAndValidateRegistryType = (
+	domain: string,
+	complianceConfig?: ComplianceConfig
+): RegistryPattern => {
 	// TODO: use parseImageName when that gets moved to this package
 	if (domain.includes("://")) {
 		throw new Error(
@@ -251,10 +335,15 @@ export const getAndValidateRegistryType = (domain: string): RegistryPattern => {
 			secretType: "DockerHub PAT Token",
 		},
 		{
+			type: ExternalRegistryKind.GAR,
+			pattern: /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-docker\.pkg\.dev$/,
+			name: "Google Artifact Registry",
+			secretType: "Google Service Account JSON Key",
+		},
+		{
 			type: "cloudflare",
-			// Make a regex based on the env var CLOUDFLARE_CONTAINER_REGISTRY
 			pattern: new RegExp(
-				`^${getCloudflareContainerRegistry().replace(/[\\.]/g, "\\$&")}$`
+				`^${getCloudflareContainerRegistry(complianceConfig).replace(/[\\.]/g, "\\$&")}$`
 			),
 			name: "Cloudflare Containers Managed Registry",
 		},
@@ -283,4 +372,137 @@ interface RegistryPattern {
 	secretType?: string;
 	pattern: RegExp;
 	name: string;
+}
+
+type ServiceAccountKey = {
+	private_key: string;
+	client_email: string;
+	private_key_id?: string;
+};
+
+function invalidGarCredentialError(): UserError {
+	return new UserError(
+		"The Google service account key must be a JSON key file or its base64-encoded form.",
+		{
+			telemetryMessage:
+				"containers registries configure invalid gar credential",
+		}
+	);
+}
+
+function tryParseJson(value: string): unknown | undefined {
+	try {
+		return JSON.parse(value) as unknown;
+	} catch {
+		return undefined;
+	}
+}
+
+function assertJsonObject(parsed: unknown): Record<string, unknown> {
+	if (typeof parsed !== "object" || parsed === null) {
+		throw invalidGarCredentialError();
+	}
+	return parsed as Record<string, unknown>;
+}
+
+function validateServiceAccountKey(
+	accountKey: Record<string, unknown>
+): ServiceAccountKey {
+	const privateKey = accountKey.private_key;
+	const clientEmail = accountKey.client_email;
+	const rawPrivateKeyId = accountKey.private_key_id;
+	if (typeof privateKey !== "string" || typeof clientEmail !== "string") {
+		throw new UserError(
+			"The Google service account key is missing required fields (private_key, client_email).",
+			{
+				telemetryMessage:
+					"containers registries configure gar credential missing fields",
+			}
+		);
+	}
+	if (privateKey.length === 0 || clientEmail.length === 0) {
+		throw new UserError(
+			"The Google service account key has an empty private_key or client_email.",
+			{
+				telemetryMessage:
+					"containers registries configure gar credential empty fields",
+			}
+		);
+	}
+	let privateKeyId: string | undefined;
+	if (rawPrivateKeyId === undefined) {
+		privateKeyId = undefined;
+	} else if (
+		typeof rawPrivateKeyId === "string" &&
+		rawPrivateKeyId.length > 0
+	) {
+		privateKeyId = rawPrivateKeyId;
+	} else {
+		throw new UserError(
+			"The Google service account key has an empty or invalid private_key_id.",
+			{
+				telemetryMessage:
+					"containers registries configure gar credential invalid private key id",
+			}
+		);
+	}
+	return {
+		private_key: privateKey,
+		client_email: clientEmail,
+		private_key_id: privateKeyId,
+	};
+}
+
+/**
+ * Validates a Google service account JSON key and returns it base64-encoded for
+ * storage as the private credential.
+ *
+ * Accepts the raw JSON key contents or its base64-encoded form. Throws a
+ * `UserError` if the key is malformed, or if `expectedEmail` (the
+ * `--gar-email` public credential) does not match the `client_email` in the key.
+ */
+export function validateAndEncodeGarKey(
+	rawKey: string,
+	expectedEmail: string
+): string {
+	const trimmed = rawKey.trim();
+
+	let base64Key: string;
+	let json: Record<string, unknown>;
+	const rawJson = tryParseJson(trimmed);
+	if (rawJson !== undefined) {
+		json = assertJsonObject(rawJson);
+		base64Key = Buffer.from(trimmed, "utf8").toString("base64");
+	} else {
+		if (trimmed.startsWith("-----BEGIN")) {
+			throw new UserError(
+				"The provided key appears to be a PEM private key. Provide the full Google service-account JSON key file, not just the private key.",
+				{
+					telemetryMessage:
+						"containers registries configure gar credential pem key",
+				}
+			);
+		}
+		base64Key = trimmed.replace(/\s+/g, "");
+		const decodedJson = tryParseJson(
+			Buffer.from(base64Key, "base64").toString("utf8")
+		);
+		if (decodedJson === undefined) {
+			throw invalidGarCredentialError();
+		}
+		json = assertJsonObject(decodedJson);
+	}
+
+	const key = validateServiceAccountKey(json);
+
+	if (key.client_email !== expectedEmail) {
+		throw new UserError(
+			`The provided --gar-email "${expectedEmail}" does not match the service account email "${key.client_email}" in the key.`,
+			{
+				telemetryMessage: "containers registries configure gar email mismatch",
+			}
+		);
+	}
+
+	return base64Key;
 }

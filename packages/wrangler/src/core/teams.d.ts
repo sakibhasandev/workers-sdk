@@ -16,7 +16,6 @@ export type Teams =
 	| "Product: AI"
 	| "Product: AI Search"
 	| "Product: Agent Memory"
-	| "Product: Web Search"
 	| "Product: Hyperdrive"
 	| "Product: Pipelines"
 	| "Product: Vectorize"
@@ -27,4 +26,6 @@ export type Teams =
 	| "Product: Tunnels"
 	| "Product: Email Service"
 	| "Product: Browser Run"
-	| "Product: Artifacts";
+	| "Product: Artifacts"
+	| "Product: Flagship"
+	| "Product: Turnstile";

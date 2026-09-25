@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { DEFAULT_COMPAT_DATE } from "@cloudflare/workers-utils";
 import {
 	runInTempDir,
 	writeWranglerConfig,
@@ -18,7 +19,6 @@ import {
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { clearOutputFilePath } from "../../output";
-import { fetchSecrets } from "../../utils/fetch-secrets";
 import { mockAccountId, mockApiToken } from "../helpers/mock-account-id";
 import { mockConsoleMethods } from "../helpers/mock-console";
 import { clearDialogs } from "../helpers/mock-dialogs";
@@ -47,15 +47,6 @@ import {
 import type { WorkerMetadata } from "@cloudflare/workers-utils";
 
 vi.mock("command-exists");
-vi.mock("../../check/commands", async (importOriginal) => {
-	return {
-		...(await importOriginal()),
-		analyseBundle() {
-			return `{}`;
-		},
-	};
-});
-vi.mock("../../utils/fetch-secrets");
 vi.mock("../../package-manager", async (importOriginal) => ({
 	...(await importOriginal()),
 	sniffUserAgent: () => "npm",
@@ -66,8 +57,11 @@ vi.mock("../../package-manager", async (importOriginal) => ({
 		};
 	},
 }));
-vi.mock("../../autoconfig/run");
-vi.mock("../../autoconfig/frameworks/utils/packages");
+vi.mock("@cloudflare/autoconfig", async (importOriginal) => ({
+	...(await importOriginal()),
+	runAutoConfig: vi.fn(),
+	getInstalledPackageVersion: vi.fn(),
+}));
 vi.mock("@cloudflare/cli-shared-helpers/command");
 
 // ─── Shared helpers ──────────────────────────────────────────────────
@@ -82,9 +76,11 @@ function setupDeployMocks() {
 	msw.use(
 		http.get("*/accounts/:accountId/r2/buckets/:bucketName", async () => {
 			return HttpResponse.json(createFetchResult({}));
-		})
+		}),
+		http.get("*/accounts/:accountId/workers/scripts/:scriptName/secrets", () =>
+			HttpResponse.json(createFetchResult([]))
+		)
 	);
-	vi.mocked(fetchSecrets).mockResolvedValue([]);
 }
 
 /** Mock the GET /workers/services/:name endpoint for versions upload */
@@ -150,6 +146,7 @@ function mockUploadVersion(has_preview = false) {
 
 /** Parse WorkerMetadata from a captured upload request */
 async function getMetadata(request: Request): Promise<WorkerMetadata> {
+	// eslint-disable-next-line @typescript-eslint/no-deprecated -- formData() is the standard Web API; only deprecated on undici's server-side types
 	const formBody = await request.clone().formData();
 	return JSON.parse(await toString(formBody.get("metadata"))) as WorkerMetadata;
 }
@@ -172,6 +169,13 @@ describe.each([
 			setImmediate(fn);
 		});
 		setIsTTY(false);
+		// Mock the secrets endpoint that checkRemoteSecretsOverride calls
+		msw.use(
+			http.get(
+				"*/accounts/:accountId/workers/scripts/:scriptName/secrets",
+				() => HttpResponse.json(createFetchResult([]))
+			)
+		);
 	});
 
 	afterEach(() => {
@@ -209,8 +213,13 @@ describe.each([
 			}) => {
 				writeWranglerConfig({ name: undefined });
 				writeWorkerSource();
-				await expect(runWrangler("deploy ./index.js")).rejects.toThrowError(
-					/You need to provide a name/
+				await expect(
+					runWrangler("deploy ./index.js")
+				).rejects.toThrowErrorMatchingInlineSnapshot(
+					`
+					[Error: You need to provide the name of your worker. Either pass it as a cli arg with --name <name> or in your config file as name = "<name>"
+					]
+				`
 				);
 			});
 		});
@@ -242,9 +251,11 @@ describe.each([
 			}) => {
 				writeWranglerConfig({ name: undefined, main: "./index.js" });
 				writeWorkerSource();
-				await expect(runWrangler("versions upload")).rejects.toThrowError(
-					/You need to provide a name/
-				);
+				await expect(runWrangler("versions upload")).rejects
+					.toThrowErrorMatchingInlineSnapshot(`
+					[Error: You need to provide the name of your worker. Either pass it as a cli arg with --name <name> or in your config file as name = "<name>"
+					]
+				`);
 			});
 		});
 	});
@@ -317,16 +328,20 @@ describe.each([
 				expect(std.out).toContain("Uploaded test-name");
 			});
 
-			it("--latest sets compatibility date to today", async ({ expect }) => {
+			it("--latest sets compatibility date to the default", async ({
+				expect,
+			}) => {
 				writeWranglerConfig({ compatibility_date: undefined });
 				writeWorkerSource();
-				// We can't assert the exact date easily, but we can verify it succeeds
-				// (it would fail with missing compat date otherwise)
-				mockUploadWorkerRequest();
+				mockUploadWorkerRequest({
+					expectedCompatibilityDate: DEFAULT_COMPAT_DATE,
+				});
 				mockSubDomainRequest();
 				await runWrangler("deploy ./index.js --latest");
 				expect(std.out).toContain("Uploaded test-name");
-				expect(std.warn).toContain("latest version of the Workers runtime");
+				expect(std.warn).toContain(
+					`Using the latest compatibility date supported by this version of Wrangler (${DEFAULT_COMPAT_DATE})`
+				);
 			});
 
 			it("errors when no compatibility_date from either source", async ({
@@ -334,9 +349,14 @@ describe.each([
 			}) => {
 				writeWranglerConfig({ compatibility_date: undefined });
 				writeWorkerSource();
-				await expect(runWrangler("deploy ./index.js")).rejects.toThrowError(
-					/A compatibility_date is required/
-				);
+				await expect(runWrangler("deploy ./index.js")).rejects
+					.toThrow(`A compatibility_date is required when uploading a Worker. Add the following to your wrangler.toml file:
+    \`\`\`
+    compatibility_date = "${DEFAULT_COMPAT_DATE}"
+
+    \`\`\`
+    Or you could pass it in your terminal as \`--compatibility-date ${DEFAULT_COMPAT_DATE}\`
+See https://developers.cloudflare.com/workers/platform/compatibility-dates for more information.`);
 			});
 		});
 
@@ -401,17 +421,23 @@ describe.each([
 				expect(metadata.compatibility_flags).toEqual(["nodejs_compat"]);
 			});
 
-			it("--latest sets compatibility date to today", async ({ expect }) => {
+			it("--latest sets compatibility date to the default", async ({
+				expect,
+			}) => {
 				writeWranglerConfig({
 					compatibility_date: undefined,
 					main: "./index.js",
 				});
 				writeWorkerSource();
 				mockGetScript();
-				mockUploadVersion();
+				const requests = mockUploadVersion();
 				await runWrangler("versions upload --latest");
+				const metadata = await getMetadata(requests[requests.length - 1]);
+				expect(metadata.compatibility_date).toEqual(DEFAULT_COMPAT_DATE);
 				expect(std.out).toContain("Uploaded test-name");
-				expect(std.warn).toContain("latest version of the Workers runtime");
+				expect(std.warn).toContain(
+					`Using the latest compatibility date supported by this version of Wrangler (${DEFAULT_COMPAT_DATE})`
+				);
 			});
 
 			it("errors when no compatibility_date from either source", async ({
@@ -425,7 +451,7 @@ describe.each([
 				// On main, versions upload calls requireAuth() before validating compat date,
 				// so we need the service metadata mock to avoid an unrelated API error
 				mockGetScript();
-				await expect(runWrangler("versions upload")).rejects.toThrowError(
+				await expect(runWrangler("versions upload")).rejects.toThrow(
 					/A compatibility_date is required/
 				);
 			});
@@ -822,6 +848,33 @@ describe.each([
 			expect(std.out).toContain("Uploaded test-name");
 		});
 
+		it("--route with --zone overrides config.routes with zone_name routes", async ({
+			expect,
+		}) => {
+			writeWranglerConfig({
+				routes: [
+					{ pattern: "config-route.example.com/*", zone_name: "example.com" },
+				],
+			});
+			writeWorkerSource();
+			mockUpdateWorkerSubdomain({ enabled: false });
+			mockUploadWorkerRequest();
+			mockGetZones(expect, "example.net", [{ id: "example-net-id" }]);
+			mockGetZoneWorkerRoutes(expect, "example-net-id");
+			mockPublishRoutesRequest({
+				routes: [
+					{ pattern: "cli-route.example.net/*", zone_name: "example.net" },
+				],
+			});
+			await runWrangler(
+				"deploy ./index.js --x-route-zones --route cli-route.example.net/* --zone example.net"
+			);
+			expect(std.out).toContain("Uploaded test-name");
+			expect(std.out).toContain(
+				"cli-route.example.net/* (zone name: example.net)"
+			);
+		});
+
 		it("uses config.routes when --route is not provided", async ({
 			expect,
 		}) => {
@@ -1153,7 +1206,10 @@ describe.each([
 
 	describe("keep_vars behavior", () => {
 		describe("deploy", () => {
-			beforeEach(setupDeployMocks);
+			beforeEach(() => {
+				setupDeployMocks();
+				mockGetSettings({ result: { bindings: [] } });
+			});
 
 			it("without --keep-vars, keepVars is not set", async ({ expect }) => {
 				writeWranglerConfig();
@@ -1193,6 +1249,7 @@ describe.each([
 		});
 
 		describe("versions upload", () => {
+			beforeEach(() => mockGetSettings({ result: { bindings: [] } }));
 			it("without --keep-vars, keepVars is not set", async ({ expect }) => {
 				writeWranglerConfig({ main: "./index.js" });
 				writeWorkerSource();
@@ -1323,12 +1380,18 @@ describe.each([
 				expect,
 			}) => {
 				writeWranglerConfig({
-					observability: { enabled: true },
+					observability: {
+						enabled: true,
+						redact_query_string: true,
+					},
 				});
 				writeWorkerSource();
 				mockUploadWorkerRequest({
 					expectedSettingsPatch: expect.objectContaining({
-						observability: { enabled: true },
+						observability: {
+							enabled: true,
+							redact_query_string: true,
+						},
 					}),
 				});
 				mockSubDomainRequest();
